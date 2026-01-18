@@ -1,0 +1,23 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nebula"
+version = "0.1.0"
+description = "Nebula Python library for space systems engineering and analysis."
+requires-python = ">=3.10"
+license = { text = "Apache 2.0" }
+authors = [{ name = "Nathan Spencer", email = "nathanss1997@gmail.com" }]
+dependencies = [
+    "numba>=0.59.0",
+    "numpy>=1.21.0",
+    "orekit-jpype[jdk4py]>=11.0.2",
+    "astropy",
+    "matplotlib",
+    "cartopy",
+    "scipy"
+    ]
+
+[tool.hatch.build.targets.wheel]
+packages = ["nebula"]
