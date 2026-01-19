@@ -11,23 +11,11 @@ from enum import Enum
 os.environ["JAVA_HOME"] = str(jdk4py.JAVA_HOME)
 vm = orekit_jpype.initVM()
 from orekit_jpype.pyhelpers import setup_orekit_curdir
-from dataclasses import dataclass
 import matplotlib.pyplot as plt
 
 setup_orekit_curdir(
     filename=os.path.join(os.path.dirname(__file__), "..", "data", "orekit-data")
 )
-
-import cartopy
-
-# Get project root (parent of nebula directory)
-project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-cartopy.config["pre_existing_data_dir"] = os.path.join(
-    project_root, "data", "cartopy"
-)  # read-only cache you ship/copy around
-cartopy.config["data_dir"] = os.path.join(
-    project_root, "data", "cartopy"
-)  # writable cache (optional)
 
 from typing import Any, Mapping, Optional, Sequence, Tuple, Union, Literal
 
@@ -84,7 +72,6 @@ def profile_force_models(
     initial_date,
     duration_s: float,
     mass_kg: float,
-    inertial_frame,
     itrf,
     earth,  # OneAxisEllipsoid
     mu: float,
@@ -503,7 +490,7 @@ def main():
         initial_date.shiftedBy(dt) for dt in range(0, int(duration) + 1, 600 * 6)
     ]
     pos = [ephem.propagate(t).getPVCoordinates().getPosition() for t in _sample_times]
-    from orekit_frames import gcrf_to_geodetic_positions
+    from nebula.transform._transform import gcrf_to_geodetic_positions
 
     lla = gcrf_to_geodetic_positions(
         [p.toArray() for p in pos],
@@ -527,7 +514,6 @@ def main():
     #     initial_date=initial_date,
     #     duration_s=3600.0 * 4,  # 1 hour
     #     mass_kg=mass_kg,
-    #     inertial_frame=inertial_frame,
     #     itrf=itrf,
     #     earth=earth,
     #     mu=mu,
