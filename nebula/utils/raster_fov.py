@@ -513,19 +513,19 @@ def _build_quadtree_from_integrals_packed(
             area = w * h
             if area <= 0:
                 # should not happen, but keep safe
-                first_child_l[idx] = -1
+                first_child_l[idx] = np.int32(-1)
                 meta_l[idx] = _meta_make(f, depth, 0)
                 continue
 
             s = _rect_sum(ii_faces[f], x0, y0, x1, y1)
 
             if s == 0:
-                first_child_l[idx] = -1
+                first_child_l[idx] = np.int32(-1)
                 meta_l[idx] = _meta_make(f, depth, 0)
                 continue
 
             if s == area:
-                first_child_l[idx] = -1
+                first_child_l[idx] = np.int32(-1)
                 meta_l[idx] = _meta_make(f, depth, 1)
                 continue
 
@@ -533,7 +533,7 @@ def _build_quadtree_from_integrals_packed(
             if depth >= max_depth:
                 # majority vote
                 state = 1 if s * 2 >= area else 0
-                first_child_l[idx] = -1
+                first_child_l[idx] = np.int32(-1)
                 meta_l[idx] = _meta_make(f, depth, state)
                 continue
 
@@ -548,7 +548,7 @@ def _build_quadtree_from_integrals_packed(
             if cos_r >= cos_tol:
                 # small enough; store majority value
                 state = 1 if s * 2 >= area else 0
-                first_child_l[idx] = -1
+                first_child_l[idx] = np.int32(-1)
                 meta_l[idx] = _meta_make(f, depth, state)
                 continue
 
@@ -556,7 +556,7 @@ def _build_quadtree_from_integrals_packed(
             meta_l[idx] = _meta_make(f, depth, 0)
 
             child0 = len(meta_l)
-            first_child_l[idx] = child0
+            first_child_l[idx] = np.int32(child0)
             nd = depth + 1
 
             for du, dv in ((0, 0), (1, 0), (0, 1), (1, 1)):
@@ -697,7 +697,7 @@ def _combine_quadtrees_packed(
                     out_state = 1 if (statea != stateb) else 0
 
             if decided == 1:
-                first_child_l[out_idx] = -1
+                first_child_l[out_idx] = np.int32(-1)
                 uv_l[out_idx] = _uv_pack(iu, iv)
                 meta_l[out_idx] = _meta_make(face, depth, out_state)
                 continue

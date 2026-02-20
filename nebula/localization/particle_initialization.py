@@ -57,6 +57,7 @@ R_BLOCK_SQUARED = R_BLOCK_EARTH * R_BLOCK_EARTH
 
 @njit(cache=True, inline="always")
 def splitmix64(x: np.uint64) -> np.uint64:
+    """Deterministic 64-bit SplitMix PRNG step."""
     x = (x + np.uint64(0x9E3779B97F4A7C15)) & np.uint64(0xFFFFFFFFFFFFFFFF)
     z = x
     z = (z ^ (z >> np.uint64(30))) * np.uint64(0xBF58476D1CE4E5B9)
@@ -66,6 +67,7 @@ def splitmix64(x: np.uint64) -> np.uint64:
 
 @njit(cache=True, inline="always")
 def u01_from_uint64(x: np.uint64) -> float:
+    """Map a uint64 to a uniform float in [0, 1)."""
     # 53-bit mantissa -> [0,1)
     return float(x >> np.uint64(11)) * 1.1102230246251565e-16
 
@@ -77,12 +79,14 @@ def u01_from_uint64(x: np.uint64) -> float:
 
 @njit(cache=True, inline="always", fastmath=True)
 def ellipsoid_intersect_scale(ux: float, uy: float, uz: float) -> float:
+    """Scale factor t such that t*(u) lies on the WGS84 ellipsoid."""
     denom = (ux * ux + uy * uy) * INV_A2 + (uz * uz) * INV_B2
     return 1.0 / math.sqrt(denom)
 
 
 @njit(cache=True, inline="always", fastmath=True)
 def ellipsoid_unit_normal_from_dir(ux: float, uy: float, uz: float):
+    """Unit surface normal at ellipsoid intersection along direction u."""
     # normal direction at the intersection point; scale cancels
     nx = ux * INV_A2
     ny = uy * INV_A2
@@ -106,6 +110,7 @@ def spacing_radius(
     h_grow: float,
     beta: float,
 ) -> float:
+    """Altitude-dependent voxel spacing model (meters)."""
     if h <= h_fade_start:
         return r_terrain
     if h <= h_dense_max:
@@ -133,6 +138,7 @@ def make_altitude_bands_numba(
     growth: float,
     dh_max: float,
 ):
+    """Construct monotonic altitude band edges for candidate generation."""
     edges = np.empty(MAX_EDGES, dtype=np.float32)
     k = 0
 
@@ -193,6 +199,7 @@ def compute_band_counts_occ_numba(
     h_grow: float,
     beta: float,
 ):
+    """Compute per-band candidate counts and unique-voxel upper bounds."""
     nb = n_edges - 1
     counts = np.empty(nb, dtype=np.int64)
     keep_upper = np.empty(nb, dtype=np.int64)
@@ -255,6 +262,7 @@ OFFSET = 1 << 20  # abs(index) must be < OFFSET for collision-free packing
 
 @njit(cache=True, inline="always")
 def pack_key(ix: int, iy: int, iz: int) -> np.uint64:
+    """Pack 3 integer voxel indices into one 64-bit key."""
     return (
         np.uint64(ix + OFFSET)
         | (np.uint64(iy + OFFSET) << np.uint64(SHIFT))
@@ -269,6 +277,7 @@ def pack_key(ix: int, iy: int, iz: int) -> np.uint64:
 
 @njit(cache=True, inline="always")
 def next_pow2_u64(x: np.uint64) -> np.uint64:
+    """Return the next power of two >= x."""
     if x <= np.uint64(1):
         return np.uint64(1)
     x -= np.uint64(1)
@@ -283,6 +292,7 @@ def next_pow2_u64(x: np.uint64) -> np.uint64:
 
 @njit(cache=True, inline="always")
 def hash_pos(key: np.uint64, mask: np.uint64) -> np.uint64:
+    """Hash key into table slot using multiplicative hashing and mask."""
     # Knuth multiplicative hashing
     return (key * np.uint64(11400714819323198485)) & mask
 
@@ -304,6 +314,7 @@ def generate_chunk_points_and_keys(
     seed: np.uint64,
     base_idx: np.uint64,
 ):
+    """Generate one chunk of ECEF candidates and their voxel keys."""
     pts = np.empty((n, 3), dtype=np.float32)
     keys = np.empty(n, dtype=np.uint64)
 
@@ -419,6 +430,19 @@ def make_coarse_candidates_ecef_fast(
     # RNG seed
     seed_i64: int,
 ):
+    """
+    Generate coarse ECEF particle candidates with voxel-based thinning.
+
+    This is the high-performance Numba core used by
+    ``make_coarse_candidates_ecef``. It samples points over altitude bands
+    around WGS84, then keeps at most one candidate per voxel (per band) using
+    an open-addressing hash table.
+
+    Returns
+    -------
+    np.ndarray
+        ECEF points in meters with shape ``(N, 3)`` and dtype ``float32``.
+    """
     seed = np.uint64(seed_i64)
 
     edges, n_edges = make_altitude_bands_numba(
@@ -511,6 +535,12 @@ def make_coarse_candidates_ecef_fast(
 def los_clear_sphere(
     ox: float, oy: float, oz: float, px: float, py: float, pz: float
 ) -> bool:
+    """
+    Return True when the segment observer->point does not intersect blocker.
+
+    The blocker is a sphere centered at the origin with radius
+    ``R_BLOCK_EARTH``.
+    """
     dx = px - ox
     dy = py - oy
     dz = pz - oz
@@ -537,6 +567,24 @@ def los_clear_sphere(
 def los_mask_all_observers(
     points_ecef: np.ndarray, observers_ecef: np.ndarray
 ) -> np.ndarray:
+    """
+    Compute line-of-sight keep mask for candidates against all observers.
+
+    A candidate is marked ``True`` only if it is line-of-sight clear from every
+    observer according to ``los_clear_sphere``.
+
+    Parameters
+    ----------
+    points_ecef : np.ndarray
+        Candidate points, shape ``(N, 3)`` in ECEF meters.
+    observers_ecef : np.ndarray
+        Observer positions, shape ``(M, 3)`` in ECEF meters.
+
+    Returns
+    -------
+    np.ndarray
+        Boolean mask of shape ``(N,)``.
+    """
     n = points_ecef.shape[0]
     m = observers_ecef.shape[0]
     keep = np.empty(n, dtype=np.bool_)
@@ -583,6 +631,37 @@ def make_coarse_candidates_ecef(
     chunk_size: int = 400_000,  # memory/speed trade; 200k–800k typical
     seed: int = 123,
 ) -> np.ndarray:
+    """
+    Build a coarse set of localization particles in ECEF coordinates.
+
+    This is the public wrapper around ``make_coarse_candidates_ecef_fast`` and
+    the recommended entry point for initializing a coarse candidate cloud.
+
+    Parameters
+    ----------
+    h_min, h_fade_start, h_dense_max, h_max : float, optional
+        Altitude model breakpoints in meters.
+    dh_surface, dh0, growth, dh_max : float, optional
+        Altitude band construction controls.
+    occupancy : float, optional
+        Target voxel occupancy used to estimate candidate counts.
+    min_per_band, max_per_band : int, optional
+        Candidate count clamps per altitude band.
+    keep_inflate : float, optional
+        Safety factor for estimating unique voxels per shell.
+    r_terrain, r_air, h_grow, beta : float, optional
+        Spacing model parameters controlling voxel size vs altitude.
+    chunk_size : int, optional
+        Streaming generation chunk size.
+    seed : int, optional
+        Deterministic random seed.
+
+    Returns
+    -------
+    np.ndarray
+        Candidate ECEF points with shape ``(N, 3)`` and dtype ``float32``
+        (meters).
+    """
     return make_coarse_candidates_ecef_fast(
         h_min,
         h_fade_start,
@@ -610,13 +689,6 @@ def make_coarse_candidates_ecef(
 # =============================================================================
 
 if __name__ == "__main__":
-    try:
-        set_num_threads(os.cpu_count() or 1)
-    except Exception:
-        pass
-
-    print("Numba threads:", get_num_threads(), flush=True)
-
     # Warmup compile (do not time)
     _ = make_coarse_candidates_ecef(occupancy=0.10, seed=1, chunk_size=200_000)
     print("Warmup done.", flush=True)
