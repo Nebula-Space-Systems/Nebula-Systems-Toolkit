@@ -1,3 +1,9 @@
 .venv/
 __pycache__/
 *.pyc
+nebula_old/
+deprecated/
+.pytest_cache/
+
+test_access_duration.py
+test_propagate.py

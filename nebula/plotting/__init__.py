@@ -1,6 +1,6 @@
 from .map import (
     make_basemap,
-    add_trace,
+    add_geodesic_trace,
     DARK,
     LIGHT,
     DARK_NO_GRID,
