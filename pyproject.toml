@@ -10,14 +10,36 @@ requires-python = ">=3.10"
 license = { text = "Apache 2.0" }
 authors = [{ name = "Nathan Spencer", email = "nathanss1997@gmail.com" }]
 dependencies = [
+    "numpy>=1.22",
     "numba>=0.59.0",
-    "numpy>=1.21.0",
+]
+
+[project.optional-dependencies]
+propagation = [
+    "astropy>=5.0",
     "orekit-jpype[jdk4py]>=11.0.2",
-    "astropy",
-    "matplotlib",
-    "cartopy",
-    "scipy"
-    ]
+]
+plotting = [
+    "matplotlib>=3.6",
+    "cartopy>=0.21",
+    "shapely>=2.0",
+]
+test = [
+    "pytest>=8.0",
+    "astropy>=5.0",
+    "orekit-jpype[jdk4py]>=11.0.2",
+    "matplotlib>=3.6",
+    "cartopy>=0.21",
+    "shapely>=2.0",
+]
+all = [
+    "astropy>=5.0",
+    "orekit-jpype[jdk4py]>=11.0.2",
+    "matplotlib>=3.6",
+    "cartopy>=0.21",
+    "shapely>=2.0",
+    "pytest>=8.0",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["nebula"]
