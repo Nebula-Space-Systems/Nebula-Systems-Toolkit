@@ -8,5 +8,8 @@ from nebula.transform._geodetic2aer import *
 from nebula.transform._aer2geodetic import *
 from nebula.transform._ecef2aer import *
 from nebula.transform._aer2ecef import *
+from nebula.transform._coarse_eci2itrf import *
+from nebula.transform._coarse_eci2geodetic import *
+from nebula.transform._timed_rotations import *
 
 from nebula.transform.constants import *
