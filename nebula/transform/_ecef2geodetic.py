@@ -120,6 +120,20 @@ def ecef2geodetic(x_m: float, y_m: float, z_m: float):
     return lat, lon, h
 
 
+@njit(cache=True, inline="always")
+def ecef2geodetic_deg(x_m: float, y_m: float, z_m: float):
+    """
+    Scalar ECEF -> geodetic conversion with angular outputs in degrees.
+
+    Returns
+    -------
+    (lat_deg, lon_deg, h_m) : tuple[float, float, float]
+        Geodetic latitude [deg], wrapped longitude [deg] in [-180, 180), height [m].
+    """
+    lat_rad, lon_rad, h_m = ecef2geodetic(x_m, y_m, z_m)
+    return lat_rad * (180.0 / math.pi), lon_rad * (180.0 / math.pi), h_m
+
+
 @njit(cache=True, parallel=True)
 def ecef2geodetic_vec_xyz(x_m: np.ndarray, y_m: np.ndarray, z_m: np.ndarray):
     """
@@ -190,3 +204,44 @@ def ecef2geodetic_vec_ecef(r_ecef_m: np.ndarray):
         h[i] = hi
 
     return lat, lon, h
+
+
+@njit(cache=True, parallel=True)
+def ecef2geodetic_vec_ecef_deg(r_ecef_m: np.ndarray, wrap_lon: bool = True):
+    """
+    Vectorized ECEF -> geodetic conversion with angular outputs in degrees.
+
+    Parameters
+    ----------
+    r_ecef_m : np.ndarray
+        2D array of shape (N, 3) containing ECEF positions [m].
+    wrap_lon : bool
+        Keep longitude wrapped to [-180, 180). Included for API compatibility.
+        Values from `ecef2geodetic` are already wrapped by construction.
+
+    Returns
+    -------
+    lat_deg : np.ndarray
+        Geodetic latitude in degrees, shape (N,).
+    lon_deg : np.ndarray
+        Wrapped longitude in degrees in [-180, 180), shape (N,).
+    h_m : np.ndarray
+        Height above WGS84 ellipsoid in meters, shape (N,).
+    """
+    lat_rad, lon_rad, h_m = ecef2geodetic_vec_ecef(r_ecef_m)
+    n = lat_rad.shape[0]
+    lat_deg = np.empty(n, dtype=np.float64)
+    lon_deg = np.empty(n, dtype=np.float64)
+
+    rad2deg = 180.0 / math.pi
+    for i in prange(n):
+        lat_deg[i] = lat_rad[i] * rad2deg
+        lon_deg[i] = lon_rad[i] * rad2deg
+
+    if wrap_lon:
+        for i in range(n):
+            x = lon_deg[i] + 180.0
+            x = x - 360.0 * math.floor(x / 360.0)
+            lon_deg[i] = x - 180.0
+
+    return lat_deg, lon_deg, h_m

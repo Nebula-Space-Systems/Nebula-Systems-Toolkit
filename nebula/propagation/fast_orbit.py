@@ -21,6 +21,14 @@ import math
 
 import numpy as np
 from numba import njit, prange
+from nebula.transform._coarse_eci2itrf import (
+    _coarse_eci_to_itrf_pv_iau76_shortnut,
+    _coarse_j2_axis_native_iau76_shortnut,
+)
+from nebula.transform._ecef2geodetic import (
+    ecef2geodetic_deg as _ecef2geodetic_deg,
+    ecef2geodetic_vec_ecef_deg as _ecef2geodetic_vec_ecef_deg,
+)
 
 try:
     from astropy.time import Time as AstropyTime  # type: ignore
@@ -39,12 +47,6 @@ J2Mode = Literal["secular", "osculating"]
 # Constants (WGS84 / Earth)
 # ---------------------------------------------------------------------------
 WGS84_A = 6378137.0
-WGS84_B = 6356752.314245179
-WGS84_A2 = WGS84_A * WGS84_A
-WGS84_B2 = WGS84_B * WGS84_B
-WGS84_B2_OVER_A2 = WGS84_B2 / WGS84_A2
-WGS84_E2 = 1.0 - WGS84_B2_OVER_A2
-WGS84_EP2 = (WGS84_A2 - WGS84_B2) / WGS84_B2
 
 EARTH_MU = 3.986004418e14  # [m^3/s^2]
 EARTH_J2 = 1.08262668e-3
@@ -54,284 +56,6 @@ J2000_JD = 2451545.0
 # Cache padding to reduce reallocations
 _CACHE_MARGIN = 64
 _HERMITE_PAR_THRESHOLD = 4096
-
-# ---------------------------------------------------------------------------
-# Better ECI->ITRF rotation (still numba): IAU-76 precession + 10-term
-# IAU-1980 nutation + GAST (+ optional epoch polar motion).
-# ---------------------------------------------------------------------------
-
-DAS2R = math.pi / (180.0 * 3600.0)  # arcsec -> rad
-TURNAS = 1296000.0  # arcsec in a full circle (360 deg)
-
-
-@njit(cache=False, fastmath=True, inline="always")
-def _mod2pi_rad(x: float) -> float:
-    twopi = 2.0 * math.pi
-    y = x - twopi * math.floor(x / twopi)
-    return y
-
-
-@njit(cache=False, fastmath=True, inline="always")
-def _mod_arcsec(x_as: float, turn_as: float = TURNAS) -> float:
-    # positive modulo for arcseconds
-    y = x_as - turn_as * math.floor(x_as / turn_as)
-    return y
-
-
-@njit(cache=False, fastmath=True, inline="always")
-def _rot1(x: float, y: float, z: float, ang: float):
-    c = math.cos(ang)
-    s = math.sin(ang)
-    # rotation about +x
-    return x, c * y + s * z, -s * y + c * z
-
-
-@njit(cache=False, fastmath=True, inline="always")
-def _rot2(x: float, y: float, z: float, ang: float):
-    c = math.cos(ang)
-    s = math.sin(ang)
-    # rotation about +y
-    return c * x - s * z, y, s * x + c * z
-
-
-@njit(cache=False, fastmath=True, inline="always")
-def _rot3(x: float, y: float, z: float, ang: float):
-    c = math.cos(ang)
-    s = math.sin(ang)
-    # rotation about +z (same convention as your _eci_to_ecef_simple)
-    return c * x + s * y, -s * x + c * y, z
-
-
-@njit(cache=False, fastmath=True)
-def _mean_obliquity_iau2006_rad(T: float) -> float:
-    # IAU 2006 mean obliquity, arcsec polynomial -> rad
-    # eps0["] = 84381.406 - 46.836769 T - 0.0001831 T^2 + 0.00200340 T^3 - 5.76e-7 T^4 - 4.34e-8 T^5
-    t2 = T * T
-    t3 = t2 * T
-    t4 = t2 * t2
-    t5 = t4 * T
-    eps0_as = (
-        84381.406
-        - 46.836769 * T
-        - 0.0001831 * t2
-        + 0.00200340 * t3
-        - 5.76e-7 * t4
-        - 4.34e-8 * t5
-    )
-    return eps0_as * DAS2R
-
-
-@njit(cache=False, fastmath=True)
-def _mean_obliquity_iau1980_rad(T: float) -> float:
-    # IAU-1980 mean obliquity (arcsec -> rad), consistent with 1980 nutation series.
-    t2 = T * T
-    t3 = t2 * T
-    eps0_as = 84381.448 - 46.8150 * T - 0.00059 * t2 + 0.001813 * t3
-    return eps0_as * DAS2R
-
-
-@njit(cache=False, fastmath=True)
-def _fund_args_simon94_rad(jd_tt: float):
-    # Simon et al. (1994) fundamental arguments (as in SOFA nut00b) in arcsec
-    T = (jd_tt - J2000_JD) / 36525.0
-    t2 = T * T
-    t3 = t2 * T
-    t4 = t2 * t2
-
-    el_as = _mod_arcsec(
-        485868.249036
-        + 1717915923.2178 * T
-        + 31.8792 * t2
-        + 0.051635 * t3
-        - 0.00024470 * t4
-    )
-    elp_as = _mod_arcsec(
-        1287104.79305
-        + 129596581.0481 * T
-        - 0.5532 * t2
-        + 0.000136 * t3
-        - 0.00001149 * t4
-    )
-    f_as = _mod_arcsec(
-        335779.526232
-        + 1739527262.8478 * T
-        - 12.7512 * t2
-        - 0.001037 * t3
-        + 0.00000417 * t4
-    )
-    d_as = _mod_arcsec(
-        1072260.70369
-        + 1602961601.2090 * T
-        - 6.3706 * t2
-        + 0.006593 * t3
-        - 0.00003169 * t4
-    )
-    om_as = _mod_arcsec(
-        450160.398036 - 6962890.5431 * T + 7.4722 * t2 + 0.007702 * t3 - 0.00005939 * t4
-    )
-
-    return el_as * DAS2R, elp_as * DAS2R, f_as * DAS2R, d_as * DAS2R, om_as * DAS2R, T
-
-
-@njit(cache=False, fastmath=True)
-def _nutation_short_rad(jd_tt: float):
-    # Truncated IAU-1980 nutation (10 largest terms), coefficients in 0.0001 arcsec.
-    # This is still lightweight but significantly more accurate than a 4-term model.
-    T = (jd_tt - J2000_JD) / 36525.0
-    t2 = T * T
-    t3 = t2 * T
-
-    # Fundamental arguments (deg -> rad)
-    D = math.radians(
-        297.85036 + 445267.111480 * T - 0.0019142 * t2 + t3 / 189474.0
-    )
-    M = math.radians(357.52772 + 35999.050340 * T - 0.0001603 * t2 - t3 / 300000.0)
-    Mp = math.radians(134.96298 + 477198.867398 * T + 0.0086972 * t2 + t3 / 56250.0)
-    F = math.radians(93.27191 + 483202.017538 * T - 0.0036825 * t2 + t3 / 327270.0)
-    om = math.radians(125.04452 - 1934.136261 * T + 0.0020708 * t2 + t3 / 450000.0)
-
-    D = _mod2pi_rad(D)
-    M = _mod2pi_rad(M)
-    Mp = _mod2pi_rad(Mp)
-    F = _mod2pi_rad(F)
-    om = _mod2pi_rad(om)
-
-    arg1 = om
-    arg2 = 2.0 * Mp - 2.0 * F + 2.0 * om
-    arg3 = 2.0 * Mp + 2.0 * om
-    arg4 = 2.0 * om
-    arg5 = M
-    arg6 = M + 2.0 * Mp - 2.0 * F + 2.0 * om
-    arg7 = 2.0 * Mp + om
-    arg8 = M + om
-    arg9 = D
-    arg10 = M - 2.0 * Mp + 2.0 * F
-
-    dpsi_1e4as = (
-        (-171996.0 - 174.2 * T) * math.sin(arg1)
-        + (-13187.0 - 1.6 * T) * math.sin(arg2)
-        + (-2274.0 - 0.2 * T) * math.sin(arg3)
-        + (2062.0 + 0.2 * T) * math.sin(arg4)
-        + (1426.0 - 3.4 * T) * math.sin(arg5)
-        + (712.0 + 0.1 * T) * math.sin(arg6)
-        + (-517.0 + 1.2 * T) * math.sin(arg7)
-        + (-386.0 - 0.4 * T) * math.sin(arg8)
-        + (-301.0 + 0.0 * T) * math.sin(arg9)
-        + (217.0 - 0.5 * T) * math.sin(arg10)
-    )
-    deps_1e4as = (
-        (92025.0 + 8.9 * T) * math.cos(arg1)
-        + (5736.0 - 3.1 * T) * math.cos(arg2)
-        + (977.0 - 0.5 * T) * math.cos(arg3)
-        + (-895.0 + 0.5 * T) * math.cos(arg4)
-        + (54.0 - 0.1 * T) * math.cos(arg5)
-        + (-7.0 + 0.0 * T) * math.cos(arg6)
-        + (224.0 - 0.6 * T) * math.cos(arg7)
-        + (200.0 + 0.0 * T) * math.cos(arg8)
-        + (0.0 + 0.0 * T) * math.cos(arg9)
-        + (-5.0 + 0.0 * T) * math.cos(arg10)
-    )
-
-    conv = DAS2R * 1.0e-4
-    return dpsi_1e4as * conv, deps_1e4as * conv, om, T
-
-
-@njit(cache=False, fastmath=True)
-def _j2_axis_eci_iau76_shortnut(jd_tt: float):
-    """
-    Unit vector of Earth's figure/rotation axis expressed in the *native inertial*
-    frame (same frame as your propagated r,v), using the same IAU-76 precession +
-    10-term nutation model used for ECI->ITRF rotation.
-    This removes the big mismatch at far-from-J2000 epochs (e.g., year 2050),
-    where Earth's pole is not aligned with inertial +Z.
-    """
-    # Precession angles (IAU-76)
-    T = (jd_tt - J2000_JD) / 36525.0
-    t2 = T * T
-    t3 = t2 * T
-    zeta_as = 2306.2181 * T + 0.30188 * t2 + 0.017998 * t3
-    theta_as = 2004.3109 * T - 0.42665 * t2 - 0.041833 * t3
-    z_as = 2306.2181 * T + 1.09468 * t2 + 0.018203 * t3
-    zeta = zeta_as * DAS2R
-    theta = theta_as * DAS2R
-    zang = z_as * DAS2R
-    # Nutation angles
-    dpsi, deps, _om, _T = _nutation_short_rad(jd_tt)
-    eps0 = _mean_obliquity_iau1980_rad(T)
-    eps = eps0 + deps
-    # Earth's axis in TOD is simply +Z = (0,0,1). Convert TOD -> inertial by
-    # applying the inverse of the forward (precession+nutation) sequence.
-    x, y, z0 = 0.0, 0.0, 1.0
-    # Inverse nutation: undo R1(-eps) R3(-dpsi) R1(eps0)
-    x, y, z0 = _rot1(x, y, z0, eps)
-    x, y, z0 = _rot3(x, y, z0, dpsi)
-    x, y, z0 = _rot1(x, y, z0, -eps0)
-    # Inverse precession: undo R3(-z) R2(theta) R3(-zeta)
-    x, y, z0 = _rot3(x, y, z0, zang)
-    x, y, z0 = _rot2(x, y, z0, -theta)
-    x, y, z0 = _rot3(x, y, z0, zeta)
-    n = math.sqrt(x * x + y * y + z0 * z0)
-    return x / n, y / n, z0 / n
-
-
-# ---------------------------------------------------------------------------
-# Fast geodetic conversion (ECEF -> lat/lon/alt)
-# ---------------------------------------------------------------------------
-@njit(cache=False, fastmath=True, inline="always")
-def _ecef2geodetic_deg(x_m: float, y_m: float, z_m: float):
-    lon = math.atan2(y_m, x_m)
-    p = math.hypot(x_m, y_m)
-
-    if p == 0.0 and z_m == 0.0:
-        return 0.0, 0.0, -WGS84_A
-
-    if p < 1e-12:
-        lat = 0.5 * math.pi if z_m >= 0.0 else -0.5 * math.pi
-        h = abs(z_m) - WGS84_B
-        lon = 0.0
-        return lat * (180.0 / math.pi), lon * (180.0 / math.pi), h
-
-    theta = math.atan2(z_m * WGS84_A, p * WGS84_B)
-    st = math.sin(theta)
-    ct = math.cos(theta)
-
-    st3 = st * st * st
-    ct3 = ct * ct * ct
-    lat = math.atan2(
-        z_m + WGS84_EP2 * WGS84_B * st3,
-        p - WGS84_E2 * WGS84_A * ct3,
-    )
-
-    sphi = math.sin(lat)
-    cphi = math.cos(lat)
-    N = WGS84_A / math.sqrt(1.0 - WGS84_E2 * sphi * sphi)
-    h = p / cphi - N
-
-    return lat * (180.0 / math.pi), lon * (180.0 / math.pi), h
-
-
-@njit(cache=False, fastmath=True, parallel=True)
-def _ecef2geodetic_vec_ecef_deg(r_ecef_m: np.ndarray, wrap_lon: bool = True):
-    r = np.ascontiguousarray(r_ecef_m)
-    n = r.shape[0]
-
-    lat = np.empty(n, np.float64)
-    lon = np.empty(n, np.float64)
-    alt = np.empty(n, np.float64)
-
-    for i in prange(n):
-        la, lo, hi = _ecef2geodetic_deg(r[i, 0], r[i, 1], r[i, 2])
-        lat[i] = la
-        lon[i] = lo
-        alt[i] = hi
-
-    if wrap_lon:
-        for i in range(n):
-            x = lon[i] + 180.0
-            x = x - 360.0 * math.floor(x / 360.0)
-            lon[i] = x - 180.0
-
-    return lat, lon, alt
 
 
 # ---------------------------------------------------------------------------
@@ -586,7 +310,7 @@ def _propagate_chain_uniform_j2(
 
         jd_ut1 = epoch_ut1_jd + t / 86400.0
         jd_tt = epoch_tt_jd + t / 86400.0
-        x, y, z, vx_e, vy_e, vz_e = _eci_to_ecef_iau76_shortnut(
+        x, y, z, vx_e, vy_e, vz_e = _coarse_eci_to_itrf_pv_iau76_shortnut(
             rx, ry, rz, vx, vy, vz, jd_ut1, jd_tt, xp_rad, yp_rad
         )
 
@@ -607,116 +331,6 @@ def _propagate_chain_uniform_j2(
         vI[out_i, 2] = vz_e
 
     return rN, vN, rI, vI
-
-
-@njit(cache=False, fastmath=True)
-def _gmst_vallado_rad(jd_ut1: float) -> float:
-    d = jd_ut1 - J2000_JD
-    T = d / 36525.0
-    gmst_deg = (
-        280.46061837
-        + 360.98564736629 * d
-        + 0.000387933 * T * T
-        - (T * T * T) / 38710000.0
-    )
-    gmst_deg = gmst_deg - 360.0 * math.floor(gmst_deg / 360.0)
-    return gmst_deg * (math.pi / 180.0)
-
-
-@njit(cache=False, fastmath=True, inline="always")
-def _rot1_cs(x, y, z, c, s):
-    return x, c * y + s * z, -s * y + c * z
-
-
-@njit(cache=False, fastmath=True, inline="always")
-def _rot2_cs(x, y, z, c, s):
-    return c * x - s * z, y, s * x + c * z
-
-
-@njit(cache=False, fastmath=True, inline="always")
-def _rot3_cs(x, y, z, c, s):
-    return c * x + s * y, -s * x + c * y, z
-
-
-@njit(cache=False, fastmath=True)
-def _eci_to_ecef_iau76_shortnut(
-    rx, ry, rz, vx, vy, vz, jd_ut1, jd_tt, xp_rad, yp_rad
-):
-    T = (jd_tt - J2000_JD) / 36525.0
-    t2 = T * T
-    t3 = t2 * T
-
-    zeta = (2306.2181 * T + 0.30188 * t2 + 0.017998 * t3) * DAS2R
-    theta = (2004.3109 * T - 0.42665 * t2 - 0.041833 * t3) * DAS2R
-    zang = (2306.2181 * T + 1.09468 * t2 + 0.018203 * t3) * DAS2R
-
-    # Precession P = R3(-z) R2(theta) R3(-zeta)
-    # cos(-a)=cos(a), sin(-a)=-sin(a)
-    c = math.cos(zeta)
-    s = -math.sin(zeta)
-    rx, ry, rz = _rot3_cs(rx, ry, rz, c, s)
-    vx, vy, vz = _rot3_cs(vx, vy, vz, c, s)
-
-    c = math.cos(theta)
-    s = math.sin(theta)
-    rx, ry, rz = _rot2_cs(rx, ry, rz, c, s)
-    vx, vy, vz = _rot2_cs(vx, vy, vz, c, s)
-
-    c = math.cos(zang)
-    s = -math.sin(zang)
-    rx, ry, rz = _rot3_cs(rx, ry, rz, c, s)
-    vx, vy, vz = _rot3_cs(vx, vy, vz, c, s)
-
-    # Nutation (10-term truncated IAU-1980 series)
-    dpsi, deps, om, _T = _nutation_short_rad(jd_tt)
-    eps0 = _mean_obliquity_iau1980_rad(T)
-    eps = eps0 + deps
-
-    # N = R1(-eps) R3(-dpsi) R1(eps0)
-    c = math.cos(eps0)
-    s = math.sin(eps0)
-    rx, ry, rz = _rot1_cs(rx, ry, rz, c, s)
-    vx, vy, vz = _rot1_cs(vx, vy, vz, c, s)
-
-    c = math.cos(dpsi)
-    s = -math.sin(dpsi)
-    rx, ry, rz = _rot3_cs(rx, ry, rz, c, s)
-    vx, vy, vz = _rot3_cs(vx, vy, vz, c, s)
-
-    c = math.cos(eps)
-    s = -math.sin(eps)
-    rx, ry, rz = _rot1_cs(rx, ry, rz, c, s)
-    vx, vy, vz = _rot1_cs(vx, vy, vz, c, s)
-
-    gmst = _gmst_vallado_rad(jd_ut1)
-    eqeq = (
-        dpsi * math.cos(eps)
-        + (0.00264 * math.sin(om) + 0.000063 * math.sin(2.0 * om)) * DAS2R
-    )
-    gast = _mod2pi_rad(gmst + eqeq)
-
-    c = math.cos(gast)
-    s = math.sin(gast)
-    x, y, z = _rot3_cs(rx, ry, rz, c, s)
-    vx_e, vy_e, vz_e = _rot3_cs(vx, vy, vz, c, s)
-
-    # rotating frame correction
-    vx_e = vx_e + EARTH_OMEGA * y
-    vy_e = vy_e - EARTH_OMEGA * x
-
-    # Optional polar motion (PEF -> ITRF), approximated as constant over the cache.
-    if xp_rad != 0.0 or yp_rad != 0.0:
-        c = math.cos(-yp_rad)
-        s = math.sin(-yp_rad)
-        x, y, z = _rot1_cs(x, y, z, c, s)
-        vx_e, vy_e, vz_e = _rot1_cs(vx_e, vy_e, vz_e, c, s)
-
-        c = math.cos(-xp_rad)
-        s = math.sin(-xp_rad)
-        x, y, z = _rot2_cs(x, y, z, c, s)
-        vx_e, vy_e, vz_e = _rot2_cs(vx_e, vy_e, vz_e, c, s)
-
-    return x, y, z, vx_e, vy_e, vz_e
 
 
 @njit(cache=False, fastmath=True)
@@ -762,7 +376,7 @@ def _propagate_batch(
         jd_ut1 = epoch_ut1_jd + t / 86400.0
         jd_tt = epoch_tt_jd + t / 86400.0
 
-        x, y, z, vx_e, vy_e, vz_e = _eci_to_ecef_iau76_shortnut(
+        x, y, z, vx_e, vy_e, vz_e = _coarse_eci_to_itrf_pv_iau76_shortnut(
             rx, ry, rz, vx, vy, vz, jd_ut1, jd_tt, xp_rad, yp_rad
         )
 
@@ -948,7 +562,7 @@ def _fill_uniform_kepler_into(
         jd_ut1 = epoch_ut1_jd + t * inv_day
         jd_tt = epoch_tt_jd + t * inv_day
 
-        x, y, z, vx_e, vy_e, vz_e = _eci_to_ecef_iau76_shortnut(
+        x, y, z, vx_e, vy_e, vz_e = _coarse_eci_to_itrf_pv_iau76_shortnut(
             rx, ry, rz, vx, vy, vz, jd_ut1, jd_tt, xp_rad, yp_rad
         )
         rI[idx, 0], rI[idx, 1], rI[idx, 2] = x, y, z
@@ -1089,7 +703,7 @@ class FastOrbit:
         #   enable_j2=True, j2_mode="osculating"
         self._use_j2_cart = bool(self.enable_j2 and self.j2_mode == "osculating")
         if self.enable_j2:
-            kx, ky, kz = _j2_axis_eci_iau76_shortnut(self._epoch_tt_jd)
+            kx, ky, kz = _coarse_j2_axis_native_iau76_shortnut(self._epoch_tt_jd)
         else:
             kx, ky, kz = 0.0, 0.0, 1.0
         self._j2_kx = float(kx)
@@ -1136,7 +750,7 @@ class FastOrbit:
             float(self.M0_rad),
             float(self.mu),
         )
-        x, y, z, vx_e, vy_e, vz_e = _eci_to_ecef_iau76_shortnut(
+        x, y, z, vx_e, vy_e, vz_e = _coarse_eci_to_itrf_pv_iau76_shortnut(
             rx,
             ry,
             rz,
@@ -1647,7 +1261,7 @@ def propagate_constellation_pv(
 
             jd_ut1 = epoch_ut1_jd + t / 86400.0
             jd_tt = epoch_tt_jd + t / 86400.0
-            x, y, z, vx_e, vy_e, vz_e = _eci_to_ecef_iau76_shortnut(
+            x, y, z, vx_e, vy_e, vz_e = _coarse_eci_to_itrf_pv_iau76_shortnut(
                 rx, ry, rz, vx, vy, vz, jd_ut1, jd_tt, xp_rad, yp_rad
             )
 
@@ -1659,7 +1273,3 @@ def propagate_constellation_pv(
             vI[s, i, 2] = vz_e
 
     return rN, vN, rI, vI
-
-
-
-# Inline self-tests were migrated to the pytest suite under `tests/`.

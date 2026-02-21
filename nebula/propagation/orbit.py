@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Tuple, Optional, Sequence
 import math
+import threading
 
 import numpy as np
 from numba import njit
@@ -17,44 +18,113 @@ import os
 import orekit_jpype
 
 _OREKIT_READY = False
+_OREKIT_INIT_LOCK = threading.Lock()
+_OREKIT_DATA_PATH: Optional[str] = None
+_OREKIT_FAULTHANDLER_DISABLED = False
+
+class _LazyJavaProxy:
+    """
+    Lightweight proxy for lazily bound JPype Java classes.
+    """
+
+    __slots__ = ("_name", "_target")
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+        self._target = None
+
+    def bind(self, target) -> None:
+        self._target = target
+
+    def _ensure_target(self):
+        if self._target is None:
+            initialize_orekit()
+        if self._target is None:
+            raise RuntimeError(f"{self._name} is not available (Orekit JVM not initialized)")
+        return self._target
+
+    def __getattr__(self, item):
+        return getattr(self._ensure_target(), item)
+
+    def __call__(self, *args, **kwargs):
+        return self._ensure_target()(*args, **kwargs)
+
+
+# Stable exported symbols; targets are bound lazily after JVM startup.
+FramesFactory = _LazyJavaProxy("FramesFactory")
+TimeScalesFactory = _LazyJavaProxy("TimeScalesFactory")
+AbsoluteDate = _LazyJavaProxy("AbsoluteDate")
+IERSConventions = _LazyJavaProxy("IERSConventions")
 
 
 def initialize_orekit(*, data_path: Optional[str] = None) -> None:
     """
     Initialize JVM + Orekit data providers once for this process.
 
-    Callers can invoke this explicitly early in application startup. The module
-    also calls it once during import to preserve the current convenience behavior.
+    This is safe to call repeatedly; initialization is guarded and only happens
+    once per process.
     """
-    global _OREKIT_READY
+    global _OREKIT_READY, _OREKIT_DATA_PATH, _OREKIT_FAULTHANDLER_DISABLED
+    global FramesFactory, TimeScalesFactory, AbsoluteDate, IERSConventions
+
     if _OREKIT_READY:
         return
 
-    os.environ.setdefault("JAVA_HOME", str(jdk4py.JAVA_HOME))
-    orekit_jpype.initVM()
-    from orekit_jpype.pyhelpers import setup_orekit_curdir
+    with _OREKIT_INIT_LOCK:
+        if _OREKIT_READY:
+            return
 
-    if data_path is None:
-        data_path = os.path.join(
-            os.path.dirname(__file__),
-            "..",
-            "..",
-            "data",
-            "orekit-data",
+        # On Windows, CPython faulthandler + embedded JVM (JPype/Orekit) can
+        # emit spurious fatal access-violation dumps at process teardown.
+        # Disable faulthandler before starting the JVM to keep shutdown stable.
+        if os.name == "nt":
+            try:
+                import faulthandler
+
+                if faulthandler.is_enabled():
+                    faulthandler.disable()
+                    _OREKIT_FAULTHANDLER_DISABLED = True
+            except Exception:
+                pass
+
+        os.environ.setdefault("JAVA_HOME", str(jdk4py.JAVA_HOME))
+        orekit_jpype.initVM()
+        from orekit_jpype.pyhelpers import setup_orekit_curdir
+
+        if data_path is None:
+            data_path = os.path.join(
+                os.path.dirname(__file__),
+                "..",
+                "..",
+                "data",
+                "orekit-data",
+            )
+        data_path = os.path.abspath(data_path)
+
+        # setup_orekit_curdir clears/replaces providers in the default DataContext.
+        setup_orekit_curdir(filename=data_path)
+        _OREKIT_DATA_PATH = data_path
+
+        # Bind Java classes only after JVM is guaranteed up.
+        from org.orekit.frames import FramesFactory as _FramesFactory  # type: ignore
+        from org.orekit.time import (  # type: ignore
+            TimeScalesFactory as _TimeScalesFactory,
+            AbsoluteDate as _AbsoluteDate,
         )
+        from org.orekit.utils import IERSConventions as _IERSConventions  # type: ignore
 
-    # setup_orekit_curdir clears/replaces providers in the default DataContext.
-    setup_orekit_curdir(filename=data_path)
-    _OREKIT_READY = True
+        FramesFactory.bind(_FramesFactory)
+        TimeScalesFactory.bind(_TimeScalesFactory)
+        AbsoluteDate.bind(_AbsoluteDate)
+        IERSConventions.bind(_IERSConventions)
+        _OREKIT_READY = True
 
 
-initialize_orekit()
-
-
-# Orekit imports (JPype)
-from org.orekit.frames import FramesFactory  # type: ignore
-from org.orekit.time import TimeScalesFactory, AbsoluteDate  # type: ignore
-from org.orekit.utils import IERSConventions  # type: ignore
+def _resolve_iers(iers: Optional[object]) -> object:
+    initialize_orekit()
+    if iers is None:
+        return IERSConventions.IERS_2010  # type: ignore[union-attr]
+    return iers
 
 FrameKind = Literal["native", "itrf"]
 ITRFQueryMode = Literal["cached", "transform"]
@@ -143,6 +213,7 @@ def _ecef2geodetic_vec_ecef_deg(
 def _absdate_to_astropy_utc(abs_date: "AbsoluteDate") -> "AstropyTime":  # type: ignore
     if AstropyTime is None:
         raise RuntimeError("astropy is required for Orbit")
+    initialize_orekit()
 
     utc = TimeScalesFactory.getUTC()
     c = abs_date.getComponents(utc)  # DateTimeComponents
@@ -166,6 +237,7 @@ def _absdate_to_astropy_utc(abs_date: "AbsoluteDate") -> "AstropyTime":  # type:
 def _astropy_to_absdate_utc(t: "AstropyTime") -> "AbsoluteDate":  # type: ignore
     if AstropyTime is None:
         raise RuntimeError("astropy is required for Orbit")
+    initialize_orekit()
     if not isinstance(t, AstropyTime):
         raise TypeError("epoch must be an astropy.time.Time")
     if getattr(t, "shape", None) not in ((), None):
@@ -725,7 +797,7 @@ class Orbit:
 
     propagator: object
     dt_save_s: float = 60.0
-    iers: object = IERSConventions.IERS_2010
+    iers: Optional[object] = None
     simple_eop: bool = True
     itrf_query_mode: ITRFQueryMode = "cached"
     interpolation_mode: InterpolationMode = "cubic"
@@ -738,6 +810,7 @@ class Orbit:
             raise ValueError("dt_save_s must be > 0")
 
         self._dt = float(self.dt_save_s)
+        self.iers = _resolve_iers(self.iers)
         self._itrf_query_mode = _resolve_itrf_query_mode(self.itrf_query_mode)
         self._interpolation_mode = _resolve_interpolation_mode(self.interpolation_mode)
         self._use_quintic = self._interpolation_mode == "quintic"
@@ -1072,7 +1145,7 @@ class Orbit:
         # cache
         dt_save_s: float = 60.0,
         # frames/EOP used for ITRF + force models
-        iers: object = IERSConventions.IERS_2010,
+        iers: Optional[object] = None,
         simple_eop: bool = True,
         itrf_query_mode: ITRFQueryMode = "cached",
         interpolation_mode: InterpolationMode = "cubic",
@@ -1132,6 +1205,8 @@ class Orbit:
         """
         if AstropyTime is None:
             raise RuntimeError("astropy is required for Orbit")
+        initialize_orekit()
+        iers = _resolve_iers(iers)
 
         from org.orekit.orbits import KeplerianOrbit  # type: ignore
         from org.orekit.propagation import SpacecraftState  # type: ignore
@@ -1235,7 +1310,7 @@ class Orbit:
         *,
         dt_save_s: float = 60.0,
         # frames/EOP used for ITRF in the cache + force models that need it
-        iers: object = IERSConventions.IERS_2010,
+        iers: Optional[object] = None,
         simple_eop: bool = True,
         itrf_query_mode: ITRFQueryMode = "cached",
         interpolation_mode: InterpolationMode = "cubic",
@@ -1278,6 +1353,8 @@ class Orbit:
         This is primarily for internal use and advanced callers; from_kepler/from_pv are the
         intended public entry points if you want to avoid exposing Orekit types.
         """
+        initialize_orekit()
+        iers = _resolve_iers(iers)
         from org.orekit.utils import Constants  # type: ignore
         from org.orekit.propagation import SpacecraftState  # type: ignore
 
@@ -1369,7 +1446,7 @@ class Orbit:
         mass_kg: float = 1000.0,
         mu: Optional[float] = None,
         dt_save_s: float = 60.0,
-        iers: object = IERSConventions.IERS_2010,
+        iers: Optional[object] = None,
         simple_eop: bool = True,
         itrf_query_mode: ITRFQueryMode = "cached",
         interpolation_mode: InterpolationMode = "cubic",
@@ -1422,6 +1499,8 @@ class Orbit:
         """
         if AstropyTime is None:
             raise RuntimeError("astropy is required for Orbit")
+        initialize_orekit()
+        iers = _resolve_iers(iers)
 
         from org.hipparchus.geometry.euclidean.threed import Vector3D  # type: ignore
         from org.orekit.utils import PVCoordinates, Constants  # type: ignore

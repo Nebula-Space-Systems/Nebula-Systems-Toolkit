@@ -15,10 +15,9 @@ Notes
 """
 
 import math
-import os
 import time
 import numpy as np
-from numba import njit, prange, set_num_threads, get_num_threads
+from numba import njit, prange
 
 # =============================================================================
 # WGS84 constants
