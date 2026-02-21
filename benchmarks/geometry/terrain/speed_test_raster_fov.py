@@ -1,6 +1,6 @@
 import numpy as np
 
-from nebula.terrain.raster_fov import AdaptiveCubeRasterFOV
+from nebula.geometry.terrain.raster_fov import AdaptiveCubeRasterFOV
 
 
 def speed_test(

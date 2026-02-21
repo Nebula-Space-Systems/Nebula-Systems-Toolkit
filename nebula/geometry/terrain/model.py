@@ -1,5 +1,5 @@
-from nebula.terrain.dem import RasterDEM
-from nebula.terrain.geoid import EGM2008Geoid
+from nebula.geometry.terrain.dem import RasterDEM
+from nebula.geometry.terrain.geoid import EGM2008Geoid
 import numpy as np
 
 

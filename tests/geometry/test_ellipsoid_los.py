@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from nebula.coverage.ellipsoid_los import (
+from nebula.geometry.ellipsoid_los import (
     los_clear_ellipsoid,
     los_clear_ellipsoid_many_to_many,
     los_clear_ellipsoid_one_to_many,

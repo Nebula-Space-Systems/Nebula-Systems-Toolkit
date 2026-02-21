@@ -14,7 +14,7 @@ astropy_time = pytest.importorskip("astropy.time")
 astropy_coordinates = pytest.importorskip("astropy.coordinates")
 u = pytest.importorskip("astropy.units")
 
-from nebula.propagation.fast import sun_position_ecef
+from nebula.geometry.fast_sun_position import sun_position_ecef
 
 Time = astropy_time.Time
 get_body = astropy_coordinates.get_body

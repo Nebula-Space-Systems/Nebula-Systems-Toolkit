@@ -6,9 +6,9 @@ try:
 except PackageNotFoundError:  # pragma: no cover
     __version__ = "0.0.0"
 
-_SUBPACKAGES = {"coverage", "localization", "terrain", "transform", "propagation", "plotting"}
+_SUBPACKAGES = {"coverage", "localization", "geometry", "transform", "propagation", "plotting"}
 
-__all__ = ["__version__", "coverage", "localization", "terrain", "transform", "propagation", "plotting"]
+__all__ = ["__version__", "coverage", "localization", "geometry", "transform", "propagation", "plotting"]
 
 
 def __getattr__(name: str):

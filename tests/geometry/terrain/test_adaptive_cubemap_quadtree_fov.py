@@ -21,7 +21,7 @@ Notes
 """
 
 
-from nebula.terrain.raster_fov import (
+from nebula.geometry.terrain.raster_fov import (
     AdaptiveCubeRasterFOV,
     azel_to_dir,
     face_uv_to_dir,

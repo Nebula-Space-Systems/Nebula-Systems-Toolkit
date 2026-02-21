@@ -5,7 +5,7 @@ from nebula.propagation.fast.orbit import (
     j2_secular_rates,
     propagate_constellation_pv,
 )
-from nebula.propagation.fast.sun_position import (
+from nebula.geometry.fast_sun_position import (
     gmst_angle,
     julian_date,
     sun_position_ecef,

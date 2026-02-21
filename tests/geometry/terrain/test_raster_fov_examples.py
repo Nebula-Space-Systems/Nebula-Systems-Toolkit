@@ -1,6 +1,6 @@
 import math
 
-from nebula.terrain.raster_fov import AdaptiveCubeRasterFOV
+from nebula.geometry.terrain.raster_fov import AdaptiveCubeRasterFOV
 
 
 def test_raster_fov_boolean_example_smoke():
