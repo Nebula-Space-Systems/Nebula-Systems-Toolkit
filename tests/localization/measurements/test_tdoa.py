@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from nebula.localization.tdoa import tdoa_jacobian_xyz, tdoa_seconds
+from nebula.localization.measurements.tdoa import tdoa_jacobian_xyz, tdoa_seconds
 
 
 def _tdoa_seconds_py(obs1_pos, obs2_pos, target_pos, c=299_792_458.0):
@@ -55,4 +55,3 @@ def test_tdoa_identical_observers_zero_signal_and_jacobian() -> None:
 
     assert abs(tau0) < 1e-15
     assert np.allclose(g0, 0.0, atol=1e-15)
-

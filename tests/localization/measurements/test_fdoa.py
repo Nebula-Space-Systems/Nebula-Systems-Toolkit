@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from nebula.localization.fdoa import fdoa_hz, fdoa_jacobian_xyz_vxyz
+from nebula.localization.measurements.fdoa import fdoa_hz, fdoa_jacobian_xyz_vxyz
 
 
 def _fdoa_hz_py(
@@ -151,4 +151,3 @@ def test_fdoa_identical_observers_zero_signal_and_jacobian() -> None:
 
     assert abs(phi0) < 1e-12
     assert np.allclose(j0, 0.0, atol=1e-12)
-

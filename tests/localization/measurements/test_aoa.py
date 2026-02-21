@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from nebula.localization.aoa import aoa_az_el, aoa_jacobian_az_el_xyz
+from nebula.localization.measurements.aoa import aoa_az_el, aoa_jacobian_az_el_xyz
 
 
 def _wrap_pi(a):
@@ -99,4 +99,3 @@ def test_aoa_axis_sanity_cases() -> None:
     az, el = aoa_az_el(o, t)
     assert abs(_angle_diff(az, 0.0)) < 1e-15
     assert abs(el - np.pi / 4.0) < 1e-15
-

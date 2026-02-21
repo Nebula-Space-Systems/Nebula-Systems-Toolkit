@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from nebula.localization.gdop import (
+from nebula.localization.measurements.gdop import (
     dop_covariance_matrix,
     gdop_pdop_tdop,
     gdop_pdop_tdop_many_observers,
