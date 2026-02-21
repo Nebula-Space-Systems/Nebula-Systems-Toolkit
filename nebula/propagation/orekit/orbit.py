@@ -96,6 +96,7 @@ def initialize_orekit(*, data_path: Optional[str] = None) -> None:
                 os.path.dirname(__file__),
                 "..",
                 "..",
+                "..",
                 "data",
                 "orekit-data",
             )

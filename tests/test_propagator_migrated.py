@@ -5,7 +5,7 @@ import pytest
 import astropy.units as u
 from astropy.time import Time
 
-from nebula.propagation.orbit import (
+from nebula.propagation.orekit.orbit import (
     Orbit,
     _absdate_to_astropy_utc,
     _astropy_to_absdate_utc,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 from astropy.time import Time
 
-from nebula.propagation.orbit import Orbit, _astropy_to_absdate_utc
+from nebula.propagation.orekit.orbit import Orbit, _astropy_to_absdate_utc
 
 
 def stats(err: np.ndarray) -> dict[str, float]:
@@ -43,4 +43,3 @@ def make_time_grid(epoch: Time, *, t_min_s: float, t_max_s: float, n: int) -> Ti
 
     secs = np.linspace(float(t_min_s), float(t_max_s), int(n), dtype=np.float64) * u.s
     return epoch + secs
-

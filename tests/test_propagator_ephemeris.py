@@ -4,7 +4,7 @@ import numpy as np
 import astropy.units as u
 from astropy.time import Time
 
-from nebula.propagation.orbit import (
+from nebula.propagation.orekit.orbit import (
     Orbit,
     FramesFactory,
     _astropy_to_absdate_utc,

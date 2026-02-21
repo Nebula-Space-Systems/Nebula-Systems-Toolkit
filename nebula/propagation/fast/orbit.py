@@ -10,7 +10,7 @@ Frame semantics
   GAST/GMST rotation, and optional epoch polar motion in this file
   (no full Orekit IERS/EOP frame chain).
 
-For strict Orekit frame fidelity/traceability, use `nebula.propagation.orbit.Orbit`.
+For strict Orekit frame fidelity/traceability, use `nebula.propagation.orekit.orbit.Orbit`.
 """
 
 from __future__ import annotations
@@ -627,7 +627,7 @@ class FastOrbit:
     ------
     - frame="native": internal inertial basis (J2000/EME2000-like) used by this model.
       This is not a formal Orekit frame object (for strict Orekit frame semantics, use
-      `nebula.propagation.orbit.Orbit`).
+      `nebula.propagation.orekit.orbit.Orbit`).
     - frame="itrf": Earth-fixed state derived from native via this file's built-in
       IAU-76 + 10-term nutation + GAST/GMST transform path, with optional epoch
       polar motion (xp, yp). This remains an approximation to Orekit's full EOP chain.
@@ -1161,7 +1161,7 @@ class FastOrbit:
         - use_polar_motion=True applies epoch xp/yp polar motion in the native->ITRF
           rotation chain, improving Orekit agreement at low runtime cost.
         - If you need explicit Orekit inertial frame selection (GCRF/EME2000/ICRF/TEME/etc.),
-          use `nebula.propagation.orbit.Orbit`.
+          use `nebula.propagation.orekit.orbit.Orbit`.
         """
         if AstropyTime is None:
             raise RuntimeError("astropy is required (astropy.time.Time).")

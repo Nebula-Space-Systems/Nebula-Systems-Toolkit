@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 from astropy.time import Time
 
-from nebula.propagation.fast_orbit import (
+from nebula.propagation.fast.orbit import (
     EARTH_MU,
     FastOrbit,
     WGS84_A,

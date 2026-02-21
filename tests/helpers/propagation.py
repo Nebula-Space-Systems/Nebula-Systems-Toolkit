@@ -7,8 +7,7 @@ import astropy.units as u
 import numpy as np
 from astropy.time import Time
 
-from nebula.propagation.fast_orbit import FastOrbit
-from nebula.propagation.orbit import Orbit
+from nebula.propagation import FastOrbit, Orbit
 
 
 SANE_INTEGRATOR_DEFAULTS = dict(

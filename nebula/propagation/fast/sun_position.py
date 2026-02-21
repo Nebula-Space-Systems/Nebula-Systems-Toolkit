@@ -1,4 +1,4 @@
-# fast_sun_position.py
+# sun_position.py
 """
 High-accuracy analytic solar position in an apparent-of-date ECI frame
 and ECEF using a Vallado-style algorithm.
@@ -10,7 +10,7 @@ geocentric position in:
 - An Earth-centered inertial frame aligned with the **true equator and true
   equinox of date** (apparent-of-date, similar to the TETE frame in Astropy).
 - An Earth-fixed frame obtained using the same approximate rotation chain as
-  ``nebula.propagation.fast_orbit`` (IAU-76 precession, truncated IAU-1980
+  ``nebula.propagation.fast.orbit`` (IAU-76 precession, truncated IAU-1980
   nutation, GAST, optional epoch polar motion), giving an ITRF-like ECEF
   realization.
 
