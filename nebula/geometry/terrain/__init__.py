@@ -5,8 +5,8 @@ from nebula.geometry.terrain.geoid import (
     read_egm2008_grid_raw,
 )
 from nebula.geometry.terrain.model import Terrain
-from nebula.geometry.terrain.raster_fov import (
-    AdaptiveCubeRasterFOV,
+from nebula.geometry.raster_mask import (
+    RasterMask,
     azel_to_dir,
     dir_to_azel,
     dir_to_face_uv,
@@ -20,7 +20,7 @@ __all__ = [
     "read_egm2008_grid_raw",
     "build_padded_grid",
     "Terrain",
-    "AdaptiveCubeRasterFOV",
+    "RasterMask",
     "azel_to_dir",
     "dir_to_azel",
     "dir_to_face_uv",

@@ -1,6 +1,6 @@
 import numpy as np
 
-from nebula.geometry.terrain.raster_fov import AdaptiveCubeRasterFOV
+from nebula.geometry.raster_mask import RasterMask
 
 
 def speed_test(
@@ -14,7 +14,7 @@ def speed_test(
     el_res: int = 360,
 ):
     """
-    Speed tests for AdaptiveCubeRasterFOV without plotting.
+    Speed tests for RasterMask without plotting.
     """
     import timeit
 
@@ -42,13 +42,13 @@ def speed_test(
                 f"{1e3*r['best_s']:>9.3f}  {1e3*r['mean_s']:>9.3f}  {1e3*r['std_s']:>8.3f}"
             )
 
-    a = AdaptiveCubeRasterFOV(tolerance_deg=0.05)
+    a = RasterMask(tolerance_deg=0.05)
     a.add_cap_azel(0.0, 0.0, 55.0)
     a.add_cap_azel(40.0, 0.0, 35.0)
     a.add_cap_azel(-30.0, 10.0, 25.0)
     a.compile()
 
-    b = AdaptiveCubeRasterFOV(tolerance_deg=0.05)
+    b = RasterMask(tolerance_deg=0.05)
     b.add_cap_azel(20.0, -5.0, 40.0)
     b.add_cap_azel(-70.0, 15.0, 30.0)
     b.compile()
@@ -77,11 +77,9 @@ def speed_test(
     _ = a.to_dense_faces_and_depth(64)
     _ = a.to_dense_faces_aa(64, supersample=2)
 
-    _ = AdaptiveCubeRasterFOV.from_faces_mask(faces_mask, tolerance_deg=0.05)
-    _ = AdaptiveCubeRasterFOV.from_azel_mask(
-        azel_mask, face_res=face_res, tolerance_deg=0.05
-    )
-    _ = AdaptiveCubeRasterFOV.from_azel_polygon(
+    _ = RasterMask.from_faces_mask(faces_mask, tolerance_deg=0.05)
+    _ = RasterMask.from_azel_mask(azel_mask, face_res=face_res, tolerance_deg=0.05)
+    _ = RasterMask.from_azel_polygon(
         poly,
         az_res=az_res,
         el_res=el_res,
@@ -91,13 +89,11 @@ def speed_test(
 
     results = []
 
-    glb = {"AdaptiveCubeRasterFOV": AdaptiveCubeRasterFOV}
-    results.append(
-        bench("AdaptiveCubeRasterFOV(tolerance_deg=0.05)", glb, label="create()")
-    )
+    glb = {"RasterMask": RasterMask}
+    results.append(bench("RasterMask(tolerance_deg=0.05)", glb, label="create()"))
     results.append(
         bench(
-            "f=AdaptiveCubeRasterFOV(tolerance_deg=0.05);"
+            "f=RasterMask(tolerance_deg=0.05);"
             "f.add_cap_azel(0,0,55);f.add_cap_azel(40,0,35);f.add_cap_azel(-30,10,25)",
             glb,
             label="add_cap_azel x3",
@@ -105,7 +101,7 @@ def speed_test(
     )
     results.append(
         bench(
-            "f=AdaptiveCubeRasterFOV(tolerance_deg=0.05);"
+            "f=RasterMask(tolerance_deg=0.05);"
             "f.add_cap_azel(0,0,55);f.add_cap_azel(40,0,35);f.add_cap_azel(-30,10,25);"
             "f.compile()",
             glb,
@@ -175,10 +171,10 @@ def speed_test(
         )
     )
 
-    glb = {"AdaptiveCubeRasterFOV": AdaptiveCubeRasterFOV, "faces_mask": faces_mask}
+    glb = {"RasterMask": RasterMask, "faces_mask": faces_mask}
     results.append(
         bench(
-            "AdaptiveCubeRasterFOV.from_faces_mask(faces_mask, tolerance_deg=0.05)",
+            "RasterMask.from_faces_mask(faces_mask, tolerance_deg=0.05)",
             glb,
             label=f"from_faces_mask(face_res={face_res})",
             number=1,
@@ -186,13 +182,13 @@ def speed_test(
     )
 
     glb = {
-        "AdaptiveCubeRasterFOV": AdaptiveCubeRasterFOV,
+        "RasterMask": RasterMask,
         "azel_mask": azel_mask,
         "face_res": face_res,
     }
     results.append(
         bench(
-            "AdaptiveCubeRasterFOV.from_azel_mask(azel_mask, face_res=face_res, tolerance_deg=0.05)",
+            "RasterMask.from_azel_mask(azel_mask, face_res=face_res, tolerance_deg=0.05)",
             glb,
             label=f"from_azel_mask(ELxAZ={el_res}x{az_res}, face_res={face_res})",
             number=1,
@@ -200,7 +196,7 @@ def speed_test(
     )
 
     glb = {
-        "AdaptiveCubeRasterFOV": AdaptiveCubeRasterFOV,
+        "RasterMask": RasterMask,
         "poly": poly,
         "az_res": az_res,
         "el_res": el_res,
@@ -208,7 +204,7 @@ def speed_test(
     }
     results.append(
         bench(
-            "AdaptiveCubeRasterFOV.from_azel_polygon(poly, az_res=az_res, el_res=el_res, face_res=face_res, tolerance_deg=0.05)",
+            "RasterMask.from_azel_polygon(poly, az_res=az_res, el_res=el_res, face_res=face_res, tolerance_deg=0.05)",
             glb,
             label=f"from_azel_polygon(ELxAZ={el_res}x{az_res}, face_res={face_res})",
             number=1,

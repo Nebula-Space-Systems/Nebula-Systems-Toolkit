@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-raster_fov.py
+raster_mask.py
 
 Adaptive packed cubemap quadtree for fast boolean FOV queries on the unit sphere.
 
@@ -1156,11 +1156,11 @@ def _rasterize_azel_polygon_mask(
 
 
 # ----------------------------
-# Adaptive cube raster FOV
+# Raster mask
 # ----------------------------
 
 
-class AdaptiveCubeRasterFOV:
+class RasterMask:
     """
     Adaptive cubemap quadtree raster for a boolean FOV mask.
 
@@ -1291,7 +1291,7 @@ class AdaptiveCubeRasterFOV:
         *,
         tolerance_deg: float = 0.01,
         max_depth: int | None = None,
-    ) -> "AdaptiveCubeRasterFOV":
+    ) -> "RasterMask":
         """
         Build a FOV from an arbitrary painted cubemap mask.
 
@@ -1338,7 +1338,7 @@ class AdaptiveCubeRasterFOV:
         el_max_deg: float = 90.0,
         tolerance_deg: float = 0.01,
         max_depth: int | None = None,
-    ) -> "AdaptiveCubeRasterFOV":
+    ) -> "RasterMask":
         """
         Build a FOV from an arbitrary painted equirectangular az/el mask.
 
@@ -1377,7 +1377,7 @@ class AdaptiveCubeRasterFOV:
         el_max_deg: float = 90.0,
         tolerance_deg: float = 0.01,
         max_depth: int | None = None,
-    ) -> "AdaptiveCubeRasterFOV":
+    ) -> "RasterMask":
         """
         Convenience: rasterize a 2D az/el polygon into an az/el mask, then build a FOV.
 
@@ -1414,10 +1414,10 @@ class AdaptiveCubeRasterFOV:
             self.compile()
 
     def _binary_op(
-        self, other: "AdaptiveCubeRasterFOV", op_code: int
-    ) -> "AdaptiveCubeRasterFOV":
-        if not isinstance(other, AdaptiveCubeRasterFOV):
-            raise TypeError("other must be an AdaptiveCubeRasterFOV")
+        self, other: "RasterMask", op_code: int
+    ) -> "RasterMask":
+        if not isinstance(other, RasterMask):
+            raise TypeError("other must be a RasterMask")
         self._ensure_compiled()
         other._ensure_compiled()
 
@@ -1431,7 +1431,7 @@ class AdaptiveCubeRasterFOV:
             int(op_code),
         )
 
-        out = AdaptiveCubeRasterFOV(
+        out = RasterMask(
             tolerance_deg=min(self.tolerance_deg, other.tolerance_deg),
             max_depth=max(self.max_depth, other.max_depth),
         )
@@ -1442,22 +1442,22 @@ class AdaptiveCubeRasterFOV:
         out._compiled = True
         return out
 
-    def union(self, other: "AdaptiveCubeRasterFOV") -> "AdaptiveCubeRasterFOV":
+    def union(self, other: "RasterMask") -> "RasterMask":
         return self._binary_op(other, _OP_OR)  # type: ignore
 
-    def intersection(self, other: "AdaptiveCubeRasterFOV") -> "AdaptiveCubeRasterFOV":
+    def intersection(self, other: "RasterMask") -> "RasterMask":
         return self._binary_op(other, _OP_AND)  # type: ignore
 
-    def difference(self, other: "AdaptiveCubeRasterFOV") -> "AdaptiveCubeRasterFOV":
+    def difference(self, other: "RasterMask") -> "RasterMask":
         return self._binary_op(other, _OP_DIFF)  # type: ignore
 
-    def xor(self, other: "AdaptiveCubeRasterFOV") -> "AdaptiveCubeRasterFOV":
+    def xor(self, other: "RasterMask") -> "RasterMask":
         return self._binary_op(other, _OP_XOR)  # type: ignore
 
-    def invert(self) -> "AdaptiveCubeRasterFOV":
+    def invert(self) -> "RasterMask":
         """Return NOT(self) as a new FOV (same structure, flipped leaf states)."""
         self._ensure_compiled()
-        out = AdaptiveCubeRasterFOV(
+        out = RasterMask(
             tolerance_deg=self.tolerance_deg, max_depth=self.max_depth
         )
         out.roots = self.roots.copy()  # type: ignore
@@ -1470,22 +1470,22 @@ class AdaptiveCubeRasterFOV:
         return out
 
     # Python operator sugar
-    def __or__(self, other: "AdaptiveCubeRasterFOV") -> "AdaptiveCubeRasterFOV":
+    def __or__(self, other: "RasterMask") -> "RasterMask":
         return self.union(other)
 
-    def __and__(self, other: "AdaptiveCubeRasterFOV") -> "AdaptiveCubeRasterFOV":
+    def __and__(self, other: "RasterMask") -> "RasterMask":
         return self.intersection(other)
 
-    def __sub__(self, other: "AdaptiveCubeRasterFOV") -> "AdaptiveCubeRasterFOV":
+    def __sub__(self, other: "RasterMask") -> "RasterMask":
         return self.difference(other)
 
-    def __add__(self, other: "AdaptiveCubeRasterFOV") -> "AdaptiveCubeRasterFOV":
+    def __add__(self, other: "RasterMask") -> "RasterMask":
         return self.union(other)
 
-    def __xor__(self, other: "AdaptiveCubeRasterFOV") -> "AdaptiveCubeRasterFOV":
+    def __xor__(self, other: "RasterMask") -> "RasterMask":
         return self.xor(other)
 
-    def __invert__(self) -> "AdaptiveCubeRasterFOV":
+    def __invert__(self) -> "RasterMask":
         return self.invert()
 
     # ---- queries ----
@@ -1791,3 +1791,4 @@ class AdaptiveCubeRasterFOV:
                 ax.set_yticks([])
 
         return fig
+

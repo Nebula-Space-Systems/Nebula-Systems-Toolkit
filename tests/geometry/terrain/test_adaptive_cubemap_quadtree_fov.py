@@ -4,7 +4,7 @@ import unittest
 import numpy as np
 from numba import njit
 
-"""Tests for AdaptiveCubeRasterFOV.
+"""Tests for RasterMask.
 
 This suite is based on the original cap-only tests and extends coverage for the
 new arbitrary painted-raster + boolean operations workflow.
@@ -21,8 +21,8 @@ Notes
 """
 
 
-from nebula.geometry.terrain.raster_fov import (
-    AdaptiveCubeRasterFOV,
+from nebula.geometry.raster_mask import (
+    RasterMask,
     azel_to_dir,
     face_uv_to_dir,
     dir_to_face_uv,
@@ -280,20 +280,20 @@ def _sample_dirs_from_face_uv(res: int, face: int, n: int, seed: int):
 # -----------------------------------------------------------------------------
 
 
-class TestAdaptiveCubeRasterFOV(unittest.TestCase):
+class TestRasterMask(unittest.TestCase):
     # ----------------------------
     # Baseline (caps) behavior
     # ----------------------------
 
     def test_empty_fov_is_all_false(self):
-        fov = AdaptiveCubeRasterFOV(tolerance_deg=0.01)
+        fov = RasterMask(tolerance_deg=0.01)
         fov.compile()
         dirs = _random_unit_vectors(N_RAND_SMALL, seed=1)
         out = fov.contains_dirs(dirs)
         self.assertFalse(out.any())
 
     def test_compile_idempotent_and_contains_matches_single(self):
-        fov = AdaptiveCubeRasterFOV(tolerance_deg=0.01)
+        fov = RasterMask(tolerance_deg=0.01)
         fov.add_cap_azel(0.0, 0.0, 25.0)
         fov.compile()
         n1 = fov.node_count()
@@ -308,7 +308,7 @@ class TestAdaptiveCubeRasterFOV(unittest.TestCase):
         self.assertTrue(np.array_equal(batch, singles))
 
     def test_scaling_of_dirs_does_not_change_results(self):
-        fov = AdaptiveCubeRasterFOV(tolerance_deg=0.01)
+        fov = RasterMask(tolerance_deg=0.01)
         fov.add_cap_azel(30.0, 10.0, 12.0)
         fov.compile()
 
@@ -324,11 +324,11 @@ class TestAdaptiveCubeRasterFOV(unittest.TestCase):
         """UNION semantics: adding another cap can only turn False->True."""
         tol = 0.01 if not _FAST else 0.02
 
-        base = AdaptiveCubeRasterFOV(tolerance_deg=tol)
+        base = RasterMask(tolerance_deg=tol)
         base.add_cap_azel(0.0, 0.0, 12.0)
         base.compile()
 
-        extended = AdaptiveCubeRasterFOV(tolerance_deg=tol)
+        extended = RasterMask(tolerance_deg=tol)
         extended.add_cap_azel(0.0, 0.0, 12.0)
         extended.add_cap_azel(120.0, 0.0, 12.0)
         extended.compile()
@@ -340,8 +340,8 @@ class TestAdaptiveCubeRasterFOV(unittest.TestCase):
         self.assertTrue(np.all((~a) | b))
 
     def test_tighter_tolerance_increases_or_keeps_node_count(self):
-        loose = AdaptiveCubeRasterFOV(tolerance_deg=0.05 if not _FAST else 0.08)
-        tight = AdaptiveCubeRasterFOV(tolerance_deg=0.01 if not _FAST else 0.02)
+        loose = RasterMask(tolerance_deg=0.05 if not _FAST else 0.08)
+        tight = RasterMask(tolerance_deg=0.01 if not _FAST else 0.02)
 
         for f in (loose, tight):
             f.add_cap_azel(10.0, -15.0, 22.0)
@@ -351,7 +351,7 @@ class TestAdaptiveCubeRasterFOV(unittest.TestCase):
         self.assertGreaterEqual(tight.node_count(), loose.node_count())
 
     def test_packed_tree_invariants_if_available(self):
-        fov = AdaptiveCubeRasterFOV(tolerance_deg=0.01)
+        fov = RasterMask(tolerance_deg=0.01)
         fov.add_cap_azel(0.0, 0.0, 60.0)
         fov.add_cap_azel(120.0, 0.0, 25.0)
         fov.compile()
@@ -371,7 +371,7 @@ class TestAdaptiveCubeRasterFOV(unittest.TestCase):
         cap_az, cap_el = 15.0, -10.0
         half_angle = 7.0
 
-        fov = AdaptiveCubeRasterFOV(tolerance_deg=tol)
+        fov = RasterMask(tolerance_deg=tol)
         fov.add_cap_azel(cap_az, cap_el, half_angle)
         fov.compile()
 
@@ -401,7 +401,7 @@ class TestAdaptiveCubeRasterFOV(unittest.TestCase):
             (-100.0, -20.0, 9.0),
         ]
 
-        fov = AdaptiveCubeRasterFOV(tolerance_deg=tol)
+        fov = RasterMask(tolerance_deg=tol)
 
         centers = np.empty((len(caps), 3), dtype=np.float64)
         cos_alphas = np.empty(len(caps), dtype=np.float64)
@@ -435,7 +435,7 @@ class TestAdaptiveCubeRasterFOV(unittest.TestCase):
         cap_az, cap_el = 0.0, 0.0
         half_angle = 20.0
 
-        fov = AdaptiveCubeRasterFOV(tolerance_deg=tol)
+        fov = RasterMask(tolerance_deg=tol)
         fov.add_cap_azel(cap_az, cap_el, half_angle)
         fov.compile()
 
@@ -489,7 +489,7 @@ class TestAdaptiveCubeRasterFOV(unittest.TestCase):
 
     def test_dense_faces_is_conservative_wrt_face_uv_centers_if_packed(self):
         """Only runs when the object exposes packed quadtree arrays."""
-        fov = AdaptiveCubeRasterFOV(tolerance_deg=0.01 if not _FAST else 0.02)
+        fov = RasterMask(tolerance_deg=0.01 if not _FAST else 0.02)
         fov.add_cap_azel(10.0, 5.0, 35.0)
         fov.add_cap_azel(-140.0, -25.0, 15.0)
         fov.compile()

@@ -24,7 +24,7 @@ from nebula.geometry.spherical_los import (
     los_clear_sphere_one_to_many,
 )
 from nebula.geometry.terrain import (
-    AdaptiveCubeRasterFOV,
+    RasterMask,
     EGM2008Geoid,
     RasterDEM,
     Terrain,
@@ -63,7 +63,7 @@ __all__ = [
     "read_egm2008_grid_raw",
     "build_padded_grid",
     "Terrain",
-    "AdaptiveCubeRasterFOV",
+    "RasterMask",
     "azel_to_dir",
     "dir_to_azel",
     "dir_to_face_uv",
@@ -71,3 +71,4 @@ __all__ = [
     "compute_viewshed",
     "compute_viewshed_masked",
 ]
+
