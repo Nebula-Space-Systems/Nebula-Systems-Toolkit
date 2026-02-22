@@ -7,7 +7,7 @@ import astropy.units as u
 import numpy as np
 from astropy.time import Time
 
-from nebula.propagation import FastOrbit, Orbit
+from nebula.propagation import Orbit
 
 
 SANE_INTEGRATOR_DEFAULTS = dict(
@@ -63,7 +63,7 @@ def build_orekit_newtonian(
     dt_save_s: float,
     interpolation_mode: str = "cubic",
 ) -> Orbit:
-    return Orbit.from_kepler(
+    return Orbit.from_kepler_precise(
         epoch=epoch,
         a_m=float(a_m),
         e=float(e),
@@ -90,7 +90,7 @@ def build_orekit_j2_only(
     anomaly_rad: float,
     dt_save_s: float,
 ) -> Orbit:
-    return Orbit.from_kepler(
+    return Orbit.from_kepler_precise(
         epoch=epoch,
         a_m=float(a_m),
         e=float(e),
@@ -130,7 +130,7 @@ def build_fast(
     enable_j2: bool,
     j2_mode: str = "secular",
     j2_substeps: int = 4,
-) -> FastOrbit:
+) -> Orbit:
     kwargs: dict[str, Any] = dict(
         epoch=epoch,
         a_m=float(a_m),
@@ -145,4 +145,4 @@ def build_fast(
     if enable_j2:
         kwargs["j2_mode"] = j2_mode
         kwargs["j2_substeps"] = int(j2_substeps)
-    return FastOrbit.from_kepler(**kwargs)  # type: ignore[arg-type]
+    return Orbit.from_kepler_fast(**kwargs)  # type: ignore[arg-type]

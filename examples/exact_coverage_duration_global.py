@@ -21,15 +21,15 @@ from nebula.coverage import (
     build_access_interval_store_from_config,
     access_duration_by_target,
 )
-from nebula.propagation import FastOrbit
+from nebula.propagation import Orbit
 from nebula.plotting import make_basemap, LIGHT_DETAILED
 
 
-def _build_demo_constellation(epoch: Time) -> list[FastOrbit]:
+def _build_demo_constellation(epoch: Time) -> list[Orbit]:
     """
     Create a small mixed constellation for exact-interval coverage demonstration.
     """
-    sats: list[FastOrbit] = []
+    sats: list[Orbit] = []
 
     planes = [
         # a_m, e, inc_deg, raan_deg, count
@@ -42,7 +42,7 @@ def _build_demo_constellation(epoch: Time) -> list[FastOrbit]:
         for idx in range(count):
             ma_deg = idx * (360.0 / float(count))
             sats.append(
-                FastOrbit.from_kepler(
+                Orbit.from_kepler_fast(
                     epoch=epoch,
                     a_m=a_m,
                     e=e,

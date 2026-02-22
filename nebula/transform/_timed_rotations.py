@@ -23,7 +23,7 @@ try:
 except Exception:  # pragma: no cover
     AstropyTime = None  # type: ignore
 
-from nebula.propagation.orekit.orbit import initialize_orekit
+from nebula.propagation.orbit import initialize_orekit
 
 # Lazily bound Orekit classes/singletons.
 _FramesFactory = None

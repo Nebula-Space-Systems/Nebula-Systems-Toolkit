@@ -4,7 +4,7 @@ import numpy as np
 import astropy.units as u
 from astropy.time import Time
 
-from nebula.propagation.orekit.orbit import (
+from nebula.propagation.orbit import (
     Orbit,
     FramesFactory,
     _astropy_to_absdate_utc,
@@ -38,7 +38,7 @@ def _native_to_itrf(ephem: Orbit, t: Time) -> tuple[np.ndarray, np.ndarray]:
 
 
 def test_numerical_propagator_uses_cartesian_orbit_type() -> None:
-    e = Orbit.from_kepler(
+    e = Orbit.from_kepler_precise(
         epoch=Time("2026-01-01T00:00:00", scale="utc"),
         a_m=7000e3,
         e=0.001,
@@ -52,7 +52,7 @@ def test_numerical_propagator_uses_cartesian_orbit_type() -> None:
 
 
 def test_ephemeris_generator_list_does_not_grow() -> None:
-    e = Orbit.from_kepler(
+    e = Orbit.from_kepler_precise(
         epoch=Time("2026-01-01T00:00:00", scale="utc"),
         a_m=7000e3,
         e=0.01,
@@ -77,7 +77,7 @@ def test_ephemeris_generator_list_does_not_grow() -> None:
 
 def test_from_pv_respects_propagate_inertial_frame_for_inertial_input() -> None:
     epoch = Time("2026-01-01T00:00:00", scale="utc")
-    ref = Orbit.from_kepler(
+    ref = Orbit.from_kepler_precise(
         epoch=epoch,
         a_m=7000e3,
         e=0.001,
@@ -134,8 +134,8 @@ def test_itrf_transform_mode_is_frame_consistent() -> None:
         gravity_model="newtonian",
         dt_save_s=60.0,
     )
-    e_cached = Orbit.from_kepler(itrf_query_mode="cached", **common)
-    e_xform = Orbit.from_kepler(itrf_query_mode="transform", **common)
+    e_cached = Orbit.from_kepler_precise(itrf_query_mode="cached", **common)
+    e_xform = Orbit.from_kepler_precise(itrf_query_mode="transform", **common)
 
     # Midpoint-like queries to stress interpolation behavior.
     ts = epoch + (np.arange(1, 31, dtype=np.float64) * 60.0 + 17.0) * u.s

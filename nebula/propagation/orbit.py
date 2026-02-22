@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, Tuple, Optional, Sequence
+from typing import Literal, Tuple, Optional, Sequence, Any
 import math
 import threading
+from importlib import import_module
 
 import numpy as np
 from numba import njit
@@ -13,6 +14,9 @@ try:
 except Exception:  # pragma: no cover
     AstropyTime = None  # type: ignore
 
+_FastOrbit = None  # type: ignore
+_FAST_ORBIT_IMPORT_ERROR: Optional[Exception] = None
+
 import jdk4py
 import os
 import orekit_jpype
@@ -21,6 +25,7 @@ _OREKIT_READY = False
 _OREKIT_INIT_LOCK = threading.Lock()
 _OREKIT_DATA_PATH: Optional[str] = None
 _OREKIT_FAULTHANDLER_DISABLED = False
+
 
 class _LazyJavaProxy:
     """
@@ -40,7 +45,9 @@ class _LazyJavaProxy:
         if self._target is None:
             initialize_orekit()
         if self._target is None:
-            raise RuntimeError(f"{self._name} is not available (Orekit JVM not initialized)")
+            raise RuntimeError(
+                f"{self._name} is not available (Orekit JVM not initialized)"
+            )
         return self._target
 
     def __getattr__(self, item):
@@ -96,7 +103,6 @@ def initialize_orekit(*, data_path: Optional[str] = None) -> None:
                 os.path.dirname(__file__),
                 "..",
                 "..",
-                "..",
                 "data",
                 "orekit-data",
             )
@@ -127,9 +133,24 @@ def _resolve_iers(iers: Optional[object]) -> object:
         return IERSConventions.IERS_2010  # type: ignore[union-attr]
     return iers
 
+
+def _resolve_fast_orbit_class():
+    global _FastOrbit, _FAST_ORBIT_IMPORT_ERROR
+    if _FastOrbit is not None:
+        return _FastOrbit
+    try:
+        mod = import_module("nebula.propagation._fast_orbit_backend")
+        _FastOrbit = getattr(mod, "FastOrbit")
+        return _FastOrbit
+    except Exception as exc:  # pragma: no cover
+        _FAST_ORBIT_IMPORT_ERROR = exc
+        raise RuntimeError("Fast orbit backend is unavailable") from exc
+
+
 FrameKind = Literal["native", "itrf"]
 ITRFQueryMode = Literal["cached", "transform"]
 InterpolationMode = Literal["cubic", "quintic"]
+OrbitPropagationMode = Literal["precision", "efficiency"]
 
 WGS84_A = 6378137.0
 WGS84_B = 6356752.314245179
@@ -271,6 +292,38 @@ def _dt_seconds_from_epoch(
     dt = (t.utc - epoch_astropy.utc).to_value("s")
     dt_arr = np.atleast_1d(np.asarray(dt, dtype=np.float64))
     return dt_arr, is_scalar
+
+
+def _dt_seconds_from_time_like(
+    t: Any, epoch_astropy: "AstropyTime"  # type: ignore
+) -> Tuple[np.ndarray, bool]:
+    """
+    Normalize query time to seconds-from-epoch.
+
+    Accepted:
+    - scalar float/int (seconds from epoch)
+    - numpy float/int ndarray (seconds from epoch)
+    - astropy.time.Time (scalar or vector)
+    """
+    if isinstance(t, (float, int, np.floating, np.integer)) and not isinstance(t, bool):
+        return np.asarray([float(t)], dtype=np.float64), True
+
+    if isinstance(t, np.ndarray):
+        if t.dtype.kind not in ("f", "i"):
+            raise TypeError(
+                "numpy array time input must be float/int seconds from epoch"
+            )
+        dt_arr = np.asarray(t, dtype=np.float64)
+        if dt_arr.ndim == 0:
+            return np.asarray([float(dt_arr)], dtype=np.float64), True
+        return np.atleast_1d(dt_arr), False
+
+    if AstropyTime is not None and isinstance(t, AstropyTime):
+        return _dt_seconds_from_epoch(t, epoch_astropy)
+
+    raise TypeError(
+        "t must be astropy.time.Time, float seconds, int seconds, or numpy float/int seconds"
+    )
 
 
 def _pv_acceleration_xyz(pv) -> np.ndarray:
@@ -773,27 +826,14 @@ def _configure_force_models(
 @dataclass
 class Orbit:
     """
-    Two-sided cached Orbit with cubic Hermite interpolation for an Orekit propagator.
+    Unified orbit interface with two propagation modes:
+    - precision: Orekit numerical propagator (default)
+    - efficiency: numba/numpy fast propagator
 
-    Public API (unchanged from your draft)
-    --------------------------------------
-    - epoch: astropy Time (UTC)
-    - dt: float seconds
-    - coverage() -> (t_min_s, t_max_s)
-    - pv(t, frame="native"|"itrf") -> (r, v)
-    - pos(t, frame=...) -> r
-    - vel(t, frame=...) -> v
-    - pv_itrf/pos_itrf/vel_itrf convenience wrappers
-    - lla(t) -> (lat_deg, lon_deg, alt_m)
-    - itrf_query_mode: "cached" (speed) or "transform" (fidelity)
-    - interpolation_mode: "cubic" (speed) or "quintic" (lower velocity interpolation error)
-
-    Constructor helpers (NEW)
-    -------------------------
-    - from_kepler(...)
-    - from_spacecraft_state(...)
-    - from_pv(...)
-    - from_kepler_twobody(...)  (left as stub per your request)
+    Construction helpers:
+    - from_kepler_precise(...): high-fidelity Orekit
+    - from_kepler_fast(...): high-efficiency approximate propagation
+    - from_spacecraft_state(...), from_pv(...): precision Orekit paths
     """
 
     propagator: object
@@ -804,6 +844,8 @@ class Orbit:
     interpolation_mode: InterpolationMode = "cubic"
 
     def __post_init__(self) -> None:
+        self._mode: OrbitPropagationMode = "precision"
+        self._fast_impl = None
         initialize_orekit()
         if AstropyTime is None:
             raise RuntimeError("astropy is required for Orbit")
@@ -850,14 +892,43 @@ class Orbit:
 
     @property
     def epoch(self) -> "AstropyTime":  # type: ignore
+        if self._mode == "efficiency":
+            return self._fast_impl.epoch  # type: ignore[return-value]
         return self._epoch_ast
 
     @property
     def dt(self) -> float:
+        if self._mode == "efficiency":
+            return float(self._fast_impl.dt)
         return self._dt
 
+    @property
+    def mode(self) -> OrbitPropagationMode:
+        return self._mode
+
+    @property
+    def is_precision(self) -> bool:
+        return self._mode == "precision"
+
+    @property
+    def is_efficiency(self) -> bool:
+        return self._mode == "efficiency"
+
     def coverage(self) -> Tuple[float, float]:
+        if self._mode == "efficiency":
+            return self._fast_impl.coverage()
         return float(self._k_min) * self._dt, float(self._k_max) * self._dt
+
+    def precompute(self, t_min_s: float, t_max_s: float) -> None:
+        """
+        Expand internal cache to cover [t_min_s, t_max_s] seconds from epoch.
+        """
+        if self._mode == "efficiency":
+            self._fast_impl.precompute(float(t_min_s), float(t_max_s))
+            return
+        self._ensure_covered(
+            np.asarray([float(t_min_s), float(t_max_s)], dtype=np.float64)
+        )
 
     def _new_ephemeris_generator(self):
         # Prevent unbounded generator growth in repeated cache extensions.
@@ -891,10 +962,11 @@ class Orbit:
 
         return r_itrf, v_itrf
 
-    def pv(
-        self, t: "AstropyTime", frame: FrameKind = "native"  # type: ignore
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        dt_s, is_scalar = _dt_seconds_from_epoch(t, self._epoch_ast)
+    def pv(self, t: Any, frame: FrameKind = "native") -> Tuple[np.ndarray, np.ndarray]:
+        if self._mode == "efficiency":
+            return self._fast_impl.pv(t, frame=frame)
+
+        dt_s, is_scalar = _dt_seconds_from_time_like(t, self._epoch_ast)
         # If cache has only the initial sample, allow exact-knot queries without interpolation.
         if (self._k_max - self._k_min) < 1:
             if dt_s.size == 1:
@@ -951,27 +1023,29 @@ class Orbit:
             return r[0], v[0]
         return r, v
 
-    def pos(self, t: "AstropyTime", frame: FrameKind = "native") -> np.ndarray:  # type: ignore
+    def pos(self, t: Any, frame: FrameKind = "native") -> np.ndarray:
         r, _ = self.pv(t, frame=frame)
         return r
 
-    def vel(self, t: "AstropyTime", frame: FrameKind = "native") -> np.ndarray:  # type: ignore
+    def vel(self, t: Any, frame: FrameKind = "native") -> np.ndarray:
         _, v = self.pv(t, frame=frame)
         return v
 
-    def pv_itrf(self, t: "AstropyTime") -> Tuple[np.ndarray, np.ndarray]:  # type: ignore
+    def pv_itrf(self, t: Any) -> Tuple[np.ndarray, np.ndarray]:
         return self.pv(t, frame="itrf")
 
-    def pos_itrf(self, t: "AstropyTime") -> np.ndarray:  # type: ignore
+    def pos_itrf(self, t: Any) -> np.ndarray:
         return self.pos(t, frame="itrf")
 
-    def vel_itrf(self, t: "AstropyTime") -> np.ndarray:  # type: ignore
+    def vel_itrf(self, t: Any) -> np.ndarray:
         return self.vel(t, frame="itrf")
 
-    def lla(self, t: "AstropyTime") -> Tuple[np.ndarray, np.ndarray, np.ndarray]:  # type: ignore
+    def lla(self, t: Any) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if self._mode == "efficiency":
+            return self._fast_impl.lla(t)
+
         r_itrf = self.pos_itrf(t)
-        is_scalar = getattr(t, "shape", None) == ()
-        if is_scalar:
+        if r_itrf.ndim == 1:
             lat, lon, alt = _ecef2geodetic_deg(r_itrf[0], r_itrf[1], r_itrf[2])
         else:
             lat, lon, alt = _ecef2geodetic_vec_ecef_deg(r_itrf, wrap_lon=True)
@@ -1128,7 +1202,24 @@ class Orbit:
     # Classmethod constructors (IMPLEMENTED)
     # -------------------------------------------------------------------------
     @classmethod
-    def from_kepler(
+    def _from_fast_impl(cls, fast_impl) -> "Orbit":
+        obj = cls.__new__(cls)
+        # Dataclass fields
+        obj.propagator = None
+        obj.dt_save_s = float(fast_impl.dt)
+        obj.iers = None
+        obj.simple_eop = True
+        obj.itrf_query_mode = "cached"
+        obj.interpolation_mode = "cubic"
+        # Unified-mode internals
+        obj._mode = "efficiency"
+        obj._fast_impl = fast_impl
+        obj._dt = float(fast_impl.dt)
+        obj._epoch_ast = fast_impl.epoch
+        return obj
+
+    @classmethod
+    def from_kepler_precise(
         cls,
         *,
         epoch: "AstropyTime",  # type: ignore
@@ -1305,6 +1396,56 @@ class Orbit:
         )
 
     @classmethod
+    def from_kepler_fast(
+        cls,
+        *,
+        epoch: "AstropyTime",  # type: ignore
+        a_m: float,
+        e: float,
+        i: float,
+        raan: float,
+        argp: float,
+        anomaly: float,
+        anomaly_type: Literal["true", "mean", "eccentric"] = "true",
+        degrees: bool = False,
+        mu: float = 3.986004418e14,
+        dt_save_s: float = 60.0,
+        enable_j2: bool = False,
+        j2_mode: Literal["secular", "osculating"] = "secular",
+        j2_substeps: int = 1,
+        J2: float = 1.08262668e-3,
+        Re_m: float = 6378137.0,
+        use_polar_motion: bool = True,
+    ) -> "Orbit":
+        """
+        Construct an efficiency-mode Orbit using the numba/numpy fast backend.
+
+        This keeps the same Orbit interface for query methods (`pv`, `pos`, `vel`,
+        `pv_itrf`, `lla`, etc.) while using approximate fast propagation internals.
+        """
+        fast_orbit_cls = _resolve_fast_orbit_class()
+        fast_impl = fast_orbit_cls.from_kepler(
+            epoch=epoch,
+            a_m=float(a_m),
+            e=float(e),
+            i=float(i),
+            raan=float(raan),
+            argp=float(argp),
+            anomaly=float(anomaly),
+            anomaly_type=anomaly_type,
+            degrees=bool(degrees),
+            mu=float(mu),
+            dt_save_s=float(dt_save_s),
+            enable_j2=bool(enable_j2),
+            j2_mode=j2_mode,
+            j2_substeps=int(j2_substeps),
+            J2=float(J2),
+            Re_m=float(Re_m),
+            use_polar_motion=bool(use_polar_motion),
+        )
+        return cls._from_fast_impl(fast_impl)
+
+    @classmethod
     def from_spacecraft_state(
         cls,
         state,
@@ -1351,7 +1492,7 @@ class Orbit:
         """
         Accept an Orekit SpacecraftState and construct a NumericalPropagator, then wrap it.
 
-        This is primarily for internal use and advanced callers; from_kepler/from_pv are the
+        This is primarily for internal use and advanced callers; from_kepler_precise/from_pv are the
         intended public entry points if you want to avoid exposing Orekit types.
         """
         initialize_orekit()
@@ -1591,8 +1732,3 @@ class Orbit:
             itrf_query_mode=itrf_query_mode,
             interpolation_mode=interpolation_mode,
         )
-
-
-# -----------------------------------------------------------------------------
-
-# Inline self-tests were migrated to the pytest suite under `tests/`.

@@ -5,14 +5,18 @@ import pytest
 import astropy.units as u
 from astropy.time import Time
 
-from nebula.propagation.orekit.orbit import (
+from nebula.propagation.orbit import (
     Orbit,
     _absdate_to_astropy_utc,
     _astropy_to_absdate_utc,
     _dt_seconds_from_epoch,
     _hermite_pv_uniform_twosided,
 )
-from tests.helpers.orekit_ephemeris import direct_pv_from_propagator, make_time_grid, stats
+from tests.helpers.orekit_ephemeris import (
+    direct_pv_from_propagator,
+    make_time_grid,
+    stats,
+)
 
 
 def _maybe_count_step_handlers(propagator) -> int | None:
@@ -91,7 +95,7 @@ def test_hermite_exact_at_knots_migrated() -> None:
 
 
 def test_pv_at_epoch_works_without_expanding_cache_migrated() -> None:
-    e = Orbit.from_kepler(
+    e = Orbit.from_kepler_precise(
         epoch=Time("2026-01-01T00:00:00", scale="utc"),
         a_m=7000e3,
         e=0.001,
@@ -111,7 +115,7 @@ def test_pv_at_epoch_works_without_expanding_cache_migrated() -> None:
 
 
 def test_ephemeris_scalar_vector_consistency_migrated() -> None:
-    e = Orbit.from_kepler(
+    e = Orbit.from_kepler_precise(
         epoch=Time("2026-01-01T00:00:00", scale="utc"),
         a_m=7000e3,
         e=0.001,
@@ -133,7 +137,7 @@ def test_ephemeris_scalar_vector_consistency_migrated() -> None:
 
 
 def test_ephemeris_cache_expands_both_directions_migrated() -> None:
-    e = Orbit.from_kepler(
+    e = Orbit.from_kepler_precise(
         epoch=Time("2026-01-01T00:00:00", scale="utc"),
         a_m=8000e3,
         e=0.05,
@@ -156,7 +160,7 @@ def test_ephemeris_cache_expands_both_directions_migrated() -> None:
 @pytest.mark.slow
 def test_ephemeris_matches_direct_propagation_newtonian_migrated() -> None:
     dt_save = 60.0
-    e = Orbit.from_kepler(
+    e = Orbit.from_kepler_precise(
         epoch=Time("2026-01-01T00:00:00", scale="utc"),
         a_m=7000e3,
         e=0.01,
@@ -201,8 +205,8 @@ def test_dt_save_monotonic_accuracy_migrated() -> None:
         position_tolerance_m=0.1,
         initial_step_s=60.0,
     )
-    e60 = Orbit.from_kepler(dt_save_s=60.0, **kepler)
-    e10 = Orbit.from_kepler(dt_save_s=10.0, **kepler)
+    e60 = Orbit.from_kepler_precise(dt_save_s=60.0, **kepler)
+    e10 = Orbit.from_kepler_precise(dt_save_s=10.0, **kepler)
     rng = np.random.default_rng(0)
     base = np.linspace(0.0, 6 * 3600.0, 400, dtype=np.float64)
     jitter = rng.uniform(0.1, 0.9, size=base.shape)
@@ -224,7 +228,7 @@ def test_dt_save_monotonic_accuracy_migrated() -> None:
 
 def test_transform_consistency_at_cached_knots_migrated() -> None:
     dt_save = 120.0
-    e = Orbit.from_kepler(
+    e = Orbit.from_kepler_precise(
         epoch=Time("2026-01-01T00:00:00", scale="utc"),
         a_m=7000e3,
         e=0.01,
@@ -238,7 +242,9 @@ def test_transform_consistency_at_cached_knots_migrated() -> None:
         gravity_order=20,
         position_tolerance_m=0.1,
     )
-    _ = e.pos(make_time_grid(e.epoch, t_min_s=0.0, t_max_s=10 * dt_save, n=11), frame="native")
+    _ = e.pos(
+        make_time_grid(e.epoch, t_min_s=0.0, t_max_s=10 * dt_save, n=11), frame="native"
+    )
     ks = np.arange(0, 11, dtype=np.int64)
     t_knots = e.epoch + (ks.astype(np.float64) * dt_save) * u.s
     rN_i, vN_i = e.pv(t_knots, frame="native")
@@ -251,7 +257,7 @@ def test_transform_consistency_at_cached_knots_migrated() -> None:
 
 
 def test_from_pv_reproduces_initial_state_migrated() -> None:
-    ref = Orbit.from_kepler(
+    ref = Orbit.from_kepler_precise(
         epoch=Time("2026-01-01T00:00:00", scale="utc"),
         a_m=8000e3,
         e=0.02,
@@ -284,7 +290,7 @@ def test_from_pv_reproduces_initial_state_migrated() -> None:
 
 
 def test_lla_ranges_and_shapes_migrated() -> None:
-    e = Orbit.from_kepler(
+    e = Orbit.from_kepler_precise(
         epoch=Time("2026-01-01T00:00:00", scale="utc"),
         a_m=7000e3,
         e=0.001,
@@ -313,7 +319,7 @@ def test_lla_ranges_and_shapes_migrated() -> None:
 
 
 def test_nan_inf_inputs_rejected_migrated() -> None:
-    e = Orbit.from_kepler(
+    e = Orbit.from_kepler_precise(
         epoch=Time("2026-01-01T00:00:00", scale="utc"),
         a_m=7000e3,
         e=0.001,
@@ -331,7 +337,7 @@ def test_nan_inf_inputs_rejected_migrated() -> None:
 @pytest.mark.slow
 def test_no_step_handler_growth_with_many_extensions_migrated() -> None:
     dt_save = 60.0
-    e = Orbit.from_kepler(
+    e = Orbit.from_kepler_precise(
         epoch=Time("2026-01-01T00:00:00", scale="utc"),
         a_m=7000e3,
         e=0.01,
@@ -360,7 +366,7 @@ def test_no_step_handler_growth_with_many_extensions_migrated() -> None:
 @pytest.mark.slow
 def test_ephemeris_matches_direct_propagation_backward_migrated() -> None:
     dt_save = 60.0
-    e = Orbit.from_kepler(
+    e = Orbit.from_kepler_precise(
         epoch=Time("2026-01-01T00:00:00", scale="utc"),
         a_m=7000e3,
         e=0.01,
@@ -458,7 +464,7 @@ def test_force_model_matrix_matches_direct_propagation_migrated() -> None:
     t_offsets = np.sort(rng.uniform(5.0, 2 * 3600.0 - 5.0, size=61))
     for cfg in configs:
         try:
-            e = Orbit.from_kepler(**base_kwargs, **cfg["kwargs"])
+            e = Orbit.from_kepler_precise(**base_kwargs, **cfg["kwargs"])
         except Exception:
             pytest.skip("force-model configuration unavailable with current data setup")
         t_grid = e.epoch + t_offsets * u.s
@@ -480,7 +486,7 @@ def test_frame_consistency_transform_vs_dual_cache_improves_with_dt_migrated() -
     epoch_in = Time("2026-01-01T00:00:00", scale="utc")
 
     def build(dt_save: float) -> Orbit:
-        return Orbit.from_kepler(
+        return Orbit.from_kepler_precise(
             epoch=epoch_in,
             a_m=7000e3,
             e=0.01,
@@ -500,7 +506,10 @@ def test_frame_consistency_transform_vs_dual_cache_improves_with_dt_migrated() -
     e10 = build(10.0)
 
     def mismatch_stats(e: Orbit, dt_save: float) -> tuple[float, float]:
-        ts = e.epoch + (np.arange(1, 181, dtype=np.float64) * dt_save + 0.37 * dt_save) * u.s
+        ts = (
+            e.epoch
+            + (np.arange(1, 181, dtype=np.float64) * dt_save + 0.37 * dt_save) * u.s
+        )
         rI_a, vI_a = e.pv(ts, frame="itrf")
         rI_b = np.empty_like(rI_a)
         vI_b = np.empty_like(vI_a)
@@ -526,10 +535,12 @@ def test_leap_second_crossing_monotonic_dt_and_pv_migrated() -> None:
     ts = epoch_in + np.arange(0, 90, dtype=np.float64) * u.s
     dt_s, is_scalar = _dt_seconds_from_epoch(ts, epoch_in)
     assert not is_scalar
-    np.testing.assert_allclose(dt_s, np.arange(0, 90, dtype=np.float64), atol=1e-9, rtol=0.0)
+    np.testing.assert_allclose(
+        dt_s, np.arange(0, 90, dtype=np.float64), atol=1e-9, rtol=0.0
+    )
     assert np.all(np.diff(dt_s) > 0)
 
-    e = Orbit.from_kepler(
+    e = Orbit.from_kepler_precise(
         epoch=epoch_in,
         a_m=7000e3,
         e=0.01,
