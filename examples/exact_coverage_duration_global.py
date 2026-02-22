@@ -17,7 +17,7 @@ if __package__ is None or __package__ == "":
         sys.path.insert(0, str(_REPO_ROOT))
 
 from nebula.coverage import (
-    CoverageConfig,
+    ExactCoverageConfig,
     build_access_interval_store_from_config,
     access_duration_by_target,
 )
@@ -35,7 +35,7 @@ def _build_demo_constellation(epoch: Time) -> list[FastOrbit]:
         # a_m, e, inc_deg, raan_deg, count
         (6878e3, 0.001, 53.0, 0.0, 3),
         (6878e3, 0.001, 53.0, 120.0, 3),
-        (20200e3, 0.01, 55.0, 60.0, 2),
+        (51000e3, 0.6, 45.0, 60.0, 2),
     ]
 
     for a_m, e, inc_deg, raan_deg, count in planes:
@@ -60,10 +60,75 @@ def _build_demo_constellation(epoch: Time) -> list[FastOrbit]:
     return sats
 
 
+def _latitude_edges_from_rows(lat_rows_deg: np.ndarray) -> np.ndarray:
+    lat = np.asarray(lat_rows_deg, dtype=np.float64)
+    n = lat.size
+    edges = np.empty(n + 1, dtype=np.float64)
+    if n == 1:
+        edges[0] = lat[0] - 0.5
+        edges[1] = lat[0] + 0.5
+    else:
+        edges[1:-1] = 0.5 * (lat[:-1] + lat[1:])
+        edges[0] = lat[0] - 0.5 * (lat[1] - lat[0])
+        edges[-1] = lat[-1] + 0.5 * (lat[-1] - lat[-2])
+    return np.clip(edges, -90.0, 90.0)
+
+
+def _rasterize_lat_row_field_to_regular_grid(
+    config: ExactCoverageConfig,
+    values_flat: np.ndarray,
+    *,
+    nlon_render: int = 720,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Convert latitude-row values on a nonuniform longitude grid to a regular
+    lon/lat raster for cohesive heatmap rendering.
+    """
+    vals = np.asarray(values_flat, dtype=np.float64)
+    if vals.shape != (config.n_targets,):
+        raise ValueError("values_flat must have shape (config.n_targets,)")
+
+    nlon = int(max(90, nlon_render))
+    lon_edges = np.linspace(-180.0, 180.0, nlon + 1, dtype=np.float64)
+    lon_centers = 0.5 * (lon_edges[:-1] + lon_edges[1:])
+    lon_centers_360 = np.mod(lon_centers + 360.0, 360.0)
+
+    grid = np.empty((int(config.nlats), nlon), dtype=np.float64)
+    for row_idx in range(int(config.nlats)):
+        i0 = int(config.row_offsets[row_idx])
+        i1 = int(config.row_offsets[row_idx + 1])
+
+        row_vals = vals[i0:i1]
+        if row_vals.size == 1:
+            grid[row_idx, :] = row_vals[0]
+            continue
+
+        lon_row = config.lon_deg_flat[i0:i1]
+        lon_row_360 = np.mod(lon_row + 360.0, 360.0)
+        order = np.argsort(lon_row_360)
+        xp = lon_row_360[order]
+        fp = row_vals[order]
+
+        # Drop duplicate longitudes (can occur when endpoints wrap together).
+        keep = np.empty(xp.size, dtype=bool)
+        keep[0] = True
+        keep[1:] = np.diff(xp) > 1e-12
+        xp = xp[keep]
+        fp = fp[keep]
+
+        if xp.size == 1:
+            grid[row_idx, :] = fp[0]
+        else:
+            grid[row_idx, :] = np.interp(lon_centers_360, xp, fp, period=360.0)
+
+    lat_edges = _latitude_edges_from_rows(config.lat_deg_rows)
+    return lon_edges, lat_edges, grid
+
+
 def main() -> None:
     epoch = Time("2026-01-01T00:00:00", scale="utc")
 
-    duration_s = 24.0 * 3600.0 * 7.0
+    duration_s = 24.0 * 3600.0 * 10
     step_s = 60.0
     n_steps = int(duration_s / step_s) + 1
     times = epoch + np.arange(n_steps, dtype=np.float64) * step_s * u.s
@@ -72,11 +137,15 @@ def main() -> None:
     sats = _build_demo_constellation(epoch)
     obs_positions = [sat.pos_itrf(times) for sat in sats]
 
-    config = CoverageConfig(
+    config = ExactCoverageConfig(
         nlats=181,
-        nlons=361,
-        min_elevation_deg=10.0,
-        max_elevation_deg=90.0,
+        nlons_equator=361,
+        scale_longitude_by_latitude=False,
+        min_lon_points_per_row=1,
+        min_elevation_deg=0.0,
+        max_elevation_deg=50.0,
+        include_lat_endpoints=True,
+        include_lon_endpoints=False,
     )
 
     import time
@@ -86,28 +155,33 @@ def main() -> None:
         config=config,
         time=t_seconds,
         observer_positions=obs_positions,
-        interpolation="cubic",
+        interpolation="linear",
         root_tolerance_s=1e-3,
-        root_bracket_substeps=32,
     )
     t1 = time.time()
     print(f"Built access interval store in {t1 - t0:.2f} seconds")
 
-    duration_grid_s = access_duration_by_target(store, N=1, reshape=True)
-    duration_grid_hr = duration_grid_s / 3600.0
+    duration_s_per_target = access_duration_by_target(store, N=1, reshape=False)
+    duration_hr_per_target = duration_s_per_target / 3600.0
+
+    lon_edges, lat_edges, duration_hr_grid = _rasterize_lat_row_field_to_regular_grid(
+        config,
+        duration_hr_per_target,
+        nlon_render=max(720, int(config.nlons_equator) * 2),
+    )
 
     fig, ax, _, _ = make_basemap(LIGHT_DETAILED)
     data_crs = ccrs.PlateCarree()
     mesh = ax.pcolormesh(
-        config.lon_edges_deg,
-        config.lat_edges_deg,
-        duration_grid_hr,
+        lon_edges,
+        lat_edges,
+        duration_hr_grid,
         transform=data_crs,
-        shading="auto",
         cmap="viridis",
-        alpha=0.65,
+        shading="auto",
         rasterized=True,
-        zorder=2,
+        zorder=4,
+        alpha=0.7,
     )
     ax.set_title(
         f"Exact-Interval Coverage Duration (N>=1)\n"

@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 import numpy as np
-from nebula.coverage._empirical_core import coverage_stamp_kernel_empirical
+from nebula.coverage.fixed_dt._empirical_core import coverage_stamp_kernel_empirical
 from nebula.transform import geodetic2ecef
 from nebula.transform.constants import WGS84_A, WGS84_E2
 

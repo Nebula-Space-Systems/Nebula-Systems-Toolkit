@@ -1,6 +1,7 @@
-from nebula.coverage.config import CoverageConfig
-from nebula.coverage._empirical_core import coverage_stamp_kernel_empirical
-from nebula.coverage._exact_intervals import (
+from nebula.coverage.fixed_dt.config import CoverageConfig
+from nebula.coverage.fixed_dt._empirical_core import coverage_stamp_kernel_empirical
+from nebula.coverage.intervals.config import ExactCoverageConfig
+from nebula.coverage.intervals._exact_intervals import (
     AccessIntervalStore,
     build_surface_targets_from_config,
     build_access_interval_store,
@@ -32,6 +33,7 @@ from nebula.geometry.spherical_los import (
 __all__ = [
     "CoverageConfig",
     "coverage_stamp_kernel_empirical",
+    "ExactCoverageConfig",
     "AccessIntervalStore",
     "build_surface_targets_from_config",
     "build_access_interval_store",

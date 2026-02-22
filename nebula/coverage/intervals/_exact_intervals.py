@@ -6,13 +6,18 @@ from typing import Iterable
 import numpy as np
 from numba import njit, prange
 
-from nebula.coverage.config import CoverageConfig
+from nebula.coverage.intervals.config import ExactCoverageConfig
+from nebula.transform.constants import WGS84_A, WGS84_E2
 
 
 _ROOT_EPS = 1e-12
 _MERGE_EPS = 1e-10
 _EVENT_EPS = 1e-10
 _HALF_PI = 0.5 * np.pi
+_CUBIC_SCAN_MIN = 8
+_CUBIC_SCAN_MAX = 64
+_CUBIC_SCAN_TARGET_ANGLE_RAD = np.deg2rad(0.35)
+_CUBIC_SCAN_CURVATURE_GAIN = 0.35
 
 
 @dataclass
@@ -36,7 +41,6 @@ class AccessIntervalStore:
     max_elevation_rad: float
     interpolation: str
     root_tolerance_s: float
-    root_bracket_substeps: int
     target_shape: tuple[int, int] | None = None
 
     def pair_index(self, observer_index: int, target_index: int) -> int:
@@ -61,47 +65,45 @@ class AccessIntervalStore:
 
 
 def build_surface_targets_from_config(
-    config: CoverageConfig,
+    config: ExactCoverageConfig,
 ) -> tuple[np.ndarray, np.ndarray]:
     """
-    Build flattened surface target geometry from `CoverageConfig`.
+    Build flattened surface target geometry from `ExactCoverageConfig`.
 
     Returns
     -------
     tuple[np.ndarray, np.ndarray]
-        `target_positions` and `target_up_vectors`, both shape `(nlats*nlons, 3)`.
+        `target_positions` and `target_up_vectors`, shape `(config.n_targets, 3)`.
     """
-    ny = int(config.nlats)
-    nx = int(config.nlons)
-    n_targets = ny * nx
+    n_targets = int(config.n_targets)
 
     target_positions = np.empty((n_targets, 3), dtype=np.float64)
     target_up = np.empty((n_targets, 3), dtype=np.float64)
 
-    idx = 0
-    for j in range(ny):
-        ncos = float(config.Ncos_row_m[j])
-        nz = float(config.Nz_row_m[j])
-        clat = float(config.cos_lat_row_geod[j])
-        slat = float(config.sin_lat_row_geod[j])
-        for i in range(nx):
-            clon = float(config.cos_lon_col[i])
-            slon = float(config.sin_lon_col[i])
+    lat_rad = np.deg2rad(config.lat_deg_flat)
+    lon_rad = np.deg2rad(config.lon_deg_flat)
+    sin_lat = np.sin(lat_rad)
+    cos_lat = np.cos(lat_rad)
+    sin_lon = np.sin(lon_rad)
+    cos_lon = np.cos(lon_rad)
 
-            target_positions[idx, 0] = ncos * clon
-            target_positions[idx, 1] = ncos * slon
-            target_positions[idx, 2] = nz
+    N = WGS84_A / np.sqrt(1.0 - WGS84_E2 * sin_lat * sin_lat)
+    ncos = N * cos_lat
+    nz = (1.0 - WGS84_E2) * N * sin_lat
 
-            target_up[idx, 0] = clat * clon
-            target_up[idx, 1] = clat * slon
-            target_up[idx, 2] = slat
-            idx += 1
+    target_positions[:, 0] = ncos * cos_lon
+    target_positions[:, 1] = ncos * sin_lon
+    target_positions[:, 2] = nz
+
+    target_up[:, 0] = cos_lat * cos_lon
+    target_up[:, 1] = cos_lat * sin_lon
+    target_up[:, 2] = sin_lat
 
     return target_positions, target_up
 
 
 def build_access_interval_store_from_config(
-    config: CoverageConfig,
+    config: ExactCoverageConfig,
     time: np.ndarray,
     observer_positions: Iterable[np.ndarray],
     *,
@@ -110,10 +112,9 @@ def build_access_interval_store_from_config(
     interpolation: str = "cubic",
     root_tolerance_s: float = 1e-3,
     max_root_iterations: int = 64,
-    root_bracket_substeps: int = 32,
 ) -> AccessIntervalStore:
     """
-    Convenience wrapper for gridded surface coverage from `CoverageConfig`.
+    Convenience wrapper for gridded surface coverage from `ExactCoverageConfig`.
     """
     min_el = (
         float(config.min_elevation_deg)
@@ -138,8 +139,7 @@ def build_access_interval_store_from_config(
         interpolation=interpolation,
         root_tolerance_s=root_tolerance_s,
         max_root_iterations=max_root_iterations,
-        root_bracket_substeps=root_bracket_substeps,
-        target_shape=(int(config.nlats), int(config.nlons)),
+        target_shape=config.target_shape,
     )
 
 
@@ -155,7 +155,6 @@ def build_access_interval_store(
     interpolation: str = "cubic",
     root_tolerance_s: float = 1e-3,
     max_root_iterations: int = 64,
-    root_bracket_substeps: int = 32,
     target_shape: tuple[int, int] | None = None,
 ) -> AccessIntervalStore:
     """
@@ -165,8 +164,8 @@ def build_access_interval_store(
     -----
     - Interpolation supports piecewise `linear` and `cubic` (Hermite) observer motion.
     - Candidate transition brackets are found analytically; transition times are then
-      root-refined via bisection to `root_tolerance_s` (seconds). For cubic, brackets
-      are detected by sign scans with `root_bracket_substeps` subdivisions per segment.
+      root-refined via bisection to `root_tolerance_s` (seconds). For cubic, bracket
+      scan density is selected internally and adaptively per segment.
     """
     times = _validate_time_array(time)
     obs_stack = _stack_observers(times, observer_positions)
@@ -184,15 +183,13 @@ def build_access_interval_store(
     if root_max_iter < 1:
         raise ValueError("max_root_iterations must be >= 1")
 
-    bracket_steps = int(root_bracket_substeps)
-    if bracket_steps < 4:
-        raise ValueError("root_bracket_substeps must be >= 4")
-
     n_obs = int(obs_stack.shape[1])
     obs_vel_stack = np.empty((0, 0, 0), dtype=np.float64)
+    cubic_coeff_stack = np.empty((0, 0, 0, 0), dtype=np.float64)
     interp_code = np.int64(0)
     if interp == "cubic":
         obs_vel_stack = _estimate_observer_velocities(times, obs_stack)
+        cubic_coeff_stack = _build_cubic_coefficients(times, obs_stack, obs_vel_stack)
         interp_code = np.int64(1)
 
     n_targets = int(targets.shape[0])
@@ -218,7 +215,6 @@ def build_access_interval_store(
             max_elevation_rad=max_el,
             interpolation=interp,
             root_tolerance_s=root_tol_s,
-            root_bracket_substeps=bracket_steps,
             target_shape=target_shape,
         )
 
@@ -234,7 +230,7 @@ def build_access_interval_store(
         obs_stack,
         targets,
         target_up,
-        obs_vel_stack,
+        cubic_coeff_stack,
         min_el,
         max_el,
         sin2_min,
@@ -243,7 +239,6 @@ def build_access_interval_store(
         interp_code,
         root_tol_s,
         root_max_iter,
-        bracket_steps,
         pair_counts,
     )
 
@@ -260,7 +255,7 @@ def build_access_interval_store(
         obs_stack,
         targets,
         target_up,
-        obs_vel_stack,
+        cubic_coeff_stack,
         min_el,
         max_el,
         sin2_min,
@@ -269,7 +264,6 @@ def build_access_interval_store(
         interp_code,
         root_tol_s,
         root_max_iter,
-        bracket_steps,
         pair_offsets,
         start_times,
         stop_times,
@@ -287,7 +281,6 @@ def build_access_interval_store(
         max_elevation_rad=max_el,
         interpolation=interp,
         root_tolerance_s=root_tol_s,
-        root_bracket_substeps=bracket_steps,
         target_shape=target_shape,
     )
 
@@ -449,6 +442,14 @@ def _estimate_observer_velocities(time: np.ndarray, obs_stack: np.ndarray) -> np
     return vel
 
 
+def _build_cubic_coefficients(
+    time: np.ndarray, obs_stack: np.ndarray, obs_vel_stack: np.ndarray
+) -> np.ndarray:
+    coeff = np.empty((time.size - 1, obs_stack.shape[1], 3, 4), dtype=np.float64)
+    _build_cubic_coefficients_kernel(time, obs_stack, obs_vel_stack, coeff)
+    return coeff
+
+
 @njit(cache=True, parallel=True)
 def _estimate_observer_velocities_kernel(
     time: np.ndarray, obs_stack: np.ndarray, vel: np.ndarray
@@ -478,6 +479,29 @@ def _estimate_observer_velocities_kernel(
             vel[nt - 1, k, c] = (
                 obs_stack[nt - 1, k, c] - obs_stack[nt - 2, k, c]
             ) * inv_dtn
+
+
+@njit(cache=True, parallel=True)
+def _build_cubic_coefficients_kernel(
+    time: np.ndarray,
+    obs_stack: np.ndarray,
+    obs_vel_stack: np.ndarray,
+    coeff: np.ndarray,
+) -> None:
+    nt = time.size
+    n_obs = obs_stack.shape[1]
+    for ti in prange(nt - 1):
+        dt = time[ti + 1] - time[ti]
+        for k in range(n_obs):
+            for c in range(3):
+                r0 = obs_stack[ti, k, c]
+                r1 = obs_stack[ti + 1, k, c]
+                m0 = obs_vel_stack[ti, k, c] * dt
+                m1 = obs_vel_stack[ti + 1, k, c] * dt
+                coeff[ti, k, c, 0] = r0
+                coeff[ti, k, c, 1] = m0
+                coeff[ti, k, c, 2] = -3.0 * r0 + 3.0 * r1 - 2.0 * m0 - m1
+                coeff[ti, k, c, 3] = 2.0 * r0 - 2.0 * r1 + m0 + m1
 
 
 @njit(cache=True, inline="always")
@@ -803,19 +827,6 @@ def _segment_access_intervals_s(
 
 
 @njit(cache=True, inline="always")
-def _cubic_rel_component(
-    r0: float, r1: float, v0: float, v1: float, dt: float, g: float
-) -> tuple[float, float, float, float]:
-    m0 = v0 * dt
-    m1 = v1 * dt
-    c0 = r0 - g
-    c1 = m0
-    c2 = -3.0 * r0 + 3.0 * r1 - 2.0 * m0 - m1
-    c3 = 2.0 * r0 - 2.0 * r1 + m0 + m1
-    return c0, c1, c2, c3
-
-
-@njit(cache=True, inline="always")
 def _poly3(c0: float, c1: float, c2: float, c3: float, s: float) -> float:
     return ((c3 * s + c2) * s + c1) * s + c0
 
@@ -1135,6 +1146,102 @@ def _collect_roots_cubic_threshold(
 
 
 @njit(cache=True, inline="always")
+def _norm3(x: float, y: float, z: float) -> float:
+    return np.sqrt(x * x + y * y + z * z)
+
+
+@njit(cache=True, inline="always")
+def _choose_cubic_scan_steps(
+    cx0: float,
+    cx1: float,
+    cx2: float,
+    cx3: float,
+    cy0: float,
+    cy1: float,
+    cy2: float,
+    cy3: float,
+    cz0: float,
+    cz1: float,
+    cz2: float,
+    cz3: float,
+    dt: float,
+) -> int:
+    """
+    Adaptive cubic bracket scan density from local line-of-sight dynamics.
+
+    We scale scan count by estimated LOS angular rate and apply a mild
+    curvature boost from endpoint acceleration. This keeps brackets dense
+    when dynamics are fast while avoiding fixed oversampling elsewhere.
+    """
+    if dt <= 0.0:
+        return _CUBIC_SCAN_MIN
+
+    # Relative vectors d(s) at segment endpoints.
+    d0x = cx0
+    d0y = cy0
+    d0z = cz0
+    d1x = cx0 + cx1 + cx2 + cx3
+    d1y = cy0 + cy1 + cy2 + cy3
+    d1z = cz0 + cz1 + cz2 + cz3
+
+    inv_dt = 1.0 / dt
+    inv_dt2 = inv_dt * inv_dt
+
+    # Velocity dr/dt at s=0 and s=1 from cubic coefficients.
+    v0x = cx1 * inv_dt
+    v0y = cy1 * inv_dt
+    v0z = cz1 * inv_dt
+    v1x = (cx1 + 2.0 * cx2 + 3.0 * cx3) * inv_dt
+    v1y = (cy1 + 2.0 * cy2 + 3.0 * cy3) * inv_dt
+    v1z = (cz1 + 2.0 * cz2 + 3.0 * cz3) * inv_dt
+
+    # Angular LOS rate |d x v| / |d|^2.
+    d0_norm2 = d0x * d0x + d0y * d0y + d0z * d0z
+    d1_norm2 = d1x * d1x + d1y * d1y + d1z * d1z
+    eps = 1e-18
+
+    c0x = d0y * v0z - d0z * v0y
+    c0y = d0z * v0x - d0x * v0z
+    c0z = d0x * v0y - d0y * v0x
+    c1x = d1y * v1z - d1z * v1y
+    c1y = d1z * v1x - d1x * v1z
+    c1z = d1x * v1y - d1y * v1x
+    w0 = _norm3(c0x, c0y, c0z) / (d0_norm2 + eps)
+    w1 = _norm3(c1x, c1y, c1z) / (d1_norm2 + eps)
+    w_max = w0 if w0 >= w1 else w1
+
+    # Mild curvature boost from endpoint acceleration.
+    a0x = (2.0 * cx2) * inv_dt2
+    a0y = (2.0 * cy2) * inv_dt2
+    a0z = (2.0 * cz2) * inv_dt2
+    a1x = (2.0 * cx2 + 6.0 * cx3) * inv_dt2
+    a1y = (2.0 * cy2 + 6.0 * cy3) * inv_dt2
+    a1z = (2.0 * cz2 + 6.0 * cz3) * inv_dt2
+
+    v0n = _norm3(v0x, v0y, v0z)
+    v1n = _norm3(v1x, v1y, v1z)
+    an0 = _norm3(a0x, a0y, a0z)
+    an1 = _norm3(a1x, a1y, a1z)
+    v_ref = v0n if v0n >= v1n else v1n
+    a_ref = an0 if an0 >= an1 else an1
+
+    curvature = a_ref * dt / (v_ref + eps)
+    if curvature > 4.0:
+        curvature = 4.0
+    boost = 1.0 + _CUBIC_SCAN_CURVATURE_GAIN * curvature
+
+    target = _CUBIC_SCAN_TARGET_ANGLE_RAD
+    if target <= 0.0:
+        target = 1e-6
+    n_scan = int(np.ceil((dt * w_max * boost) / target))
+    if n_scan < _CUBIC_SCAN_MIN:
+        n_scan = _CUBIC_SCAN_MIN
+    if n_scan > _CUBIC_SCAN_MAX:
+        n_scan = _CUBIC_SCAN_MAX
+    return n_scan
+
+
+@njit(cache=True, inline="always")
 def _segment_access_intervals_cubic_s(
     cx0: float,
     cx1: float,
@@ -1159,7 +1266,7 @@ def _segment_access_intervals_cubic_s(
     dt: float,
     root_tol_s: float,
     root_max_iter: int,
-    root_bracket_substeps: int,
+    n_scan: int,
     node_band: np.ndarray,
     node_min: np.ndarray,
     node_max: np.ndarray,
@@ -1169,7 +1276,6 @@ def _segment_access_intervals_cubic_s(
     s_tol = (root_tol_s / dt) if root_tol_s > 0.0 else 0.0
     if s_tol <= _ROOT_EPS:
         s_tol = _ROOT_EPS
-    n_scan = root_bracket_substeps
     ds = 1.0 / float(n_scan)
 
     # Sample band state once on a fixed scan grid.
@@ -1264,7 +1370,7 @@ def _count_pair_intervals_kernel(
     obs_stack: np.ndarray,
     target_positions: np.ndarray,
     target_up: np.ndarray,
-    obs_vel_stack: np.ndarray,
+    cubic_coeff_stack: np.ndarray,
     min_el_rad: float,
     max_el_rad: float,
     sin2_min: float,
@@ -1273,7 +1379,6 @@ def _count_pair_intervals_kernel(
     interp_code: int,
     root_tol_s: float,
     root_max_iter: int,
-    root_bracket_substeps: int,
     pair_counts: np.ndarray,
 ) -> None:
     nt = time.size
@@ -1303,11 +1408,11 @@ def _count_pair_intervals_kernel(
         seg_start_lin = np.empty(9, dtype=np.float64)
         seg_stop_lin = np.empty(9, dtype=np.float64)
 
-        node_band = np.empty(root_bracket_substeps + 1, dtype=np.uint8)
-        node_min = np.empty(root_bracket_substeps + 1, dtype=np.uint8)
-        node_max = np.empty(root_bracket_substeps + 1, dtype=np.uint8)
-        seg_start_cub = np.empty(2 * root_bracket_substeps + 3, dtype=np.float64)
-        seg_stop_cub = np.empty(2 * root_bracket_substeps + 3, dtype=np.float64)
+        node_band = np.empty(_CUBIC_SCAN_MAX + 1, dtype=np.uint8)
+        node_min = np.empty(_CUBIC_SCAN_MAX + 1, dtype=np.uint8)
+        node_max = np.empty(_CUBIC_SCAN_MAX + 1, dtype=np.uint8)
+        seg_start_cub = np.empty(2 * _CUBIC_SCAN_MAX + 3, dtype=np.float64)
+        seg_stop_cub = np.empty(2 * _CUBIC_SCAN_MAX + 3, dtype=np.float64)
 
         for ti in range(nt - 1):
             t0 = time[ti]
@@ -1324,22 +1429,22 @@ def _count_pair_intervals_kernel(
             o1y = obs_stack[ti + 1, obs_idx, 1]
             o1z = obs_stack[ti + 1, obs_idx, 2]
 
-            vx = o1x - o0x
-            vy = o1y - o0y
-            vz = o1z - o0z
-
-            d0x = o0x - gx
-            d0y = o0y - gy
-            d0z = o0z - gz
-
-            a = d0x * ux_up + d0y * uy_up + d0z * uz_up
-            b = vx * ux_up + vy * uy_up + vz * uz_up
-            c = d0x * d0x + d0y * d0y + d0z * d0z
-            d = 2.0 * (d0x * vx + d0y * vy + d0z * vz)
-            e = vx * vx + vy * vy + vz * vz
-
             n_seg = 0
             if interp_code == 0:
+                vx = o1x - o0x
+                vy = o1y - o0y
+                vz = o1z - o0z
+
+                d0x = o0x - gx
+                d0y = o0y - gy
+                d0z = o0z - gz
+
+                a = d0x * ux_up + d0y * uy_up + d0z * uz_up
+                b = vx * ux_up + vy * uy_up + vz * uz_up
+                c = d0x * d0x + d0y * d0y + d0z * d0z
+                d = 2.0 * (d0x * vx + d0y * vy + d0z * vz)
+                e = vx * vx + vy * vy + vz * vz
+
                 n_seg = _segment_access_intervals_s(
                     a,
                     b,
@@ -1362,16 +1467,33 @@ def _count_pair_intervals_kernel(
                     seg_stop_lin,
                 )
             else:
-                v0x = obs_vel_stack[ti, obs_idx, 0]
-                v0y = obs_vel_stack[ti, obs_idx, 1]
-                v0z = obs_vel_stack[ti, obs_idx, 2]
-                v1x = obs_vel_stack[ti + 1, obs_idx, 0]
-                v1y = obs_vel_stack[ti + 1, obs_idx, 1]
-                v1z = obs_vel_stack[ti + 1, obs_idx, 2]
-
-                cx0, cx1, cx2, cx3 = _cubic_rel_component(o0x, o1x, v0x, v1x, dt, gx)
-                cy0, cy1, cy2, cy3 = _cubic_rel_component(o0y, o1y, v0y, v1y, dt, gy)
-                cz0, cz1, cz2, cz3 = _cubic_rel_component(o0z, o1z, v0z, v1z, dt, gz)
+                cx0 = cubic_coeff_stack[ti, obs_idx, 0, 0] - gx
+                cx1 = cubic_coeff_stack[ti, obs_idx, 0, 1]
+                cx2 = cubic_coeff_stack[ti, obs_idx, 0, 2]
+                cx3 = cubic_coeff_stack[ti, obs_idx, 0, 3]
+                cy0 = cubic_coeff_stack[ti, obs_idx, 1, 0] - gy
+                cy1 = cubic_coeff_stack[ti, obs_idx, 1, 1]
+                cy2 = cubic_coeff_stack[ti, obs_idx, 1, 2]
+                cy3 = cubic_coeff_stack[ti, obs_idx, 1, 3]
+                cz0 = cubic_coeff_stack[ti, obs_idx, 2, 0] - gz
+                cz1 = cubic_coeff_stack[ti, obs_idx, 2, 1]
+                cz2 = cubic_coeff_stack[ti, obs_idx, 2, 2]
+                cz3 = cubic_coeff_stack[ti, obs_idx, 2, 3]
+                n_scan = _choose_cubic_scan_steps(
+                    cx0,
+                    cx1,
+                    cx2,
+                    cx3,
+                    cy0,
+                    cy1,
+                    cy2,
+                    cy3,
+                    cz0,
+                    cz1,
+                    cz2,
+                    cz3,
+                    dt,
+                )
 
                 n_seg = _segment_access_intervals_cubic_s(
                     cx0,
@@ -1397,7 +1519,7 @@ def _count_pair_intervals_kernel(
                     dt,
                     root_tol_s,
                     root_max_iter,
-                    root_bracket_substeps,
+                    n_scan,
                     node_band,
                     node_min,
                     node_max,
@@ -1434,7 +1556,7 @@ def _fill_pair_intervals_kernel(
     obs_stack: np.ndarray,
     target_positions: np.ndarray,
     target_up: np.ndarray,
-    obs_vel_stack: np.ndarray,
+    cubic_coeff_stack: np.ndarray,
     min_el_rad: float,
     max_el_rad: float,
     sin2_min: float,
@@ -1443,7 +1565,6 @@ def _fill_pair_intervals_kernel(
     interp_code: int,
     root_tol_s: float,
     root_max_iter: int,
-    root_bracket_substeps: int,
     pair_offsets: np.ndarray,
     start_times: np.ndarray,
     stop_times: np.ndarray,
@@ -1476,11 +1597,11 @@ def _fill_pair_intervals_kernel(
         seg_start_lin = np.empty(9, dtype=np.float64)
         seg_stop_lin = np.empty(9, dtype=np.float64)
 
-        node_band = np.empty(root_bracket_substeps + 1, dtype=np.uint8)
-        node_min = np.empty(root_bracket_substeps + 1, dtype=np.uint8)
-        node_max = np.empty(root_bracket_substeps + 1, dtype=np.uint8)
-        seg_start_cub = np.empty(2 * root_bracket_substeps + 3, dtype=np.float64)
-        seg_stop_cub = np.empty(2 * root_bracket_substeps + 3, dtype=np.float64)
+        node_band = np.empty(_CUBIC_SCAN_MAX + 1, dtype=np.uint8)
+        node_min = np.empty(_CUBIC_SCAN_MAX + 1, dtype=np.uint8)
+        node_max = np.empty(_CUBIC_SCAN_MAX + 1, dtype=np.uint8)
+        seg_start_cub = np.empty(2 * _CUBIC_SCAN_MAX + 3, dtype=np.float64)
+        seg_stop_cub = np.empty(2 * _CUBIC_SCAN_MAX + 3, dtype=np.float64)
 
         for ti in range(nt - 1):
             t0 = time[ti]
@@ -1497,22 +1618,22 @@ def _fill_pair_intervals_kernel(
             o1y = obs_stack[ti + 1, obs_idx, 1]
             o1z = obs_stack[ti + 1, obs_idx, 2]
 
-            vx = o1x - o0x
-            vy = o1y - o0y
-            vz = o1z - o0z
-
-            d0x = o0x - gx
-            d0y = o0y - gy
-            d0z = o0z - gz
-
-            a = d0x * ux_up + d0y * uy_up + d0z * uz_up
-            b = vx * ux_up + vy * uy_up + vz * uz_up
-            c = d0x * d0x + d0y * d0y + d0z * d0z
-            d = 2.0 * (d0x * vx + d0y * vy + d0z * vz)
-            e = vx * vx + vy * vy + vz * vz
-
             n_seg = 0
             if interp_code == 0:
+                vx = o1x - o0x
+                vy = o1y - o0y
+                vz = o1z - o0z
+
+                d0x = o0x - gx
+                d0y = o0y - gy
+                d0z = o0z - gz
+
+                a = d0x * ux_up + d0y * uy_up + d0z * uz_up
+                b = vx * ux_up + vy * uy_up + vz * uz_up
+                c = d0x * d0x + d0y * d0y + d0z * d0z
+                d = 2.0 * (d0x * vx + d0y * vy + d0z * vz)
+                e = vx * vx + vy * vy + vz * vz
+
                 n_seg = _segment_access_intervals_s(
                     a,
                     b,
@@ -1535,16 +1656,33 @@ def _fill_pair_intervals_kernel(
                     seg_stop_lin,
                 )
             else:
-                v0x = obs_vel_stack[ti, obs_idx, 0]
-                v0y = obs_vel_stack[ti, obs_idx, 1]
-                v0z = obs_vel_stack[ti, obs_idx, 2]
-                v1x = obs_vel_stack[ti + 1, obs_idx, 0]
-                v1y = obs_vel_stack[ti + 1, obs_idx, 1]
-                v1z = obs_vel_stack[ti + 1, obs_idx, 2]
-
-                cx0, cx1, cx2, cx3 = _cubic_rel_component(o0x, o1x, v0x, v1x, dt, gx)
-                cy0, cy1, cy2, cy3 = _cubic_rel_component(o0y, o1y, v0y, v1y, dt, gy)
-                cz0, cz1, cz2, cz3 = _cubic_rel_component(o0z, o1z, v0z, v1z, dt, gz)
+                cx0 = cubic_coeff_stack[ti, obs_idx, 0, 0] - gx
+                cx1 = cubic_coeff_stack[ti, obs_idx, 0, 1]
+                cx2 = cubic_coeff_stack[ti, obs_idx, 0, 2]
+                cx3 = cubic_coeff_stack[ti, obs_idx, 0, 3]
+                cy0 = cubic_coeff_stack[ti, obs_idx, 1, 0] - gy
+                cy1 = cubic_coeff_stack[ti, obs_idx, 1, 1]
+                cy2 = cubic_coeff_stack[ti, obs_idx, 1, 2]
+                cy3 = cubic_coeff_stack[ti, obs_idx, 1, 3]
+                cz0 = cubic_coeff_stack[ti, obs_idx, 2, 0] - gz
+                cz1 = cubic_coeff_stack[ti, obs_idx, 2, 1]
+                cz2 = cubic_coeff_stack[ti, obs_idx, 2, 2]
+                cz3 = cubic_coeff_stack[ti, obs_idx, 2, 3]
+                n_scan = _choose_cubic_scan_steps(
+                    cx0,
+                    cx1,
+                    cx2,
+                    cx3,
+                    cy0,
+                    cy1,
+                    cy2,
+                    cy3,
+                    cz0,
+                    cz1,
+                    cz2,
+                    cz3,
+                    dt,
+                )
 
                 n_seg = _segment_access_intervals_cubic_s(
                     cx0,
@@ -1570,7 +1708,7 @@ def _fill_pair_intervals_kernel(
                     dt,
                     root_tol_s,
                     root_max_iter,
-                    root_bracket_substeps,
+                    n_scan,
                     node_band,
                     node_min,
                     node_max,

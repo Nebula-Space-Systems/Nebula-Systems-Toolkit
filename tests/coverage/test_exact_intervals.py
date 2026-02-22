@@ -1,7 +1,7 @@
 import numpy as np
 
 from nebula.coverage import (
-    CoverageConfig,
+    ExactCoverageConfig,
     build_access_interval_store,
     build_access_interval_store_from_config,
     access_duration_by_target,
@@ -87,7 +87,9 @@ def test_mtta_from_stored_intervals_wrap_and_no_wrap() -> None:
 
 
 def test_config_wrapper_sets_target_shape_for_grid_queries() -> None:
-    cfg = CoverageConfig(nlats=2, nlons=3)
+    cfg = ExactCoverageConfig(
+        nlats=2, nlons_equator=3, scale_longitude_by_latitude=False
+    )
     time = np.array([0.0, 1.0], dtype=np.float64)
     observer = np.array([[0.0, 0.0, 8_000_000.0], [0.0, 0.0, 8_000_000.0]])
 
@@ -158,6 +160,35 @@ def test_cubic_interpolation_mode_runs_and_stores_metadata() -> None:
     )
 
     assert store.interpolation == "cubic"
-    assert store.root_bracket_substeps >= 4
+    assert store.root_tolerance_s == 1e-3
     assert store.start_times.size >= 1
     assert np.all(store.stop_times > store.start_times)
+
+
+def test_exact_config_latitude_scaling_reduces_targets() -> None:
+    cfg_uniform = ExactCoverageConfig(
+        nlats=61, nlons_equator=121, scale_longitude_by_latitude=False
+    )
+    cfg_scaled = ExactCoverageConfig(
+        nlats=61, nlons_equator=121, scale_longitude_by_latitude=True
+    )
+
+    assert cfg_uniform.n_targets == 61 * 121
+    assert cfg_uniform.target_shape == (61, 121)
+
+    assert cfg_scaled.n_targets < cfg_uniform.n_targets
+    assert cfg_scaled.target_shape is None
+    assert int(cfg_scaled.row_sizes[0]) < int(cfg_scaled.row_sizes[30])
+
+
+def test_exact_config_poles_degenerate_to_single_point() -> None:
+    cfg = ExactCoverageConfig(
+        nlats=181,
+        nlons_equator=361,
+        scale_longitude_by_latitude=True,
+        include_lat_endpoints=True,
+    )
+
+    # First/last latitude rows are poles, so longitude is degenerate.
+    assert int(cfg.row_sizes[0]) == 1
+    assert int(cfg.row_sizes[-1]) == 1

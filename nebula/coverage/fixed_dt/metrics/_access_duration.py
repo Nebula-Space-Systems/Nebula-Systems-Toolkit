@@ -6,8 +6,8 @@ from typing import List, Union, Dict
 import numpy as np
 from numba import njit, prange
 
-from nebula.coverage.config import CoverageConfig
-from nebula.coverage._empirical_core import (
+from nebula.coverage.fixed_dt.config import CoverageConfig
+from nebula.coverage.fixed_dt._empirical_core import (
     coverage_row_intervals_empirical_1row,
     _segments_minus_inners,
     _diff_add_seg,
