@@ -1,5 +1,14 @@
 from nebula.coverage.config import CoverageConfig
 from nebula.coverage._empirical_core import coverage_stamp_kernel_empirical
+from nebula.coverage._exact_intervals import (
+    AccessIntervalStore,
+    build_surface_targets_from_config,
+    build_access_interval_store,
+    build_access_interval_store_from_config,
+    access_duration_by_target,
+    max_asset_by_target,
+    mtta_by_target,
+)
 from nebula.geometry.ellipsoid_los import (
     los_clear_ellipsoid,
     los_clear_ellipsoid_many_to_many,
@@ -23,6 +32,13 @@ from nebula.geometry.spherical_los import (
 __all__ = [
     "CoverageConfig",
     "coverage_stamp_kernel_empirical",
+    "AccessIntervalStore",
+    "build_surface_targets_from_config",
+    "build_access_interval_store",
+    "build_access_interval_store_from_config",
+    "access_duration_by_target",
+    "max_asset_by_target",
+    "mtta_by_target",
     "los_clear_ellipsoid",
     "los_clear_ellipsoid_many_to_many",
     "los_clear_ellipsoid_one_to_many",
