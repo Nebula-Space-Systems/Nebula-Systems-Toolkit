@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import astropy.units as u
 import numpy as np
+import pytest
 from astropy.time import Time
 
 from nebula.propagation import Orbit
@@ -18,6 +19,12 @@ def _kepler_case() -> dict[str, float | Time]:
         argp=np.deg2rad(15.0),
         anomaly=np.deg2rad(10.0),
     )
+
+
+def _angle_delta_rad(a: np.ndarray | float, b: np.ndarray | float) -> np.ndarray:
+    aa = np.asarray(a, dtype=np.float64)
+    bb = np.asarray(b, dtype=np.float64)
+    return np.arctan2(np.sin(aa - bb), np.cos(aa - bb))
 
 
 def test_orbit_precision_constructor_mode_and_state() -> None:
@@ -60,6 +67,102 @@ def test_orbit_precision_mode_accepts_seconds_inputs() -> None:
     r_ref, v_ref = e.pv(45.0, frame="native")
     np.testing.assert_allclose(r_np, r_ref, atol=1e-12, rtol=0.0)
     np.testing.assert_allclose(v_np, v_ref, atol=1e-12, rtol=0.0)
+
+
+def test_orbit_keplerian_epoch_matches_input_elements() -> None:
+    case = _kepler_case()
+    e = Orbit.from_kepler_precise(
+        **case,
+        gravity_model="newtonian",
+        dt_save_s=60.0,
+    )
+
+    kep = e.keplerian(e.epoch, frame="native", anomaly_type="true", angle_unit="rad")
+
+    assert isinstance(kep["a_m"], float)
+    assert isinstance(kep["e"], float)
+    assert isinstance(kep["i"], float)
+    assert isinstance(kep["anomaly"], float)
+    assert kep["anomaly_type"] == "true"
+    assert kep["angle_unit"] == "rad"
+
+    np.testing.assert_allclose(float(kep["a_m"]), float(case["a_m"]), atol=1e-3, rtol=0.0)
+    np.testing.assert_allclose(float(kep["e"]), float(case["e"]), atol=1e-10, rtol=0.0)
+    np.testing.assert_allclose(float(kep["i"]), float(case["i"]), atol=1e-10, rtol=0.0)
+    np.testing.assert_allclose(
+        _angle_delta_rad(float(kep["raan"]), float(case["raan"])),
+        0.0,
+        atol=1e-10,
+        rtol=0.0,
+    )
+    np.testing.assert_allclose(
+        _angle_delta_rad(float(kep["argp"]), float(case["argp"])),
+        0.0,
+        atol=1e-10,
+        rtol=0.0,
+    )
+    np.testing.assert_allclose(
+        _angle_delta_rad(float(kep["anomaly"]), float(case["anomaly"])),
+        0.0,
+        atol=1e-10,
+        rtol=0.0,
+    )
+
+
+def test_orbit_keplerian_anomaly_type_consistency() -> None:
+    e = Orbit.from_kepler_precise(
+        **_kepler_case(),
+        gravity_model="newtonian",
+        dt_save_s=60.0,
+    )
+    ts = np.array([0.0, 60.0, 120.0, 300.0], dtype=np.float64)
+
+    k_true = e.keplerian(ts, frame="native", anomaly_type="true", angle_unit="rad")
+    k_ecc = e.keplerian(ts, frame="native", anomaly_type="eccentric", angle_unit="rad")
+    k_mean = e.keplerian(ts, frame="native", anomaly_type="mean", angle_unit="rad")
+
+    e_mag = np.asarray(k_true["e"], dtype=np.float64)
+    nu = np.asarray(k_true["anomaly"], dtype=np.float64)
+    ecc = np.asarray(k_ecc["anomaly"], dtype=np.float64)
+    mean = np.asarray(k_mean["anomaly"], dtype=np.float64)
+
+    cos_e = (e_mag + np.cos(nu)) / (1.0 + e_mag * np.cos(nu))
+    sin_e = np.sqrt(np.maximum(0.0, 1.0 - e_mag * e_mag)) * np.sin(nu) / (
+        1.0 + e_mag * np.cos(nu)
+    )
+    ecc_ref = np.mod(np.arctan2(sin_e, cos_e), 2.0 * np.pi)
+    mean_ref = np.mod(ecc_ref - e_mag * np.sin(ecc_ref), 2.0 * np.pi)
+
+    np.testing.assert_allclose(_angle_delta_rad(ecc, ecc_ref), 0.0, atol=1e-10, rtol=0.0)
+    np.testing.assert_allclose(_angle_delta_rad(mean, mean_ref), 0.0, atol=1e-10, rtol=0.0)
+
+
+def test_orbit_keplerian_efficiency_frame_validation() -> None:
+    e = Orbit.from_kepler_fast(**_kepler_case(), dt_save_s=20.0)
+    with pytest.raises(ValueError, match="Efficiency mode supports"):
+        e.keplerian(0.0, frame="gcrf")
+
+
+def test_orbit_keplerian_precision_supports_named_inertial_frames() -> None:
+    e = Orbit.from_kepler_precise(
+        **_kepler_case(),
+        inertial_frame="teme",
+        gravity_model="newtonian",
+        dt_save_s=60.0,
+    )
+    ts = np.array([0.0, 180.0], dtype=np.float64)
+    kep = e.keplerian(ts, frame="gcrf", anomaly_type="true", angle_unit="deg")
+
+    assert kep["frame"] == "gcrf"
+    assert kep["angle_unit"] == "deg"
+    assert np.asarray(kep["a_m"]).shape == (2,)
+    assert np.asarray(kep["e"]).shape == (2,)
+    assert np.isfinite(np.asarray(kep["a_m"])).all()
+    assert np.isfinite(np.asarray(kep["e"])).all()
+
+    kep_scalar = e.keplerian(e.epoch, frame="gcrf", anomaly_type="true", angle_unit="rad")
+    assert isinstance(kep_scalar["a_m"], float)
+    assert np.isfinite(float(kep_scalar["a_m"]))
 
 
 def test_orbit_fast_mode_matches_fastorbit_backend_behavior() -> None:

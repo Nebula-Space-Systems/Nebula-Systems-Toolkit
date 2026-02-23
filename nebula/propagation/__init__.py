@@ -1,8 +1,9 @@
 from importlib import import_module
 
 from nebula.propagation.orbit import Orbit, initialize_orekit
+from nebula.propagation.walker import build_walker_constellation
 
-__all__ = ["Orbit", "initialize_orekit", "orbit"]
+__all__ = ["Orbit", "initialize_orekit", "build_walker_constellation", "orbit"]
 
 
 def __getattr__(name: str):
@@ -15,4 +16,3 @@ def __getattr__(name: str):
 
 def __dir__():
     return sorted(set(globals().keys()) | set(__all__))
-

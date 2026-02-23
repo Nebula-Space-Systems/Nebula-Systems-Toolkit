@@ -286,6 +286,153 @@ def _pv_acceleration_xyz(pv) -> np.ndarray:
     return np.zeros(3, dtype=np.float64)
 
 
+def _wrap_0_2pi(theta: float) -> float:
+    two_pi = 2.0 * math.pi
+    wrapped = math.fmod(theta, two_pi)
+    if wrapped < 0.0:
+        wrapped += two_pi
+    return wrapped
+
+
+def _clip_unit(x: float) -> float:
+    if x > 1.0:
+        return 1.0
+    if x < -1.0:
+        return -1.0
+    return x
+
+
+def _rv_to_kepler_batch(
+    r: np.ndarray,
+    v: np.ndarray,
+    *,
+    mu_m3_s2: float,
+    anomaly_type: AngleType,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Convert Cartesian states to osculating Keplerian elements.
+
+    Parameters
+    ----------
+    r, v : np.ndarray
+        Position/velocity arrays of shape ``(N, 3)`` in a common frame.
+    mu_m3_s2 : float
+        Central body gravitational parameter.
+    anomaly_type : {"true", "mean", "eccentric"}
+        Desired anomaly output.
+
+    Returns
+    -------
+    (a, e, i, raan, argp, anomaly) : tuple[np.ndarray, ...]
+        Element arrays of length ``N``. Angular outputs are in radians.
+    """
+    r_arr = np.asarray(r, dtype=np.float64)
+    v_arr = np.asarray(v, dtype=np.float64)
+    if r_arr.ndim != 2 or r_arr.shape[1] != 3:
+        raise ValueError("r must have shape (N, 3)")
+    if v_arr.ndim != 2 or v_arr.shape[1] != 3:
+        raise ValueError("v must have shape (N, 3)")
+    if r_arr.shape[0] != v_arr.shape[0]:
+        raise ValueError("r and v must have the same leading dimension")
+
+    n = int(r_arr.shape[0])
+    mu = float(mu_m3_s2)
+    if mu <= 0.0:
+        raise ValueError("mu_m3_s2 must be positive")
+
+    a = np.empty(n, dtype=np.float64)
+    e = np.empty(n, dtype=np.float64)
+    inc = np.empty(n, dtype=np.float64)
+    raan = np.empty(n, dtype=np.float64)
+    argp = np.empty(n, dtype=np.float64)
+    anomaly = np.empty(n, dtype=np.float64)
+
+    eps = 1e-12
+
+    for j in range(n):
+        rj = r_arr[j]
+        vj = v_arr[j]
+
+        r_norm = float(np.linalg.norm(rj))
+        if r_norm <= 0.0:
+            raise ValueError("Cannot compute Keplerian elements with zero position norm")
+
+        v2 = float(np.dot(vj, vj))
+        h = np.cross(rj, vj)
+        h_norm = float(np.linalg.norm(h))
+        if h_norm <= 0.0:
+            raise ValueError(
+                "Cannot compute Keplerian elements with degenerate angular momentum"
+            )
+
+        n_vec = np.array([-h[1], h[0], 0.0], dtype=np.float64)
+        n_norm = float(np.linalg.norm(n_vec))
+
+        e_vec = np.cross(vj, h) / mu - (rj / r_norm)
+        ej = float(np.linalg.norm(e_vec))
+        e[j] = ej
+
+        energy = 0.5 * v2 - mu / r_norm
+        if abs(energy) < 1e-16:
+            a[j] = np.inf
+        else:
+            a[j] = -mu / (2.0 * energy)
+
+        inc[j] = math.acos(_clip_unit(float(h[2] / h_norm)))
+
+        if n_norm > eps:
+            raan[j] = _wrap_0_2pi(math.atan2(float(n_vec[1]), float(n_vec[0])))
+        else:
+            raan[j] = 0.0
+
+        if ej > eps and n_norm > eps:
+            x_argp = float(np.dot(n_vec, e_vec) / (n_norm * ej))
+            y_argp = float(np.dot(np.cross(n_vec, e_vec), h) / (n_norm * ej * h_norm))
+            argp[j] = _wrap_0_2pi(math.atan2(y_argp, x_argp))
+        elif ej > eps:
+            # Equatorial eccentric: use longitude of periapsis as argument proxy.
+            argp[j] = _wrap_0_2pi(math.atan2(float(e_vec[1]), float(e_vec[0])))
+        else:
+            argp[j] = 0.0
+
+        if ej > eps:
+            x_nu = float(np.dot(e_vec, rj) / (ej * r_norm))
+            y_nu = float(np.dot(np.cross(e_vec, rj), h) / (ej * r_norm * h_norm))
+            nu = _wrap_0_2pi(math.atan2(y_nu, x_nu))
+        elif n_norm > eps:
+            # Circular inclined: use argument of latitude.
+            x_u = float(np.dot(n_vec, rj) / (n_norm * r_norm))
+            y_u = float(np.dot(np.cross(n_vec, rj), h) / (n_norm * r_norm * h_norm))
+            nu = _wrap_0_2pi(math.atan2(y_u, x_u))
+        else:
+            # Circular equatorial: use true longitude.
+            nu = _wrap_0_2pi(math.atan2(float(rj[1]), float(rj[0])))
+
+        if anomaly_type == "true":
+            anomaly[j] = nu
+            continue
+
+        if ej >= 1.0:
+            raise ValueError(
+                f"{anomaly_type} anomaly is only supported for elliptical orbits (e < 1); got e={ej:.6f}"
+            )
+
+        if ej <= eps:
+            ecc_anom = nu
+        else:
+            denom = 1.0 + ej * math.cos(nu)
+            cos_E = (ej + math.cos(nu)) / denom
+            sin_E = math.sqrt(max(0.0, 1.0 - ej * ej)) * math.sin(nu) / denom
+            ecc_anom = _wrap_0_2pi(math.atan2(sin_E, cos_E))
+
+        if anomaly_type == "eccentric":
+            anomaly[j] = ecc_anom
+        else:
+            anomaly[j] = _wrap_0_2pi(ecc_anom - ej * math.sin(ecc_anom))
+
+    return a, e, inc, raan, argp, anomaly
+
+
 # -----------------------------------------------------------------------------
 # Hermite interpolation (unchanged)
 # -----------------------------------------------------------------------------
@@ -391,6 +538,7 @@ def _hermite_pv_uniform_twosided(
 # Propagator construction helpers (NEW)
 # -----------------------------------------------------------------------------
 AngleType = Literal["true", "mean", "eccentric"]
+AngleUnit = Literal["rad", "deg"]
 InertialFrameName = str
 PVInputFrameName = str
 SolarActivityStrength = Literal["average", "weak", "strong"]
@@ -505,6 +653,20 @@ def _resolve_position_angle_type(angle_type: AngleType):
     if angle_type == "eccentric":
         return PositionAngleType.ECCENTRIC
     raise ValueError("anomaly_type must be 'true', 'mean', or 'eccentric'")
+
+
+def _normalize_anomaly_type(anomaly_type: str) -> AngleType:
+    k = str(anomaly_type).strip().lower()
+    if k in ("true", "mean", "eccentric"):
+        return k  # type: ignore[return-value]
+    raise ValueError("anomaly_type must be 'true', 'mean', or 'eccentric'")
+
+
+def _normalize_angle_unit(angle_unit: str) -> AngleUnit:
+    k = str(angle_unit).strip().lower()
+    if k in ("rad", "deg"):
+        return k  # type: ignore[return-value]
+    raise ValueError("angle_unit must be 'rad' or 'deg'")
 
 
 def _resolve_solar_activity_strength(level: SolarActivityStrength):
@@ -908,8 +1070,12 @@ class Orbit:
         self._ephem_generator = self.propagator.getEphemerisGenerator()  # type: ignore
         return self._ephem_generator
 
-    def _transform_native_to_itrf(
-        self, dt_s: np.ndarray, r_native: np.ndarray, v_native: np.ndarray
+    def _transform_native_to_frame(
+        self,
+        dt_s: np.ndarray,
+        r_native: np.ndarray,
+        v_native: np.ndarray,
+        target_frame: object,
     ) -> Tuple[np.ndarray, np.ndarray]:
         from org.hipparchus.geometry.euclidean.threed import Vector3D  # type: ignore
         from org.orekit.utils import PVCoordinates  # type: ignore
@@ -920,7 +1086,7 @@ class Orbit:
 
         for j in range(n):
             abs_t = self._t0_abs.shiftedBy(float(dt_s[j]))
-            tr = self._frame_native.getTransformTo(self._itrf, abs_t)
+            tr = self._frame_native.getTransformTo(target_frame, abs_t)
             pv_n = PVCoordinates(
                 Vector3D(*r_native[j].tolist()),
                 Vector3D(*v_native[j].tolist()),
@@ -930,6 +1096,11 @@ class Orbit:
             v_itrf[j, :] = pv_i.getVelocity().toArray()
 
         return r_itrf, v_itrf
+
+    def _transform_native_to_itrf(
+        self, dt_s: np.ndarray, r_native: np.ndarray, v_native: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        return self._transform_native_to_frame(dt_s, r_native, v_native, self._itrf)
 
     def pv(self, t: Any, frame: FrameKind = "native") -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -1054,6 +1225,121 @@ class Orbit:
         else:
             lat, lon, alt = ecef2geodetic_vec_ecef_deg(r_itrf, wrap_lon=True)
         return lat, lon, alt  # type: ignore
+
+    def keplerian(
+        self,
+        t: Any,
+        *,
+        frame: str = "native",
+        anomaly_type: AngleType = "true",
+        angle_unit: AngleUnit = "rad",
+        mu_m3_s2: float = 3.986004418e14,
+    ) -> dict[str, Any]:
+        """
+        Query osculating Keplerian elements at one or more times.
+
+        Parameters
+        ----------
+        t : astropy.time.Time | float | int | np.ndarray
+            Query time(s). Numeric values are seconds from ``epoch``.
+        frame : str, default "native"
+            Frame where Cartesian states are interpreted before conversion to
+            Keplerian elements. Supported values:
+            - Both modes: ``"native"``, ``"itrf"``, ``"ecef"``
+            - Precision mode only: any supported inertial frame name (for example
+              ``"gcrf"``, ``"eme2000"``, ``"teme"``)
+        anomaly_type : {"true", "mean", "eccentric"}, default "true"
+            Which anomaly to return in the ``"anomaly"`` field.
+        angle_unit : {"rad", "deg"}, default "rad"
+            Unit for all returned angular quantities.
+        mu_m3_s2 : float, default 3.986004418e14
+            Gravitational parameter used in the element conversion.
+
+        Returns
+        -------
+        dict
+            Dictionary with keys ``a_m``, ``e``, ``i``, ``raan``, ``argp``,
+            ``anomaly``, ``frame``, ``anomaly_type``, and ``angle_unit``.
+            Scalar input returns scalar numeric values; vector input returns
+            ``(N,)`` arrays.
+        """
+        anomaly_kind = _normalize_anomaly_type(anomaly_type)
+        angle_kind = _normalize_angle_unit(angle_unit)
+        frame_raw = str(frame)
+        frame_key = _normalize_frame_name(frame_raw)
+        dt_s, is_scalar = _dt_seconds_from_time_like(t, self._epoch_ast)
+
+        if self._mode == "efficiency":
+            if frame_key == "native":
+                r, v = self.pv(t, frame="native")
+            elif frame_key in ("itrf", "ecef"):
+                r, v = self.pv(t, frame="itrf")
+            else:
+                raise ValueError(
+                    "Efficiency mode supports keplerian frame='native' or 'itrf'/'ecef' only."
+                )
+        else:
+            if frame_key == "native":
+                r, v = self.pv(t, frame="native")
+            elif frame_key in ("itrf", "ecef"):
+                r, v = self.pv(t, frame="itrf")
+            else:
+                target_frame = _resolve_inertial_frame(
+                    frame_raw, iers=self.iers, simple_eop=bool(self.simple_eop)
+                )
+                r_native, v_native = self.pv(t, frame="native")
+                r_native = np.asarray(r_native, dtype=np.float64)
+                v_native = np.asarray(v_native, dtype=np.float64)
+                if r_native.ndim == 1:
+                    r_native = r_native.reshape(1, 3)
+                    v_native = v_native.reshape(1, 3)
+                r, v = self._transform_native_to_frame(
+                    dt_s, r_native, v_native, target_frame
+                )
+
+        r_arr = np.asarray(r, dtype=np.float64)
+        v_arr = np.asarray(v, dtype=np.float64)
+        if r_arr.ndim == 1:
+            r_arr = r_arr.reshape(1, 3)
+            v_arr = v_arr.reshape(1, 3)
+
+        a_m, e, i, raan, argp, anomaly = _rv_to_kepler_batch(
+            r_arr,
+            v_arr,
+            mu_m3_s2=float(mu_m3_s2),
+            anomaly_type=anomaly_kind,
+        )
+
+        if angle_kind == "deg":
+            i = np.degrees(i)
+            raan = np.degrees(raan)
+            argp = np.degrees(argp)
+            anomaly = np.degrees(anomaly)
+
+        if is_scalar:
+            return {
+                "a_m": float(a_m[0]),
+                "e": float(e[0]),
+                "i": float(i[0]),
+                "raan": float(raan[0]),
+                "argp": float(argp[0]),
+                "anomaly": float(anomaly[0]),
+                "frame": frame_raw,
+                "anomaly_type": anomaly_kind,
+                "angle_unit": angle_kind,
+            }
+
+        return {
+            "a_m": a_m,
+            "e": e,
+            "i": i,
+            "raan": raan,
+            "argp": argp,
+            "anomaly": anomaly,
+            "frame": frame_raw,
+            "anomaly_type": anomaly_kind,
+            "angle_unit": angle_kind,
+        }
 
     def _ensure_covered(self, dt_s: np.ndarray) -> None:
         dt_s = np.asarray(dt_s, dtype=np.float64)
