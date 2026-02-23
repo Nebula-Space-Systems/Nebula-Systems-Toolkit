@@ -3,8 +3,8 @@
 from dataclasses import dataclass, field
 import numpy as np
 from nebula.coverage.fixed_dt._empirical_core import coverage_stamp_kernel_empirical
-from nebula.transform import geodetic2ecef
-from nebula.transform.constants import WGS84_A, WGS84_E2
+from nebula.transforms import geodetic2ecef
+from nebula.transforms.constants import WGS84_A, WGS84_E2
 
 
 @dataclass(frozen=True)

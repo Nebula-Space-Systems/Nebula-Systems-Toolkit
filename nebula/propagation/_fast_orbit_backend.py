@@ -21,11 +21,11 @@ import math
 
 import numpy as np
 from numba import njit, prange
-from nebula.transform._coarse_eci2itrf import (
-    _coarse_eci_to_itrf_pv_iau76_shortnut,
+from nebula.transforms._coarse_eci2itrf import (
+    _coarse_eci2itrf_pv_iau76_shortnut,
     _coarse_j2_axis_native_iau76_shortnut,
 )
-from nebula.transform._ecef2geodetic import (
+from nebula.transforms._ecef2geodetic import (
     ecef2geodetic_deg as _ecef2geodetic_deg,
     ecef2geodetic_vec_ecef_deg as _ecef2geodetic_vec_ecef_deg,
 )
@@ -310,7 +310,7 @@ def _propagate_chain_uniform_j2(
 
         jd_ut1 = epoch_ut1_jd + t / 86400.0
         jd_tt = epoch_tt_jd + t / 86400.0
-        x, y, z, vx_e, vy_e, vz_e = _coarse_eci_to_itrf_pv_iau76_shortnut(
+        x, y, z, vx_e, vy_e, vz_e = _coarse_eci2itrf_pv_iau76_shortnut(
             rx, ry, rz, vx, vy, vz, jd_ut1, jd_tt, xp_rad, yp_rad
         )
 
@@ -376,7 +376,7 @@ def _propagate_batch(
         jd_ut1 = epoch_ut1_jd + t / 86400.0
         jd_tt = epoch_tt_jd + t / 86400.0
 
-        x, y, z, vx_e, vy_e, vz_e = _coarse_eci_to_itrf_pv_iau76_shortnut(
+        x, y, z, vx_e, vy_e, vz_e = _coarse_eci2itrf_pv_iau76_shortnut(
             rx, ry, rz, vx, vy, vz, jd_ut1, jd_tt, xp_rad, yp_rad
         )
 
@@ -562,7 +562,7 @@ def _fill_uniform_kepler_into(
         jd_ut1 = epoch_ut1_jd + t * inv_day
         jd_tt = epoch_tt_jd + t * inv_day
 
-        x, y, z, vx_e, vy_e, vz_e = _coarse_eci_to_itrf_pv_iau76_shortnut(
+        x, y, z, vx_e, vy_e, vz_e = _coarse_eci2itrf_pv_iau76_shortnut(
             rx, ry, rz, vx, vy, vz, jd_ut1, jd_tt, xp_rad, yp_rad
         )
         rI[idx, 0], rI[idx, 1], rI[idx, 2] = x, y, z
@@ -750,7 +750,7 @@ class FastOrbit:
             float(self.M0_rad),
             float(self.mu),
         )
-        x, y, z, vx_e, vy_e, vz_e = _coarse_eci_to_itrf_pv_iau76_shortnut(
+        x, y, z, vx_e, vy_e, vz_e = _coarse_eci2itrf_pv_iau76_shortnut(
             rx,
             ry,
             rz,
@@ -1261,7 +1261,7 @@ def propagate_constellation_pv(
 
             jd_ut1 = epoch_ut1_jd + t / 86400.0
             jd_tt = epoch_tt_jd + t / 86400.0
-            x, y, z, vx_e, vy_e, vz_e = _coarse_eci_to_itrf_pv_iau76_shortnut(
+            x, y, z, vx_e, vy_e, vz_e = _coarse_eci2itrf_pv_iau76_shortnut(
                 rx, ry, rz, vx, vy, vz, jd_ut1, jd_tt, xp_rad, yp_rad
             )
 

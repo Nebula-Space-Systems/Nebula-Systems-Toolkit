@@ -12,7 +12,7 @@ import math
 import numpy as np
 from numba import njit, prange
 
-from nebula.transform.constants import WGS84_A, WGS84_B
+from nebula.transforms.constants import WGS84_A, WGS84_B
 
 _POINT_EPS = 1e-12
 _T_EPS = 1e-12
@@ -173,7 +173,15 @@ def _los_many_to_many_body(
         oz = observers_body[i, 2]
         for j in range(m):
             out[i, j] = _los_clear_components_ellipsoid_axis_aligned(
-                ox, oy, oz, targets_body[j, 0], targets_body[j, 1], targets_body[j, 2], inv_a2, inv_b2, inv_c2
+                ox,
+                oy,
+                oz,
+                targets_body[j, 0],
+                targets_body[j, 1],
+                targets_body[j, 2],
+                inv_a2,
+                inv_b2,
+                inv_c2,
             )
     return out
 
@@ -192,7 +200,15 @@ def _los_one_to_many_body(
     out = np.empty(m, dtype=np.bool_)
     for j in prange(m):
         out[j] = _los_clear_components_ellipsoid_axis_aligned(
-            ox, oy, oz, targets_body[j, 0], targets_body[j, 1], targets_body[j, 2], inv_a2, inv_b2, inv_c2
+            ox,
+            oy,
+            oz,
+            targets_body[j, 0],
+            targets_body[j, 1],
+            targets_body[j, 2],
+            inv_a2,
+            inv_b2,
+            inv_c2,
         )
     return out
 
@@ -279,7 +295,15 @@ def los_clear_ellipsoid(
 
     if center_x == 0.0 and center_y == 0.0 and center_z == 0.0:
         return _los_clear_components_ellipsoid_axis_aligned(
-            observer_pos[0], observer_pos[1], observer_pos[2], target_pos[0], target_pos[1], target_pos[2], inv_a2, inv_b2, inv_c2
+            observer_pos[0],
+            observer_pos[1],
+            observer_pos[2],
+            target_pos[0],
+            target_pos[1],
+            target_pos[2],
+            inv_a2,
+            inv_b2,
+            inv_c2,
         )
     return _los_clear_components_ellipsoid_axis_aligned(
         observer_pos[0] - center_x,
@@ -319,7 +343,9 @@ def los_clear_ellipsoid_many_to_many(
     inv_c2 = 1.0 / (semi_axis_c * semi_axis_c)
 
     if center_x == 0.0 and center_y == 0.0 and center_z == 0.0:
-        return _los_many_to_many_body(observers_pos, targets_pos, inv_a2, inv_b2, inv_c2)
+        return _los_many_to_many_body(
+            observers_pos, targets_pos, inv_a2, inv_b2, inv_c2
+        )
     return _los_many_to_many_offset(
         observers_pos, targets_pos, inv_a2, inv_b2, inv_c2, center_x, center_y, center_z
     )
@@ -351,7 +377,13 @@ def los_clear_ellipsoid_one_to_many(
 
     if center_x == 0.0 and center_y == 0.0 and center_z == 0.0:
         return _los_one_to_many_body(
-            observer_pos[0], observer_pos[1], observer_pos[2], targets_pos, inv_a2, inv_b2, inv_c2
+            observer_pos[0],
+            observer_pos[1],
+            observer_pos[2],
+            targets_pos,
+            inv_a2,
+            inv_b2,
+            inv_c2,
         )
     return _los_one_to_many_offset(
         observer_pos, targets_pos, inv_a2, inv_b2, inv_c2, center_x, center_y, center_z
@@ -385,7 +417,14 @@ def los_clear_ellipsoid_oriented(
 
     if _is_identity_orientation(orientation_ellipsoid_to_frame):
         return los_clear_ellipsoid(
-            observer_pos, target_pos, semi_axis_a, semi_axis_b, semi_axis_c, center_x, center_y, center_z
+            observer_pos,
+            target_pos,
+            semi_axis_a,
+            semi_axis_b,
+            semi_axis_c,
+            center_x,
+            center_y,
+            center_z,
         )
 
     if observer_pos.shape[0] != 3 or target_pos.shape[0] != 3:
@@ -443,7 +482,14 @@ def los_clear_ellipsoid_many_to_many_oriented(
 
     if _is_identity_orientation(orientation_ellipsoid_to_frame):
         return los_clear_ellipsoid_many_to_many(
-            observers_pos, targets_pos, semi_axis_a, semi_axis_b, semi_axis_c, center_x, center_y, center_z
+            observers_pos,
+            targets_pos,
+            semi_axis_a,
+            semi_axis_b,
+            semi_axis_c,
+            center_x,
+            center_y,
+            center_z,
         )
 
     if observers_pos.ndim != 2 or observers_pos.shape[1] != 3:
@@ -475,7 +521,15 @@ def los_clear_ellipsoid_many_to_many_oriented(
         )
         for j in range(m):
             out[i, j] = _los_clear_components_ellipsoid_axis_aligned(
-                obx, oby, obz, targets_body[j, 0], targets_body[j, 1], targets_body[j, 2], inv_a2, inv_b2, inv_c2
+                obx,
+                oby,
+                obz,
+                targets_body[j, 0],
+                targets_body[j, 1],
+                targets_body[j, 2],
+                inv_a2,
+                inv_b2,
+                inv_c2,
             )
     return out
 
@@ -504,7 +558,14 @@ def los_clear_ellipsoid_one_to_many_oriented(
 
     if _is_identity_orientation(orientation_ellipsoid_to_frame):
         return los_clear_ellipsoid_one_to_many(
-            observer_pos, targets_pos, semi_axis_a, semi_axis_b, semi_axis_c, center_x, center_y, center_z
+            observer_pos,
+            targets_pos,
+            semi_axis_a,
+            semi_axis_b,
+            semi_axis_c,
+            center_x,
+            center_y,
+            center_z,
         )
 
     if observer_pos.shape[0] != 3:
@@ -533,7 +594,9 @@ def los_clear_ellipsoid_one_to_many_oriented(
 
 
 @njit(cache=True, inline="always")
-def los_clear_wgs84_ecef(observer_ecef_m: np.ndarray, target_ecef_m: np.ndarray) -> bool:
+def los_clear_wgs84_ecef(
+    observer_ecef_m: np.ndarray, target_ecef_m: np.ndarray
+) -> bool:
     """
     Optimized WGS84-ECEF LoS helper (axis-aligned, origin-centered).
     """

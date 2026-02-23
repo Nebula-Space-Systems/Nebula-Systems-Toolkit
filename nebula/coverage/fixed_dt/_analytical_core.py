@@ -3,8 +3,8 @@
 import numpy as np
 import math
 from numba import njit, prange
-from nebula.transform._ecef2geodetic import ecef2geodetic
-from nebula.transform.constants import (
+from nebula.transforms._ecef2geodetic import ecef2geodetic
+from nebula.transforms.constants import (
     WGS84_A,
     WGS84_E2,
 )

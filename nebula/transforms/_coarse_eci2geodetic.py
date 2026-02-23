@@ -12,12 +12,12 @@ import math
 import numpy as np
 from numba import njit, prange
 
-from ._coarse_eci2itrf import _coarse_eci_to_itrf_pos_iau76_shortnut
+from ._coarse_eci2itrf import _coarse_eci2itrf_pos_iau76_shortnut
 from ._ecef2geodetic import ecef2geodetic, ecef2geodetic_deg
 
 
 @njit(cache=False, fastmath=True)
-def _coarse_eci_to_geodetic_iau76_shortnut(
+def _coarse_eci2geodetic_iau76_shortnut(
     x_eci: float,
     y_eci: float,
     z_eci: float,
@@ -29,14 +29,14 @@ def _coarse_eci_to_geodetic_iau76_shortnut(
     """
     Approximate ECI(native)->WGS84 geodetic (radians).
     """
-    x_ecef, y_ecef, z_ecef = _coarse_eci_to_itrf_pos_iau76_shortnut(
+    x_ecef, y_ecef, z_ecef = _coarse_eci2itrf_pos_iau76_shortnut(
         x_eci, y_eci, z_eci, jd_ut1, jd_tt, xp_rad, yp_rad
     )
     return ecef2geodetic(x_ecef, y_ecef, z_ecef)
 
 
 @njit(cache=False, fastmath=True)
-def _coarse_eci_to_geodetic_deg_iau76_shortnut(
+def _coarse_eci2geodetic_deg_iau76_shortnut(
     x_eci: float,
     y_eci: float,
     z_eci: float,
@@ -48,14 +48,14 @@ def _coarse_eci_to_geodetic_deg_iau76_shortnut(
     """
     Approximate ECI(native)->WGS84 geodetic (degrees).
     """
-    x_ecef, y_ecef, z_ecef = _coarse_eci_to_itrf_pos_iau76_shortnut(
+    x_ecef, y_ecef, z_ecef = _coarse_eci2itrf_pos_iau76_shortnut(
         x_eci, y_eci, z_eci, jd_ut1, jd_tt, xp_rad, yp_rad
     )
     return ecef2geodetic_deg(x_ecef, y_ecef, z_ecef)
 
 
 @njit(cache=False, fastmath=True, parallel=True)
-def _coarse_eci_to_geodetic_vec_iau76_shortnut(
+def _coarse_eci2geodetic_vec_iau76_shortnut(
     r_eci_m: np.ndarray,
     jd_ut1: np.ndarray,
     jd_tt: np.ndarray,
@@ -76,7 +76,7 @@ def _coarse_eci_to_geodetic_vec_iau76_shortnut(
     h = np.empty(n, dtype=np.float64)
 
     for i in prange(n):
-        la, lo, hi = _coarse_eci_to_geodetic_iau76_shortnut(
+        la, lo, hi = _coarse_eci2geodetic_iau76_shortnut(
             r_eci_m[i, 0],
             r_eci_m[i, 1],
             r_eci_m[i, 2],
@@ -93,7 +93,7 @@ def _coarse_eci_to_geodetic_vec_iau76_shortnut(
 
 
 @njit(cache=False, fastmath=True, parallel=True)
-def _coarse_eci_to_geodetic_vec_deg_iau76_shortnut(
+def _coarse_eci2geodetic_vec_deg_iau76_shortnut(
     r_eci_m: np.ndarray,
     jd_ut1: np.ndarray,
     jd_tt: np.ndarray,
@@ -104,7 +104,7 @@ def _coarse_eci_to_geodetic_vec_deg_iau76_shortnut(
     """
     Vectorized approximate ECI(native)->WGS84 geodetic (degrees).
     """
-    lat_rad, lon_rad, h = _coarse_eci_to_geodetic_vec_iau76_shortnut(
+    lat_rad, lon_rad, h = _coarse_eci2geodetic_vec_iau76_shortnut(
         r_eci_m, jd_ut1, jd_tt, xp_rad, yp_rad
     )
     n = lat_rad.shape[0]
@@ -127,7 +127,7 @@ def _coarse_eci_to_geodetic_vec_deg_iau76_shortnut(
 
 
 @njit(cache=False, fastmath=True, inline="always")
-def coarse_eci_to_geodetic(
+def coarse_eci2geodetic(
     x_eci_m: float,
     y_eci_m: float,
     z_eci_m: float,
@@ -155,13 +155,13 @@ def coarse_eci_to_geodetic(
     (lat_rad, lon_rad, h_m) : tuple[float, float, float]
         Geodetic latitude [rad], longitude [rad], and ellipsoidal height [m].
     """
-    return _coarse_eci_to_geodetic_iau76_shortnut(
+    return _coarse_eci2geodetic_iau76_shortnut(
         x_eci_m, y_eci_m, z_eci_m, jd_ut1, jd_tt, xp_rad, yp_rad
     )
 
 
 @njit(cache=False, fastmath=True, inline="always")
-def coarse_eci_to_geodetic_deg(
+def coarse_eci2geodetic_deg(
     x_eci_m: float,
     y_eci_m: float,
     z_eci_m: float,
@@ -189,13 +189,13 @@ def coarse_eci_to_geodetic_deg(
     (lat_deg, lon_deg, h_m) : tuple[float, float, float]
         Geodetic latitude [deg], longitude [deg], and ellipsoidal height [m].
     """
-    return _coarse_eci_to_geodetic_deg_iau76_shortnut(
+    return _coarse_eci2geodetic_deg_iau76_shortnut(
         x_eci_m, y_eci_m, z_eci_m, jd_ut1, jd_tt, xp_rad, yp_rad
     )
 
 
 @njit(cache=False, fastmath=True, inline="always")
-def coarse_eci_to_geodetic_vec(
+def coarse_eci2geodetic_vec(
     r_eci_m: np.ndarray,
     jd_ut1: np.ndarray,
     jd_tt: np.ndarray,
@@ -221,11 +221,13 @@ def coarse_eci_to_geodetic_vec(
     (lat_rad, lon_rad, h_m) : tuple[np.ndarray, np.ndarray, np.ndarray]
         Arrays of geodetic latitude [rad], longitude [rad], and height [m], each shape (N,).
     """
-    return _coarse_eci_to_geodetic_vec_iau76_shortnut(r_eci_m, jd_ut1, jd_tt, xp_rad, yp_rad)
+    return _coarse_eci2geodetic_vec_iau76_shortnut(
+        r_eci_m, jd_ut1, jd_tt, xp_rad, yp_rad
+    )
 
 
 @njit(cache=False, fastmath=True, inline="always")
-def coarse_eci_to_geodetic_vec_deg(
+def coarse_eci2geodetic_vec_deg(
     r_eci_m: np.ndarray,
     jd_ut1: np.ndarray,
     jd_tt: np.ndarray,
@@ -254,24 +256,14 @@ def coarse_eci_to_geodetic_vec_deg(
     (lat_deg, lon_deg, h_m) : tuple[np.ndarray, np.ndarray, np.ndarray]
         Arrays of geodetic latitude [deg], longitude [deg], and height [m], each shape (N,).
     """
-    return _coarse_eci_to_geodetic_vec_deg_iau76_shortnut(
+    return _coarse_eci2geodetic_vec_deg_iau76_shortnut(
         r_eci_m, jd_ut1, jd_tt, xp_rad, yp_rad, wrap_lon
     )
 
 
-# Public compatibility names used across existing modules/tests.
-coarse_eci_to_geodetic_iau76_shortnut = coarse_eci_to_geodetic
-coarse_eci_to_geodetic_deg_iau76_shortnut = coarse_eci_to_geodetic_deg
-coarse_eci_to_geodetic_vec_iau76_shortnut = coarse_eci_to_geodetic_vec
-coarse_eci_to_geodetic_vec_deg_iau76_shortnut = coarse_eci_to_geodetic_vec_deg
-
 __all__ = [
-    "coarse_eci_to_geodetic",
-    "coarse_eci_to_geodetic_deg",
-    "coarse_eci_to_geodetic_vec",
-    "coarse_eci_to_geodetic_vec_deg",
-    "coarse_eci_to_geodetic_iau76_shortnut",
-    "coarse_eci_to_geodetic_deg_iau76_shortnut",
-    "coarse_eci_to_geodetic_vec_iau76_shortnut",
-    "coarse_eci_to_geodetic_vec_deg_iau76_shortnut",
+    "coarse_eci2geodetic",
+    "coarse_eci2geodetic_deg",
+    "coarse_eci2geodetic_vec",
+    "coarse_eci2geodetic_vec_deg",
 ]

@@ -5,49 +5,49 @@ import math
 import numpy as np
 import pytest
 
-import nebula.transform as transform
-from nebula.transform._aer2ecef import aer2ecef, aer2ecef_vec_aer, aer2ecef_vec_aer3
-from nebula.transform._aer2ecef import aer2enu
-from nebula.transform._aer2geodetic import (
+import nebula.transforms as transforms
+from nebula.transforms._aer2ecef import aer2ecef, aer2ecef_vec_aer, aer2ecef_vec_aer3
+from nebula.transforms._aer2ecef import aer2enu
+from nebula.transforms._aer2geodetic import (
     aer2geodetic,
     aer2geodetic_vec_aer,
     aer2geodetic_vec_aer3,
 )
-from nebula.transform._ecef2aer import ecef2aer, ecef2aer_vec_xyz, enu2aer
-from nebula.transform._ecef2enu import (
+from nebula.transforms._ecef2aer import ecef2aer, ecef2aer_vec_xyz, enu2aer
+from nebula.transforms._ecef2enu import (
     ecef2enu,
     ecef2enu_delta,
     ecef2enu_vec_ecef,
     ecef2enu_vec_xyz,
     enu_basis_from_ecef_xyz,
 )
-from nebula.transform._ecef2geodetic import (
+from nebula.transforms._ecef2geodetic import (
     WGS84_A,
     _wrap_lon_pi,
     ecef2geodetic,
     ecef2geodetic_vec_ecef,
     ecef2geodetic_vec_xyz,
 )
-from nebula.transform._enu2ecef import (
+from nebula.transforms._enu2ecef import (
     enu2ecef,
     enu2ecef_delta,
     enu2ecef_vec_enu,
     enu2ecef_vec_enu3,
 )
-from nebula.transform._enu2geodetic import (
+from nebula.transforms._enu2geodetic import (
     _enu2uvw,
     enu2geodetic,
     enu2geodetic_vec_enu,
     enu2geodetic_vec_enu3,
 )
-from nebula.transform._geodetic2aer import geodetic2aer, geodetic2aer_vec_llh
-from nebula.transform._geodetic2ecef import (
+from nebula.transforms._geodetic2aer import geodetic2aer, geodetic2aer_vec_llh
+from nebula.transforms._geodetic2ecef import (
     WGS84_E2,
     geodetic2ecef,
     geodetic2ecef_vec_lla,
     geodetic2ecef_vec_llh,
 )
-from nebula.transform._geodetic2enu import (
+from nebula.transforms._geodetic2enu import (
     _uvw2enu,
     enu_basis_from_latlon,
     geodetic2enu,
@@ -637,7 +637,7 @@ def test_vector_input_validation_errors() -> None:
 
 
 def test_constants_module_consistency() -> None:
-    c = transform
+    c = transforms
     assert c.WGS84_A > c.WGS84_B
     assert c.WGS84_A2 == c.WGS84_A * c.WGS84_A
     assert c.WGS84_B2 == c.WGS84_B * c.WGS84_B
@@ -650,7 +650,7 @@ def test_constants_module_consistency() -> None:
 
 
 def test_transform_init_reexports_work() -> None:
-    x, y, z = transform.geodetic2ecef(0.0, 0.0, 0.0)
-    assert abs(x - transform.WGS84_A) < 1e-9
+    x, y, z = transforms.geodetic2ecef(0.0, 0.0, 0.0)
+    assert abs(x - transforms.WGS84_A) < 1e-9
     assert abs(y) < 1e-12
     assert abs(z) < 1e-12

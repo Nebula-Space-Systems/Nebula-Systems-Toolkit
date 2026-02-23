@@ -17,6 +17,12 @@ from datetime import datetime, timezone
 from typing import Any, Optional, Tuple, Union
 
 import numpy as np
+from nebula.transforms._coarse_eci2itrf import (
+    coarse_eci2itrf_pos as _coarse_eci2itrf_pos_kernel,
+    coarse_eci2itrf_pos_vec as _coarse_eci2itrf_pos_vec_kernel,
+    coarse_eci2itrf_pos_vel as _coarse_eci2itrf_pos_vel_kernel,
+    coarse_eci2itrf_pos_vel_vec as _coarse_eci2itrf_pos_vel_vec_kernel,
+)
 
 try:
     from astropy.time import Time as AstropyTime  # type: ignore
@@ -530,8 +536,228 @@ def transform_pos_vel_timed(
     )
 
 
+def _normalize_component_input(x: Any, name: str) -> tuple[np.ndarray, bool]:
+    if isinstance(x, (float, int, np.floating, np.integer)) and not isinstance(x, bool):
+        return np.asarray([float(x)], dtype=np.float64), True
+
+    arr = np.asarray(x, dtype=np.float64)
+    if arr.ndim == 0:
+        return np.asarray([float(arr)], dtype=np.float64), True
+    if arr.ndim != 1:
+        raise ValueError(f"{name} must be scalar or 1D array; got shape {arr.shape}")
+    return np.ascontiguousarray(arr, dtype=np.float64), False
+
+
+def _normalize_astropy_time_for_coarse(times: Any) -> tuple[np.ndarray, bool]:
+    if AstropyTime is None:
+        raise RuntimeError("astropy is required for timed coarse ECI2ITRF wrappers")
+    if not isinstance(times, AstropyTime):
+        raise TypeError("times must be an astropy.time.Time scalar or 1D array")
+
+    is_scalar = getattr(times, "shape", None) == ()
+    if is_scalar:
+        return np.asarray([float(times.ut1.jd)], dtype=np.float64), True
+
+    if getattr(times, "ndim", 1) != 1:
+        raise ValueError(
+            f"times must be scalar or 1D astropy.time.Time; got shape {times.shape}"
+        )
+
+    jd_ut1 = np.asarray(times.ut1.jd, dtype=np.float64)
+    return np.ascontiguousarray(jd_ut1), False
+
+
+def _broadcast_length_for_components(
+    jd_ut1: np.ndarray, arrays: list[np.ndarray]
+) -> int:
+    n_time = int(jd_ut1.shape[0])
+    lengths = [n_time] + [int(a.shape[0]) for a in arrays]
+    n = max(lengths)
+    for ln in lengths:
+        if ln not in (1, n):
+            raise ValueError(
+                f"Input lengths must be broadcast-compatible (1 or N={n}); got {lengths}"
+            )
+    return n
+
+
+def _repeat_if_needed(arr: np.ndarray, n: int) -> np.ndarray:
+    if arr.shape[0] == n:
+        return arr
+    if arr.shape[0] == 1:
+        return np.repeat(arr, n)
+    raise ValueError("Unexpected broadcast failure")
+
+
+def coarse_eci2itrf(
+    times: Any,
+    x_eci_m: Any,
+    y_eci_m: Any,
+    z_eci_m: Any,
+    *,
+    xp_rad: float = 0.0,
+    yp_rad: float = 0.0,
+):
+    """
+    Coarse ECI->ITRF conversion using astropy time(s) directly.
+
+    Parameters
+    ----------
+    times : astropy.time.Time
+        Scalar or 1D time array. UT1/TT Julian dates are derived internally.
+    x_eci_m, y_eci_m, z_eci_m : float | np.ndarray
+        ECI components [m], each scalar or 1D array.
+    xp_rad, yp_rad : float, optional
+        Polar motion coordinates [rad].
+
+    Returns
+    -------
+    (x_itrf_m, y_itrf_m, z_itrf_m)
+        Scalars for scalar inputs, otherwise 1D arrays.
+    """
+    jd_ut1, t_scalar = _normalize_astropy_time_for_coarse(times)
+    jd_tt = np.asarray(
+        times.tt.jd if not t_scalar else [float(times.tt.jd)], dtype=np.float64
+    )
+
+    x_arr, x_scalar = _normalize_component_input(x_eci_m, "x_eci_m")
+    y_arr, y_scalar = _normalize_component_input(y_eci_m, "y_eci_m")
+    z_arr, z_scalar = _normalize_component_input(z_eci_m, "z_eci_m")
+
+    n = _broadcast_length_for_components(jd_ut1, [x_arr, y_arr, z_arr])
+    x_arr = _repeat_if_needed(x_arr, n)
+    y_arr = _repeat_if_needed(y_arr, n)
+    z_arr = _repeat_if_needed(z_arr, n)
+    jd_ut1 = _repeat_if_needed(jd_ut1, n)
+    jd_tt = _repeat_if_needed(jd_tt, n)
+
+    if n == 1:
+        x, y, z = _coarse_eci2itrf_pos_kernel(
+            float(x_arr[0]),
+            float(y_arr[0]),
+            float(z_arr[0]),
+            float(jd_ut1[0]),
+            float(jd_tt[0]),
+            float(xp_rad),
+            float(yp_rad),
+        )
+        if t_scalar and x_scalar and y_scalar and z_scalar:
+            return float(x), float(y), float(z)
+        return (
+            np.asarray([x], dtype=np.float64),
+            np.asarray([y], dtype=np.float64),
+            np.asarray([z], dtype=np.float64),
+        )
+
+    r_eci = np.column_stack((x_arr, y_arr, z_arr)).astype(np.float64)
+    r_itrf = _coarse_eci2itrf_pos_vec_kernel(
+        r_eci,
+        jd_ut1.astype(np.float64),
+        jd_tt.astype(np.float64),
+        float(xp_rad),
+        float(yp_rad),
+    )
+    return r_itrf[:, 0], r_itrf[:, 1], r_itrf[:, 2]
+
+
+def coarse_eci2itrf_pos_vel(
+    times: Any,
+    x_eci_m: Any,
+    y_eci_m: Any,
+    z_eci_m: Any,
+    vx_eci_mps: Any,
+    vy_eci_mps: Any,
+    vz_eci_mps: Any,
+    *,
+    xp_rad: float = 0.0,
+    yp_rad: float = 0.0,
+):
+    """
+    Coarse ECI->ITRF position/velocity conversion using astropy time(s).
+
+    Inputs may be scalars or 1D arrays and are broadcast against time length.
+    """
+    jd_ut1, t_scalar = _normalize_astropy_time_for_coarse(times)
+    jd_tt = np.asarray(
+        times.tt.jd if not t_scalar else [float(times.tt.jd)], dtype=np.float64
+    )
+
+    x_arr, x_scalar = _normalize_component_input(x_eci_m, "x_eci_m")
+    y_arr, y_scalar = _normalize_component_input(y_eci_m, "y_eci_m")
+    z_arr, z_scalar = _normalize_component_input(z_eci_m, "z_eci_m")
+    vx_arr, vx_scalar = _normalize_component_input(vx_eci_mps, "vx_eci_mps")
+    vy_arr, vy_scalar = _normalize_component_input(vy_eci_mps, "vy_eci_mps")
+    vz_arr, vz_scalar = _normalize_component_input(vz_eci_mps, "vz_eci_mps")
+
+    n = _broadcast_length_for_components(
+        jd_ut1,
+        [x_arr, y_arr, z_arr, vx_arr, vy_arr, vz_arr],
+    )
+    x_arr = _repeat_if_needed(x_arr, n)
+    y_arr = _repeat_if_needed(y_arr, n)
+    z_arr = _repeat_if_needed(z_arr, n)
+    vx_arr = _repeat_if_needed(vx_arr, n)
+    vy_arr = _repeat_if_needed(vy_arr, n)
+    vz_arr = _repeat_if_needed(vz_arr, n)
+    jd_ut1 = _repeat_if_needed(jd_ut1, n)
+    jd_tt = _repeat_if_needed(jd_tt, n)
+
+    if n == 1:
+        x, y, z, vx, vy, vz = _coarse_eci2itrf_pos_vel_kernel(
+            float(x_arr[0]),
+            float(y_arr[0]),
+            float(z_arr[0]),
+            float(vx_arr[0]),
+            float(vy_arr[0]),
+            float(vz_arr[0]),
+            float(jd_ut1[0]),
+            float(jd_tt[0]),
+            float(xp_rad),
+            float(yp_rad),
+        )
+        if (
+            t_scalar
+            and x_scalar
+            and y_scalar
+            and z_scalar
+            and vx_scalar
+            and vy_scalar
+            and vz_scalar
+        ):
+            return float(x), float(y), float(z), float(vx), float(vy), float(vz)
+        return (
+            np.asarray([x], dtype=np.float64),
+            np.asarray([y], dtype=np.float64),
+            np.asarray([z], dtype=np.float64),
+            np.asarray([vx], dtype=np.float64),
+            np.asarray([vy], dtype=np.float64),
+            np.asarray([vz], dtype=np.float64),
+        )
+
+    r_eci = np.column_stack((x_arr, y_arr, z_arr)).astype(np.float64)
+    v_eci = np.column_stack((vx_arr, vy_arr, vz_arr)).astype(np.float64)
+    r_itrf, v_itrf = _coarse_eci2itrf_pos_vel_vec_kernel(
+        r_eci,
+        v_eci,
+        jd_ut1.astype(np.float64),
+        jd_tt.astype(np.float64),
+        float(xp_rad),
+        float(yp_rad),
+    )
+    return (
+        r_itrf[:, 0],
+        r_itrf[:, 1],
+        r_itrf[:, 2],
+        v_itrf[:, 0],
+        v_itrf[:, 1],
+        v_itrf[:, 2],
+    )
+
+
 __all__ = [
     "transform_timed",
     "transform_positions_timed",
     "transform_pos_vel_timed",
+    "coarse_eci2itrf",
+    "coarse_eci2itrf_pos_vel",
 ]

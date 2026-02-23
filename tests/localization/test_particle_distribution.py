@@ -8,8 +8,8 @@ from nebula.localization.particle_initialization import (
     los_mask_all_observers,
     spacing_radius,
 )
-from nebula.transform._ecef2geodetic import ecef2geodetic_vec_xyz
-from nebula.transform._geodetic2ecef import geodetic2ecef
+from nebula.transforms._ecef2geodetic import ecef2geodetic_vec_xyz
+from nebula.transforms._geodetic2ecef import geodetic2ecef
 
 
 _DIST_PARAMS = dict(
@@ -105,8 +105,12 @@ def test_particle_global_lat_lon_cell_coverage(
     s_edges = np.linspace(-1.0, 1.0, n_sin_bins + 1)
     lon_edges = np.linspace(-np.pi, np.pi, n_lon_bins + 1)
 
-    s_idx = np.clip(np.searchsorted(s_edges, sin_lat, side="right") - 1, 0, n_sin_bins - 1)
-    l_idx = np.clip(np.searchsorted(lon_edges, lon, side="right") - 1, 0, n_lon_bins - 1)
+    s_idx = np.clip(
+        np.searchsorted(s_edges, sin_lat, side="right") - 1, 0, n_sin_bins - 1
+    )
+    l_idx = np.clip(
+        np.searchsorted(lon_edges, lon, side="right") - 1, 0, n_lon_bins - 1
+    )
 
     grid = np.zeros((n_sin_bins, n_lon_bins), dtype=np.int64)
     for a, b in zip(s_idx, l_idx):

@@ -216,7 +216,7 @@ def _coarse_j2_axis_native_iau76_shortnut(jd_tt: float):
 
 
 @njit(cache=False, fastmath=True)
-def _coarse_eci_to_itrf_pos_iau76_shortnut(
+def _coarse_eci2itrf_pos_iau76_shortnut(
     x_eci: float,
     y_eci: float,
     z_eci: float,
@@ -265,7 +265,10 @@ def _coarse_eci_to_itrf_pos_iau76_shortnut(
     x, y, z = _coarse_rot1_cs(x, y, z, c, s)
 
     gmst = _coarse_gmst_vallado_rad(jd_ut1)
-    eqeq = dpsi * math.cos(eps) + (0.00264 * math.sin(om) + 0.000063 * math.sin(2.0 * om)) * DAS2R
+    eqeq = (
+        dpsi * math.cos(eps)
+        + (0.00264 * math.sin(om) + 0.000063 * math.sin(2.0 * om)) * DAS2R
+    )
     gast = _coarse_mod2pi_rad(gmst + eqeq)
 
     c = math.cos(gast)
@@ -285,7 +288,7 @@ def _coarse_eci_to_itrf_pos_iau76_shortnut(
 
 
 @njit(cache=False, fastmath=True)
-def _coarse_eci_to_itrf_pv_iau76_shortnut(
+def _coarse_eci2itrf_pv_iau76_shortnut(
     rx: float,
     ry: float,
     rz: float,
@@ -343,7 +346,10 @@ def _coarse_eci_to_itrf_pv_iau76_shortnut(
     vx, vy, vz = _coarse_rot1_cs(vx, vy, vz, c, s)
 
     gmst = _coarse_gmst_vallado_rad(jd_ut1)
-    eqeq = dpsi * math.cos(eps) + (0.00264 * math.sin(om) + 0.000063 * math.sin(2.0 * om)) * DAS2R
+    eqeq = (
+        dpsi * math.cos(eps)
+        + (0.00264 * math.sin(om) + 0.000063 * math.sin(2.0 * om)) * DAS2R
+    )
     gast = _coarse_mod2pi_rad(gmst + eqeq)
 
     c = math.cos(gast)
@@ -369,7 +375,7 @@ def _coarse_eci_to_itrf_pv_iau76_shortnut(
 
 
 @njit(cache=False, fastmath=True, inline="always")
-def coarse_eci_to_itrf_pos_iau76_shortnut(
+def coarse_eci2itrf_pos(
     x_eci_m: float,
     y_eci_m: float,
     z_eci_m: float,
@@ -397,13 +403,13 @@ def coarse_eci_to_itrf_pos_iau76_shortnut(
     (x_itrf_m, y_itrf_m, z_itrf_m) : tuple[float, float, float]
         ITRF/ECEF position [m].
     """
-    return _coarse_eci_to_itrf_pos_iau76_shortnut(
+    return _coarse_eci2itrf_pos_iau76_shortnut(
         x_eci_m, y_eci_m, z_eci_m, jd_ut1, jd_tt, xp_rad, yp_rad
     )
 
 
 @njit(cache=False, fastmath=True, inline="always")
-def coarse_eci_to_itrf_pos_vel_iau76_shortnut(
+def coarse_eci2itrf_pos_vel(
     x_eci_m: float,
     y_eci_m: float,
     z_eci_m: float,
@@ -436,7 +442,7 @@ def coarse_eci_to_itrf_pos_vel_iau76_shortnut(
     (x_itrf_m, y_itrf_m, z_itrf_m, vx_itrf_mps, vy_itrf_mps, vz_itrf_mps)
         ITRF position [m] and velocity [m/s].
     """
-    return _coarse_eci_to_itrf_pv_iau76_shortnut(
+    return _coarse_eci2itrf_pv_iau76_shortnut(
         x_eci_m,
         y_eci_m,
         z_eci_m,
@@ -451,7 +457,7 @@ def coarse_eci_to_itrf_pos_vel_iau76_shortnut(
 
 
 @njit(cache=False, fastmath=True, parallel=True)
-def coarse_eci_to_itrf_pos_vec_iau76_shortnut(
+def coarse_eci2itrf_pos_vec(
     r_eci_m: np.ndarray,
     jd_ut1: np.ndarray,
     jd_tt: np.ndarray,
@@ -486,7 +492,7 @@ def coarse_eci_to_itrf_pos_vec_iau76_shortnut(
 
     r_itrf_m = np.empty((n, 3), dtype=np.float64)
     for i in prange(n):
-        x, y, z = _coarse_eci_to_itrf_pos_iau76_shortnut(
+        x, y, z = _coarse_eci2itrf_pos_iau76_shortnut(
             r_eci_m[i, 0],
             r_eci_m[i, 1],
             r_eci_m[i, 2],
@@ -502,7 +508,7 @@ def coarse_eci_to_itrf_pos_vec_iau76_shortnut(
 
 
 @njit(cache=False, fastmath=True, parallel=True)
-def coarse_eci_to_itrf_pos_vel_vec_iau76_shortnut(
+def coarse_eci2itrf_pos_vel_vec(
     r_eci_m: np.ndarray,
     v_eci_mps: np.ndarray,
     jd_ut1: np.ndarray,
@@ -545,7 +551,7 @@ def coarse_eci_to_itrf_pos_vel_vec_iau76_shortnut(
     r_itrf_m = np.empty((n, 3), dtype=np.float64)
     v_itrf_mps = np.empty((n, 3), dtype=np.float64)
     for i in prange(n):
-        x, y, z, vx, vy, vz = _coarse_eci_to_itrf_pv_iau76_shortnut(
+        x, y, z, vx, vy, vz = _coarse_eci2itrf_pv_iau76_shortnut(
             r_eci_m[i, 0],
             r_eci_m[i, 1],
             r_eci_m[i, 2],
@@ -567,8 +573,8 @@ def coarse_eci_to_itrf_pos_vel_vec_iau76_shortnut(
 
 
 __all__ = [
-    "coarse_eci_to_itrf_pos_iau76_shortnut",
-    "coarse_eci_to_itrf_pos_vel_iau76_shortnut",
-    "coarse_eci_to_itrf_pos_vec_iau76_shortnut",
-    "coarse_eci_to_itrf_pos_vel_vec_iau76_shortnut",
+    "coarse_eci2itrf_pos",
+    "coarse_eci2itrf_pos_vel",
+    "coarse_eci2itrf_pos_vec",
+    "coarse_eci2itrf_pos_vel_vec",
 ]

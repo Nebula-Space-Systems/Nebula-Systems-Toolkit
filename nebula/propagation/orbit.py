@@ -7,7 +7,10 @@ import threading
 from importlib import import_module
 
 import numpy as np
-from numba import njit
+from nebula.transforms._ecef2geodetic import (
+    ecef2geodetic_deg,
+    ecef2geodetic_vec_ecef_deg,
+)
 
 try:
     from astropy.time import Time as AstropyTime  # type: ignore
@@ -66,10 +69,21 @@ IERSConventions = _LazyJavaProxy("IERSConventions")
 
 def initialize_orekit(*, data_path: Optional[str] = None) -> None:
     """
-    Initialize JVM + Orekit data providers once for this process.
+    Initialize the Orekit JVM runtime and data providers for the current process.
 
-    This is safe to call repeatedly; initialization is guarded and only happens
-    once per process.
+    This function is idempotent: repeated calls are safe and return immediately
+    after the first successful initialization.
+
+    Parameters
+    ----------
+    data_path : str | None, optional
+        Path to an Orekit data directory. If ``None``, Nebula uses its bundled
+        repository path under ``data/orekit-data``.
+
+    Notes
+    -----
+    - Public entry point for explicit runtime setup in scripts/services.
+    - Most Orbit constructors call this automatically.
     """
     global _OREKIT_READY, _OREKIT_DATA_PATH, _OREKIT_FAULTHANDLER_DISABLED
     global FramesFactory, TimeScalesFactory, AbsoluteDate, IERSConventions
@@ -152,79 +166,11 @@ ITRFQueryMode = Literal["cached", "transform"]
 InterpolationMode = Literal["cubic", "quintic"]
 OrbitPropagationMode = Literal["precision", "efficiency"]
 
-WGS84_A = 6378137.0
-WGS84_B = 6356752.314245179
-WGS84_A2 = WGS84_A * WGS84_A
-WGS84_B2 = WGS84_B * WGS84_B
-WGS84_B2_OVER_A2 = WGS84_B2 / WGS84_A2
-WGS84_E2 = 1.0 - WGS84_B2_OVER_A2
-WGS84_EP2 = (WGS84_A2 - WGS84_B2) / WGS84_B2
-
 # NumericalPropagator default integrator controls (balanced for stability/speed).
 DEFAULT_POSITION_TOLERANCE_M = 0.1
 DEFAULT_MIN_STEP_S = 0.001
 DEFAULT_MAX_STEP_S = 180.0
 DEFAULT_INITIAL_STEP_S = 20.0
-
-
-# -----------------------------------------------------------------------------
-# Fast geodetic (unchanged)
-# -----------------------------------------------------------------------------
-@njit(cache=True, inline="always")
-def _ecef2geodetic_deg(x_m: float, y_m: float, z_m: float):
-    lon = np.arctan2(y_m, x_m)
-    p = np.hypot(x_m, y_m)
-
-    if p == 0.0 and z_m == 0.0:
-        return 0.0, 0.0, -WGS84_A
-
-    if p < 1e-12:
-        lat = 0.5 * np.pi if z_m >= 0.0 else -0.5 * np.pi
-        h = np.abs(z_m) - WGS84_B
-        lon = 0.0
-        return np.rad2deg(lat), np.rad2deg(lon), h
-
-    theta = np.arctan2(z_m * WGS84_A, p * WGS84_B)
-    st = np.sin(theta)
-    ct = np.cos(theta)
-
-    st3 = st * st * st
-    ct3 = ct * ct * ct
-    lat = np.arctan2(z_m + WGS84_EP2 * WGS84_B * st3, p - WGS84_E2 * WGS84_A * ct3)
-
-    sphi = np.sin(lat)
-    cphi = np.cos(lat)
-    N = WGS84_A / np.sqrt(1.0 - WGS84_E2 * sphi * sphi)
-    h = p / cphi - N
-
-    return np.rad2deg(lat), np.rad2deg(lon), h
-
-
-@njit(cache=True)
-def _ecef2geodetic_vec_ecef_deg(
-    r_ecef_m: np.ndarray,
-    *,
-    wrap_lon: bool = True,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    r = np.ascontiguousarray(r_ecef_m)
-    if r.ndim != 2 or r.shape[1] != 3:
-        raise ValueError("r_ecef_m must have shape (N, 3)")
-
-    n = r.shape[0]
-    lat = np.empty(n, np.float64)
-    lon = np.empty(n, np.float64)
-    h = np.empty(n, np.float64)
-
-    for i in range(n):
-        la, lo, hi = _ecef2geodetic_deg(r[i, 0], r[i, 1], r[i, 2])
-        lat[i] = la
-        lon[i] = lo
-        h[i] = hi
-
-    if wrap_lon:
-        lon = (np.mod(lon + 180.0, 360.0)) - 180.0
-
-    return lat, lon, h
 
 
 # -----------------------------------------------------------------------------
@@ -826,14 +772,26 @@ def _configure_force_models(
 @dataclass
 class Orbit:
     """
-    Unified orbit interface with two propagation modes:
-    - precision: Orekit numerical propagator (default)
-    - efficiency: numba/numpy fast propagator
+    Unified orbital propagation/query interface for precision and fast modes.
 
-    Construction helpers:
-    - from_kepler_precise(...): high-fidelity Orekit
-    - from_kepler_fast(...): high-efficiency approximate propagation
-    - from_spacecraft_state(...), from_pv(...): precision Orekit paths
+    The class exposes a consistent query API (`pv`, `pos`, `vel`, `pv_itrf`,
+    `lla`, ...) regardless of backend:
+
+    - ``precision`` mode uses Orekit numerical propagation with configurable
+        force models.
+    - ``efficiency`` mode uses the fast numpy/numba backend for higher
+        throughput with approximate dynamics.
+
+    Preferred constructors
+    ----------------------
+    - ``from_kepler_precise`` for high-fidelity Orekit propagation.
+    - ``from_kepler_fast`` for high-speed approximate propagation.
+    - ``from_pv`` when starting from Cartesian position/velocity states.
+
+    Notes
+    -----
+    Query methods accept either scalar or vector time inputs and preserve that
+    shape in outputs.
     """
 
     propagator: object
@@ -892,36 +850,47 @@ class Orbit:
 
     @property
     def epoch(self) -> "AstropyTime":  # type: ignore
+        """Reference epoch as scalar UTC ``astropy.time.Time``."""
         if self._mode == "efficiency":
             return self._fast_impl.epoch  # type: ignore[return-value]
         return self._epoch_ast
 
     @property
     def dt(self) -> float:
+        """Cache sample interval in seconds."""
         if self._mode == "efficiency":
             return float(self._fast_impl.dt)
         return self._dt
 
     @property
     def mode(self) -> OrbitPropagationMode:
+        """Active propagation mode: ``\"precision\"`` or ``\"efficiency\"``."""
         return self._mode
 
     @property
     def is_precision(self) -> bool:
+        """True when this instance uses the Orekit precision backend."""
         return self._mode == "precision"
 
     @property
     def is_efficiency(self) -> bool:
+        """True when this instance uses the fast numpy/numba backend."""
         return self._mode == "efficiency"
 
     def coverage(self) -> Tuple[float, float]:
+        """Return currently cached time coverage as ``(t_min_s, t_max_s)``."""
         if self._mode == "efficiency":
             return self._fast_impl.coverage()
         return float(self._k_min) * self._dt, float(self._k_max) * self._dt
 
     def precompute(self, t_min_s: float, t_max_s: float) -> None:
         """
-        Expand internal cache to cover [t_min_s, t_max_s] seconds from epoch.
+        Expand the internal interpolation cache to cover a target time window.
+
+        Parameters
+        ----------
+        t_min_s, t_max_s : float
+            Window bounds in seconds from ``epoch``.
         """
         if self._mode == "efficiency":
             self._fast_impl.precompute(float(t_min_s), float(t_max_s))
@@ -963,6 +932,22 @@ class Orbit:
         return r_itrf, v_itrf
 
     def pv(self, t: Any, frame: FrameKind = "native") -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Query position/velocity at one or more times.
+
+        Parameters
+        ----------
+        t : astropy.time.Time | float | int | np.ndarray
+            Query time(s). Numeric values are seconds from ``epoch``.
+        frame : {"native", "itrf"}, default "native"
+            Output frame. ``native`` is the propagation frame.
+
+        Returns
+        -------
+        (r, v) : tuple[np.ndarray, np.ndarray]
+            Position and velocity in SI units. Scalar input returns two
+            ``(3,)`` arrays; vector input returns ``(N, 3)`` arrays.
+        """
         if self._mode == "efficiency":
             return self._fast_impl.pv(t, frame=frame)
 
@@ -1024,31 +1009,50 @@ class Orbit:
         return r, v
 
     def pos(self, t: Any, frame: FrameKind = "native") -> np.ndarray:
+        """Position query helper; equivalent to ``pv(...)[0]``."""
         r, _ = self.pv(t, frame=frame)
         return r
 
     def vel(self, t: Any, frame: FrameKind = "native") -> np.ndarray:
+        """Velocity query helper; equivalent to ``pv(...)[1]``."""
         _, v = self.pv(t, frame=frame)
         return v
 
     def pv_itrf(self, t: Any) -> Tuple[np.ndarray, np.ndarray]:
+        """Convenience wrapper for ``pv(t, frame=\"itrf\")``."""
         return self.pv(t, frame="itrf")
 
     def pos_itrf(self, t: Any) -> np.ndarray:
+        """Convenience wrapper for ``pos(t, frame=\"itrf\")``."""
         return self.pos(t, frame="itrf")
 
     def vel_itrf(self, t: Any) -> np.ndarray:
+        """Convenience wrapper for ``vel(t, frame=\"itrf\")``."""
         return self.vel(t, frame="itrf")
 
     def lla(self, t: Any) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Query geodetic latitude/longitude/altitude from ITRF position.
+
+        Parameters
+        ----------
+        t : astropy.time.Time | float | int | np.ndarray
+            Query time(s). Numeric values are seconds from ``epoch``.
+
+        Returns
+        -------
+        (lat_deg, lon_deg, alt_m) : tuple[np.ndarray, np.ndarray, np.ndarray]
+            Geodetic latitude/longitude in degrees and altitude in meters.
+            Scalar input returns scalars; vector input returns ``(N,)`` arrays.
+        """
         if self._mode == "efficiency":
             return self._fast_impl.lla(t)
 
         r_itrf = self.pos_itrf(t)
         if r_itrf.ndim == 1:
-            lat, lon, alt = _ecef2geodetic_deg(r_itrf[0], r_itrf[1], r_itrf[2])
+            lat, lon, alt = ecef2geodetic_deg(r_itrf[0], r_itrf[1], r_itrf[2])
         else:
-            lat, lon, alt = _ecef2geodetic_vec_ecef_deg(r_itrf, wrap_lon=True)
+            lat, lon, alt = ecef2geodetic_vec_ecef_deg(r_itrf, wrap_lon=True)
         return lat, lon, alt  # type: ignore
 
     def _ensure_covered(self, dt_s: np.ndarray) -> None:
@@ -1272,28 +1276,36 @@ class Orbit:
         erp_angular_resolution_deg: float = 1.0,
     ) -> "Orbit":
         """
-        Construct a NumericalPropagator from Keplerian elements and wrap it in Orbit.
+        Build a precision-mode ``Orbit`` from classical Keplerian elements.
 
-        Units
-        -----
-        - a_m: meters
-        - angles: radians by default; set degrees=True if providing degrees
-        - epoch: astropy Time (UTC recommended)
-        - mu: m^3/s^2 (defaults to WGS84 Earth mu)
+        Parameters
+        ----------
+        epoch : astropy.time.Time
+                Epoch of the element set.
+        a_m, e, i, raan, argp, anomaly : float
+                Standard Keplerian elements. Angles are radians unless
+                ``degrees=True``.
+        anomaly_type : {"true", "mean", "eccentric"}, default "true"
+                Interpretation of ``anomaly``.
+        inertial_frame : str, default "gcrf"
+                Pseudo-inertial frame for the input elements and propagation state.
+        dt_save_s : float, default 60
+                Cache sampling interval used by interpolation-backed query methods.
+
+        Returns
+        -------
+        Orbit
+                Precision-mode wrapper around an Orekit ``NumericalPropagator``.
 
         Notes
         -----
-        - Keplerian elements are defined in a pseudo-inertial frame.
-          Supported names: gcrf, icrf, eme2000, mod, tod, teme, cirf, veis1950, ecliptic
-          (plus aliases: j2000->eme2000, mean_of_date->mod, true_of_date->tod).
-        - itrf_query_mode="cached" interpolates precomputed ITRF (fast).
-          "transform" returns ITRF by transforming interpolated native PV at query time
-          (better frame consistency).
-        - interpolation_mode="cubic" is fastest. "quintic" uses endpoint acceleration
-          and typically reduces velocity interpolation error at added runtime cost.
-        - Integrator defaults are tuned for sane LEO behavior: tolerance=0.1 m,
-          max_step=120 s, initial_step=20 s.
-        - Force models are attached via boolean flags and parameters; callers do not need to touch Orekit.
+        - ``itrf_query_mode=\"cached\"`` is faster for repeated Earth-fixed queries.
+            ``\"transform\"`` computes ITRF from native-frame interpolation at query
+            time for stronger frame consistency.
+        - ``interpolation_mode=\"cubic\"`` is the default speed/accuracy tradeoff;
+            ``\"quintic\"`` uses acceleration-aware interpolation.
+        - Force model flags expose common Orekit force options without requiring
+            direct Orekit setup in user code.
         """
         if AstropyTime is None:
             raise RuntimeError("astropy is required for Orbit")
@@ -1418,10 +1430,15 @@ class Orbit:
         use_polar_motion: bool = True,
     ) -> "Orbit":
         """
-        Construct an efficiency-mode Orbit using the numba/numpy fast backend.
+        Build an efficiency-mode ``Orbit`` backed by the fast numpy/numba engine.
 
-        This keeps the same Orbit interface for query methods (`pv`, `pos`, `vel`,
-        `pv_itrf`, `lla`, etc.) while using approximate fast propagation internals.
+        The returned object preserves the same public query interface as
+        precision mode (`pv`, `pos`, `vel`, `pv_itrf`, `lla`, ...).
+
+        Notes
+        -----
+        This path is optimized for throughput and may trade physical fidelity
+        relative to ``from_kepler_precise`` depending on configuration.
         """
         fast_orbit_cls = _resolve_fast_orbit_class()
         fast_impl = fast_orbit_cls.from_kepler(
@@ -1490,10 +1507,11 @@ class Orbit:
         erp_angular_resolution_deg: float = 1.0,
     ) -> "Orbit":
         """
-        Accept an Orekit SpacecraftState and construct a NumericalPropagator, then wrap it.
+        Build a precision-mode ``Orbit`` from an existing Orekit ``SpacecraftState``.
 
-        This is primarily for internal use and advanced callers; from_kepler_precise/from_pv are the
-        intended public entry points if you want to avoid exposing Orekit types.
+        This constructor is intended for advanced Orekit-integrated workflows.
+        If you do not already have Orekit state objects, prefer
+        ``from_kepler_precise`` or ``from_pv``.
         """
         initialize_orekit()
         iers = _resolve_iers(iers)
@@ -1623,21 +1641,25 @@ class Orbit:
         erp_angular_resolution_deg: float = 1.0,
     ) -> "Orbit":
         """
-        Construct from position/velocity vectors at an epoch.
+        Build a precision-mode ``Orbit`` from Cartesian position/velocity state.
 
-        Inputs
-        ------
-        r: (3,) meters
-        v: (3,) meters/second
-        epoch: astropy Time
-        frame: frame of the input vectors
-               (pseudo-inertial: gcrf/icrf/eme2000/mod/tod/teme/cirf/veis1950/ecliptic,
-               or earth-fixed: itrf/ecef)
+        Parameters
+        ----------
+        r, v : np.ndarray
+            Position and velocity vectors of shape ``(3,)`` in meters and
+            meters/second.
+        epoch : astropy.time.Time
+            Epoch of the state vector.
+        frame : str, default "gcrf"
+            Frame of input vectors. Supports both pseudo-inertial frame names
+            and Earth-fixed aliases (``itrf``/``ecef``).
+        propagate_inertial_frame : str, default "gcrf"
+            Inertial frame used internally by the numerical propagator.
 
-        Behavior
-        --------
-        - Always transforms input PV into `propagate_inertial_frame` at `epoch`, then
-          propagates in that inertial frame. For matching inertial frames this is identity.
+        Notes
+        -----
+        Input PV is transformed to ``propagate_inertial_frame`` at ``epoch``
+        before propagation; if frames already match this is a no-op.
         """
         if AstropyTime is None:
             raise RuntimeError("astropy is required for Orbit")

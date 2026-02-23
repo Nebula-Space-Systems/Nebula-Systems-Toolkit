@@ -13,7 +13,7 @@ from nebula.geometry.ellipsoid_los import (
     los_clear_wgs84_ecef_many_to_many,
     los_clear_wgs84_ecef_one_to_many,
 )
-from nebula.transform.constants import WGS84_A
+from nebula.transforms.constants import WGS84_A
 
 
 def _random_outside_earth(n: int, seed: int = 0) -> np.ndarray:

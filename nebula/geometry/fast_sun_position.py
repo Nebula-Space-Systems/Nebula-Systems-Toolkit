@@ -40,8 +40,8 @@ All functions are numba-njit compatible.
 
 import numpy as np
 from numba import njit
-from nebula.transform._coarse_eci2itrf import (
-    _coarse_eci_to_itrf_pos_iau76_shortnut,
+from nebula.transforms._coarse_eci2itrf import (
+    _coarse_eci2itrf_pos_iau76_shortnut,
     _coarse_gmst_vallado_rad,
     _coarse_tod_to_native_pos_iau76_shortnut,
 )
@@ -233,8 +233,6 @@ def sun_position_ecef(
     )
 
     # Apply the same native->ECEF chain used in fast_orbit.
-    return _coarse_eci_to_itrf_pos_iau76_shortnut(
+    return _coarse_eci2itrf_pos_iau76_shortnut(
         x_eci, y_eci, z_eci, jd_ut1, jd_tt, xp_rad, yp_rad
     )
-
-

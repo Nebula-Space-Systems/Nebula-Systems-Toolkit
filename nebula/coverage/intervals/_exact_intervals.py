@@ -7,7 +7,7 @@ import numpy as np
 from numba import njit, prange
 
 from nebula.coverage.intervals.config import ExactCoverageConfig
-from nebula.transform.constants import WGS84_A, WGS84_E2
+from nebula.transforms.constants import WGS84_A, WGS84_E2
 
 
 _ROOT_EPS = 1e-12
@@ -405,7 +405,9 @@ def _validate_time_array(time: np.ndarray) -> np.ndarray:
     return np.ascontiguousarray(times)
 
 
-def _stack_observers(times: np.ndarray, observer_positions: Iterable[np.ndarray]) -> np.ndarray:
+def _stack_observers(
+    times: np.ndarray, observer_positions: Iterable[np.ndarray]
+) -> np.ndarray:
     obs_list = []
     for obs in observer_positions:
         arr = np.asarray(obs, dtype=np.float64)
@@ -436,7 +438,9 @@ def _validate_targets(
     return np.ascontiguousarray(targets), np.ascontiguousarray(up)
 
 
-def _estimate_observer_velocities(time: np.ndarray, obs_stack: np.ndarray) -> np.ndarray:
+def _estimate_observer_velocities(
+    time: np.ndarray, obs_stack: np.ndarray
+) -> np.ndarray:
     vel = np.empty_like(obs_stack)
     _estimate_observer_velocities_kernel(time, obs_stack, vel)
     return vel
@@ -516,7 +520,9 @@ def _add_breakpoint(points: np.ndarray, n: int, x: float) -> int:
 
 
 @njit(cache=True, inline="always")
-def _add_quadratic_roots(points: np.ndarray, n: int, q2: float, q1: float, q0: float) -> int:
+def _add_quadratic_roots(
+    points: np.ndarray, n: int, q2: float, q1: float, q0: float
+) -> int:
     if abs(q2) <= _ROOT_EPS:
         if abs(q1) <= _ROOT_EPS:
             return n
