@@ -102,7 +102,7 @@ def build_surface_targets_from_config(
     return target_positions, target_up
 
 
-def build_access_interval_store_from_config(
+def compute_access_intervals(
     config: ExactCoverageConfig,
     time: np.ndarray,
     observer_positions: Iterable[np.ndarray],
@@ -283,104 +283,6 @@ def build_access_interval_store(
         root_tolerance_s=root_tol_s,
         target_shape=target_shape,
     )
-
-
-def access_duration_by_target(
-    store: AccessIntervalStore,
-    *,
-    N: int = 1,
-    t_start: float | None = None,
-    t_stop: float | None = None,
-    reshape: bool = True,
-) -> np.ndarray:
-    """
-    Total time in access per target requiring at least `N` concurrent observers.
-    """
-    n_req = int(N)
-    if n_req <= 0:
-        raise ValueError("N must be >= 1")
-
-    t0, t1 = _resolve_window(store, t_start, t_stop)
-    out = np.zeros(store.n_targets, dtype=np.float64)
-    if n_req > store.n_observers:
-        return store.reshape_target_values(out) if reshape else out
-
-    _duration_by_target_kernel(
-        store.pair_offsets,
-        store.start_times,
-        store.stop_times,
-        int(store.n_observers),
-        int(store.n_targets),
-        n_req,
-        t0,
-        t1,
-        out,
-    )
-    return store.reshape_target_values(out) if reshape else out
-
-
-def max_asset_by_target(
-    store: AccessIntervalStore,
-    *,
-    t_start: float | None = None,
-    t_stop: float | None = None,
-    reshape: bool = True,
-) -> np.ndarray:
-    """
-    Maximum concurrent observers in access per target over the query window.
-    """
-    t0, t1 = _resolve_window(store, t_start, t_stop)
-    out = np.zeros(store.n_targets, dtype=np.int32)
-    _max_asset_by_target_kernel(
-        store.pair_offsets,
-        store.start_times,
-        store.stop_times,
-        int(store.n_observers),
-        int(store.n_targets),
-        t0,
-        t1,
-        out,
-    )
-    return store.reshape_target_values(out) if reshape else out
-
-
-def mtta_by_target(
-    store: AccessIntervalStore,
-    *,
-    N: int = 1,
-    t_start: float | None = None,
-    t_stop: float | None = None,
-    wrap: bool = False,
-    no_access_value: float = np.nan,
-    reshape: bool = True,
-) -> np.ndarray:
-    """
-    Mean Time To Access (MTTA) per target from precomputed exact intervals.
-    """
-    n_req = int(N)
-    if n_req <= 0:
-        raise ValueError("N must be >= 1")
-
-    t0, t1 = _resolve_window(store, t_start, t_stop)
-    out = np.zeros(store.n_targets, dtype=np.float64)
-    if n_req > store.n_observers:
-        out.fill(float(no_access_value))
-        return store.reshape_target_values(out) if reshape else out
-
-    _mtta_by_target_kernel(
-        store.pair_offsets,
-        store.start_times,
-        store.stop_times,
-        int(store.n_observers),
-        int(store.n_targets),
-        n_req,
-        t0,
-        t1,
-        bool(wrap),
-        float(no_access_value),
-        out,
-    )
-    return store.reshape_target_values(out) if reshape else out
 
 
 def _resolve_window(

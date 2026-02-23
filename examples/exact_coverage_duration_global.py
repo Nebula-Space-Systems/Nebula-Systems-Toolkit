@@ -18,7 +18,7 @@ if __package__ is None or __package__ == "":
 
 from nebula.coverage import (
     ExactCoverageConfig,
-    build_access_interval_store_from_config,
+    compute_access_intervals,
     access_duration_by_target,
 )
 from nebula.propagation import Orbit
@@ -151,7 +151,7 @@ def main() -> None:
     import time
 
     t0 = time.time()
-    store = build_access_interval_store_from_config(
+    store = compute_access_intervals(
         config=config,
         time=t_seconds,
         observer_positions=obs_positions,
@@ -161,7 +161,7 @@ def main() -> None:
     t1 = time.time()
     print(f"Built access interval store in {t1 - t0:.2f} seconds")
 
-    duration_s_per_target = access_duration_by_target(store, N=1, reshape=False)
+    duration_s_per_target = access_duration_by_target(store, N=2, normalize_to_day=True)
     duration_hr_per_target = duration_s_per_target / 3600.0
 
     lon_edges, lat_edges, duration_hr_grid = _rasterize_lat_row_field_to_regular_grid(
@@ -188,7 +188,7 @@ def main() -> None:
         f"{len(sats)} satellites, {duration_s / 3600.0:.0f} h window"
     )
     cbar = fig.colorbar(mesh, ax=ax, pad=0.02)
-    cbar.set_label("Total access duration [hours]")
+    cbar.set_label("Average access duration [hours/day]")
 
     fig.tight_layout()
     plt.show()

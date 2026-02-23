@@ -3,7 +3,7 @@ import numpy as np
 from nebula.coverage import (
     ExactCoverageConfig,
     build_access_interval_store,
-    build_access_interval_store_from_config,
+    compute_access_intervals,
     access_duration_by_target,
     max_asset_by_target,
     mtta_by_target,
@@ -93,7 +93,7 @@ def test_config_wrapper_sets_target_shape_for_grid_queries() -> None:
     time = np.array([0.0, 1.0], dtype=np.float64)
     observer = np.array([[0.0, 0.0, 8_000_000.0], [0.0, 0.0, 8_000_000.0]])
 
-    store = build_access_interval_store_from_config(
+    store = compute_access_intervals(
         config=cfg,
         time=time,
         observer_positions=[observer],
