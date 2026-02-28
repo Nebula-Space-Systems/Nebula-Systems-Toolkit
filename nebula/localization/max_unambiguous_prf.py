@@ -1,6 +1,8 @@
 """
-Certified maximum unambiguous PRF (no-wrap TDOA criterion) over the WGS84 ellipsoid surface
-for an arbitrary number of observers (ECEF meters) at a single time.
+Certified critical PRF (no-wrap TDOA criterion) over the WGS84 ellipsoid surface.
+
+This solver computes a certified interval for the critical PRF over the common-visible
+surface footprint of all observers, then returns a conservative safe PRF.
 
 Definitions
 -----------
@@ -9,66 +11,61 @@ Observers: p_i in ECEF meters.
 Propagation delays:
     tau_i(x) = ||x - p_i|| / c
 
-Worst-case inter-observer delay spread at x:
+Inter-observer delay spread:
     W(x) = max_i tau_i(x) - min_i tau_i(x)
 
-Timing uncertainty margin (deterministic hard bounds):
-    Let sigma_i be a worst-case absolute timestamp error bound (seconds) for observer i.
-    Then worst-case absolute TDOA error over all baselines is:
-        margin = sigma_(largest) + sigma_(second_largest)
+No-wrap condition over region R:
+    W(x) + margin < PRI/2,  for all x in R
+where R is the WGS84 surface region visible to all observers (ellipsoid-occluded LOS).
 
-No-wrap unambiguous PRI condition over region R:
-    For all x in R:
-        W(x) + margin < PRI/2
-    Therefore the required PRI is:
-        PRI_min = 2 * max_{x in R} (W(x) + margin)
-    And the safe maximum PRF is:
-        PRF_safe = 1 / PRI_upper
-
-Region R (common visibility on WGS84):
-    x is on the WGS84 ellipsoid surface and line-of-sight visible to ALL observers,
-    with the WGS84 ellipsoid occluding LOS.
-
-Certified solver
-----------------
-We maximize:
+We define:
     F(x) = W(x) + margin
-over x in R, using branch-and-bound over a hierarchical icosphere mesh projected to WGS84.
+    F*   = max_{x in R} F(x)
+Then:
+    PRI_critical = 2*F*
+    PRF_critical = 1/PRI_critical
 
-Certification uses Lipschitz bounds (Euclidean ECEF distance):
-    - W is Lipschitz with L_F = 2/c
-    - Visibility margin g(x) = min_k (p_s,k^T x - 1), where p_s = A p and
-      A=diag(1/a^2, 1/a^2, 1/b^2), is Lipschitz with L_g = max_k ||p_s,k||.
+Returned PRF interval
+---------------------
+The solver maintains certified bounds F_L <= F* <= F_U and returns:
+    prf_lower_hz : conservative safe PRF (optionally strict-padded)
+    prf_upper_hz : optimistic upper bound on critical PRF
+    prf_gap_hz   : certified PRF interval width
+and the corresponding PRI bounds in microseconds.
 
-For each cell C we compute certified upper bounds:
-    ub_g(C) >= max_{x in C} g(x)
-    ub_F(C) >= max_{x in C} F(x)
+Uncertainty margin model
+------------------------
+Let s1 >= s2 be the two largest entries in sigma_t_s.
 
-We maintain:
-    F_L = best feasible sample value (visible sample) => F_L <= F*
-    F_U = max over active cells of ub_F(C)           => F* <= F_U
+margin_mode = 0 (default, deterministic hard-bound interpretation):
+    margin = k_sigma * (s1 + s2)
+If sigma_t_s are per-observer absolute timestamp error bounds and k_sigma=1,
+this is a deterministic worst-case TDOA bound.
 
-Stop when:
-    PRI_gap = 2*(F_U - F_L) <= tol_pri_us
+margin_mode = 1 (probabilistic RSS interpretation):
+    margin = k_sigma * sqrt(s1^2 + s2^2)
+This treats sigma_t_s as independent 1-sigma timing uncertainties.
 
-If caps are hit before meeting tolerance, we raise ValueError (no partial returns).
+Certification details
+---------------------
+Branch-and-bound is performed on a subdivided icosphere parameterization.
 
-Outputs
--------
-Returns (all float64):
-    (prf_safe_hz, pri_upper_us, pri_lower_us, pri_gap_us)
+Lipschitz constants in ECEF distance:
+    W is Lipschitz with L_F = 2/c.
+    g(x) = min_k (p_s,k^T x - 1), p_s = A p, A=diag(1/a^2,1/a^2,1/b^2),
+    has L_g = max_k ||p_s,k||.
+
+Cell diameter bound:
+    For each direction cell, we compute a conservative ECEF diameter upper bound and use:
+        ub_g(C) = max_sample(g) + L_g * diam(C)
+        ub_F(C) = max_sample(F) + L_F * diam(C)
+    plus a global analytic clamp:
+        F(x) <= Bmax/c + margin,  Bmax = max_{i<j} ||p_i - p_j||.
 
 Raises ValueError if:
-    - certified empty overlap (no common-visible region), OR
-    - tolerance not achieved before caps.
-
-Notes
------
-- PRF is in Hz. PRI is in microseconds.
-- This uses a conservative analytic clamp:
-      W(x) <= Bmax/c, where Bmax = max_{i<j} ||p_i - p_j||
-  so F(x) <= Bmax/c + margin. This dramatically improves convergence and does not
-  reduce correctness.
+    - certified empty overlap,
+    - invalid inputs,
+    - or tolerance is not achieved before caps.
 """
 
 import numpy as np
@@ -150,19 +147,121 @@ def _ellipsoid_intersect_dir(ux, uy, uz, inva2, invb2):
 
 
 @njit(cache=True, inline="always")
-def _clamp01(x):
-    if x < -1.0:
-        return -1.0
-    if x > 1.0:
-        return 1.0
-    return x
+def _dot3(ax, ay, az, bx, by, bz):
+    return ax * bx + ay * by + az * bz
 
 
-@njit(cache=True, inline="always")
-def _chord_bound_from_cos(cos_theta, a):
-    # chord <= a*sqrt(2*(1-cos))
-    c = _clamp01(cos_theta)
-    return a * np.sqrt(2.0 * (1.0 - c))
+@njit(cache=True)
+def _closest_origin_norm_triangle(u0, u1, u2):
+    # Closest-point-to-origin on triangle (u0,u1,u2), adapted from
+    # "Real-Time Collision Detection" region tests.
+    ax, ay, az = u0[0], u0[1], u0[2]
+    bx, by, bz = u1[0], u1[1], u1[2]
+    cx, cy, cz = u2[0], u2[1], u2[2]
+
+    abx, aby, abz = bx - ax, by - ay, bz - az
+    acx, acy, acz = cx - ax, cy - ay, cz - az
+    apx, apy, apz = -ax, -ay, -az
+    d1 = _dot3(abx, aby, abz, apx, apy, apz)
+    d2 = _dot3(acx, acy, acz, apx, apy, apz)
+    if d1 <= 0.0 and d2 <= 0.0:
+        return _norm3(ax, ay, az)
+
+    bpx, bpy, bpz = -bx, -by, -bz
+    d3 = _dot3(abx, aby, abz, bpx, bpy, bpz)
+    d4 = _dot3(acx, acy, acz, bpx, bpy, bpz)
+    if d3 >= 0.0 and d4 <= d3:
+        return _norm3(bx, by, bz)
+
+    vc = d1 * d4 - d3 * d2
+    if vc <= 0.0 and d1 >= 0.0 and d3 <= 0.0:
+        den = d1 - d3
+        if np.abs(den) < 1e-30:
+            na = _norm3(ax, ay, az)
+            nb = _norm3(bx, by, bz)
+            return na if na < nb else nb
+        v = d1 / den
+        px = ax + v * abx
+        py = ay + v * aby
+        pz = az + v * abz
+        return _norm3(px, py, pz)
+
+    cpx, cpy, cpz = -cx, -cy, -cz
+    d5 = _dot3(abx, aby, abz, cpx, cpy, cpz)
+    d6 = _dot3(acx, acy, acz, cpx, cpy, cpz)
+    if d6 >= 0.0 and d5 <= d6:
+        return _norm3(cx, cy, cz)
+
+    vb = d5 * d2 - d1 * d6
+    if vb <= 0.0 and d2 >= 0.0 and d6 <= 0.0:
+        den = d2 - d6
+        if np.abs(den) < 1e-30:
+            na = _norm3(ax, ay, az)
+            nc = _norm3(cx, cy, cz)
+            return na if na < nc else nc
+        w = d2 / den
+        px = ax + w * acx
+        py = ay + w * acy
+        pz = az + w * acz
+        return _norm3(px, py, pz)
+
+    va = d3 * d6 - d5 * d4
+    if va <= 0.0 and (d4 - d3) >= 0.0 and (d5 - d6) >= 0.0:
+        den = (d4 - d3) + (d5 - d6)
+        if np.abs(den) < 1e-30:
+            nb = _norm3(bx, by, bz)
+            nc = _norm3(cx, cy, cz)
+            return nb if nb < nc else nc
+        w = (d4 - d3) / den
+        bcx, bcy, bcz = cx - bx, cy - by, cz - bz
+        px = bx + w * bcx
+        py = by + w * bcy
+        pz = bz + w * bcz
+        return _norm3(px, py, pz)
+
+    den = va + vb + vc
+    if np.abs(den) < 1e-30:
+        na = _norm3(ax, ay, az)
+        nb = _norm3(bx, by, bz)
+        nc = _norm3(cx, cy, cz)
+        m = na if na < nb else nb
+        return m if m < nc else nc
+
+    inv_den = 1.0 / den
+    v = vb * inv_den
+    w = vc * inv_den
+    px = ax + abx * v + acx * w
+    py = ay + aby * v + acy * w
+    pz = az + abz * v + acz * w
+    return _norm3(px, py, pz)
+
+
+@njit(cache=True)
+def _cell_diameter_bound(u0, u1, u2, L_u_to_x):
+    # A rigorous direction-space diameter bound for this spherical triangle:
+    # S = normalize(conv(u0,u1,u2)).
+    # If P = conv(u0,u1,u2) and m = min_{p in P} ||p||, then normalization is
+    # (1/m)-Lipschitz on P, so diam(S) <= diam(P)/m.
+    d01 = _norm3(u0[0] - u1[0], u0[1] - u1[1], u0[2] - u1[2])
+    d12 = _norm3(u1[0] - u2[0], u1[1] - u2[1], u1[2] - u2[2])
+    d20 = _norm3(u2[0] - u0[0], u2[1] - u0[1], u2[2] - u0[2])
+
+    diam_P = d01
+    if d12 > diam_P:
+        diam_P = d12
+    if d20 > diam_P:
+        diam_P = d20
+
+    m = _closest_origin_norm_triangle(u0, u1, u2)
+    if m < 1e-15:
+        dir_diam = 2.0
+    else:
+        dir_diam = diam_P / m
+        if dir_diam > 2.0:
+            dir_diam = 2.0
+
+    # Conservative global Lipschitz bound for ellipsoid radial projection map.
+    return L_u_to_x * dir_diam
 
 
 # -----------------------------
@@ -262,42 +361,7 @@ def _g_visibility_margin(x, y, z, ps, nobs):
     return g
 
 
-@njit(
-    cache=True,
-)
-def _cell_diameter_bound(u0, u1, u2, a):
-    # Conservative chord diameter bound using vertices + edge midpoints (6 points).
-    m01x, m01y, m01z = _mid_dir(u0[0], u0[1], u0[2], u1[0], u1[1], u1[2])
-    m12x, m12y, m12z = _mid_dir(u1[0], u1[1], u1[2], u2[0], u2[1], u2[2])
-    m20x, m20y, m20z = _mid_dir(u2[0], u2[1], u2[2], u0[0], u0[1], u0[2])
-
-    # list of 6 direction vectors
-    # compute max chord bound among all pairs (15 pairs)
-    # (dot products only, no acos)
-    pts = (
-        (u0[0], u0[1], u0[2]),
-        (u1[0], u1[1], u1[2]),
-        (u2[0], u2[1], u2[2]),
-        (m01x, m01y, m01z),
-        (m12x, m12y, m12z),
-        (m20x, m20y, m20z),
-    )
-
-    dmax = 0.0
-    for i in range(6):
-        ax, ay, az = pts[i]
-        for j in range(i + 1, 6):
-            bx, by, bz = pts[j]
-            dot = ax * bx + ay * by + az * bz
-            d = _chord_bound_from_cos(dot, a)
-            if d > dmax:
-                dmax = d
-    return dmax
-
-
-@njit(
-    cache=True,
-)
+@njit(cache=True)
 def _eval_cell(
     u0,
     u1,
@@ -307,52 +371,75 @@ def _eval_cell(
     nobs,
     inva2,
     invb2,
-    a,
+    L_u_to_x,
     inv_c,
     margin,
     L_F,
     L_g,
     F_cap,
 ):
-    """
-    Returns:
-      (diam, gub, Fvis, Fub)
+    diam = _cell_diameter_bound(u0, u1, u2, L_u_to_x)
 
-    Where:
-      - diam is a conservative diameter bound for the cell on the ellipsoid (via direction chord bound)
-      - gub is a certified upper bound on max g(x) in the cell
-      - Fvis is max F among *visible samples* in this cell (or -inf if none sampled visible)
-      - Fub is a certified upper bound on max F(x) in the cell (clamped by F_cap)
-    """
-    diam = _cell_diameter_bound(u0, u1, u2, a)
+    # 7-point sampling: vertices + 3 midpoints + center direction.
+    m01x, m01y, m01z = _mid_dir(u0[0], u0[1], u0[2], u1[0], u1[1], u1[2])
+    m12x, m12y, m12z = _mid_dir(u1[0], u1[1], u1[2], u2[0], u2[1], u2[2])
+    m20x, m20y, m20z = _mid_dir(u2[0], u2[1], u2[2], u0[0], u0[1], u0[2])
+    ccx, ccy, ccz = _normalize3(
+        u0[0] + u1[0] + u2[0],
+        u0[1] + u1[1] + u2[1],
+        u0[2] + u1[2] + u2[2],
+    )
 
-    # Sample only vertices for speed (still certified).
-    # Compute g at vertices to form gub and to identify visible samples.
+    # Evaluate g on all 7 samples and compute certified possible-visibility upper bound.
     g_max = -1e300
 
+    # Sample 0: u0
     sx0, sy0, sz0 = _ellipsoid_intersect_dir(u0[0], u0[1], u0[2], inva2, invb2)
     g0 = _g_visibility_margin(sx0, sy0, sz0, ps, nobs)
     if g0 > g_max:
         g_max = g0
 
+    # Sample 1: u1
     sx1, sy1, sz1 = _ellipsoid_intersect_dir(u1[0], u1[1], u1[2], inva2, invb2)
     g1 = _g_visibility_margin(sx1, sy1, sz1, ps, nobs)
     if g1 > g_max:
         g_max = g1
 
+    # Sample 2: u2
     sx2, sy2, sz2 = _ellipsoid_intersect_dir(u2[0], u2[1], u2[2], inva2, invb2)
     g2 = _g_visibility_margin(sx2, sy2, sz2, ps, nobs)
     if g2 > g_max:
         g_max = g2
 
-    # Certified possible-visibility upper bound
-    gub = g_max + L_g * diam
+    # Sample 3: m01
+    sx3, sy3, sz3 = _ellipsoid_intersect_dir(m01x, m01y, m01z, inva2, invb2)
+    g3 = _g_visibility_margin(sx3, sy3, sz3, ps, nobs)
+    if g3 > g_max:
+        g_max = g3
 
-    # If provably not in intersection, skip expensive F work
+    # Sample 4: m12
+    sx4, sy4, sz4 = _ellipsoid_intersect_dir(m12x, m12y, m12z, inva2, invb2)
+    g4 = _g_visibility_margin(sx4, sy4, sz4, ps, nobs)
+    if g4 > g_max:
+        g_max = g4
+
+    # Sample 5: m20
+    sx5, sy5, sz5 = _ellipsoid_intersect_dir(m20x, m20y, m20z, inva2, invb2)
+    g5 = _g_visibility_margin(sx5, sy5, sz5, ps, nobs)
+    if g5 > g_max:
+        g_max = g5
+
+    # Sample 6: center
+    sx6, sy6, sz6 = _ellipsoid_intersect_dir(ccx, ccy, ccz, inva2, invb2)
+    g6 = _g_visibility_margin(sx6, sy6, sz6, ps, nobs)
+    if g6 > g_max:
+        g_max = g6
+
+    gub = g_max + L_g * diam
     if gub < 0.0:
         return diam, gub, -1e300, -1e300
 
-    # Compute F on vertices (W + margin)
+    # Compute F on all 7 samples, and Fvis on those with g>=0.
     F_max_all = -1e300
     Fvis = -1e300
 
@@ -377,7 +464,34 @@ def _eval_cell(
     if g2 >= 0.0 and F > Fvis:
         Fvis = F
 
-    # Certified upper bound on max F in cell
+    W = _delay_spread_seconds(sx3, sy3, sz3, obs, nobs, inv_c)
+    F = W + margin
+    if F > F_max_all:
+        F_max_all = F
+    if g3 >= 0.0 and F > Fvis:
+        Fvis = F
+
+    W = _delay_spread_seconds(sx4, sy4, sz4, obs, nobs, inv_c)
+    F = W + margin
+    if F > F_max_all:
+        F_max_all = F
+    if g4 >= 0.0 and F > Fvis:
+        Fvis = F
+
+    W = _delay_spread_seconds(sx5, sy5, sz5, obs, nobs, inv_c)
+    F = W + margin
+    if F > F_max_all:
+        F_max_all = F
+    if g5 >= 0.0 and F > Fvis:
+        Fvis = F
+
+    W = _delay_spread_seconds(sx6, sy6, sz6, obs, nobs, inv_c)
+    F = W + margin
+    if F > F_max_all:
+        F_max_all = F
+    if g6 >= 0.0 and F > Fvis:
+        Fvis = F
+
     Fub = F_max_all + L_F * diam
     if Fub > F_cap:
         Fub = F_cap
@@ -401,7 +515,7 @@ def _subdivide_and_eval_batch(
     nobs,
     inva2,
     invb2,
-    a,
+    L_u_to_x,
     inv_c,
     margin,
     L_F,
@@ -458,7 +572,7 @@ def _subdivide_and_eval_batch(
             nobs,
             inva2,
             invb2,
-            a,
+            L_u_to_x,
             inv_c,
             margin,
             L_F,
@@ -481,7 +595,7 @@ def _subdivide_and_eval_batch(
             nobs,
             inva2,
             invb2,
-            a,
+            L_u_to_x,
             inv_c,
             margin,
             L_F,
@@ -504,7 +618,7 @@ def _subdivide_and_eval_batch(
             nobs,
             inva2,
             invb2,
-            a,
+            L_u_to_x,
             inv_c,
             margin,
             L_F,
@@ -527,7 +641,7 @@ def _subdivide_and_eval_batch(
             nobs,
             inva2,
             invb2,
-            a,
+            L_u_to_x,
             inv_c,
             margin,
             L_F,
@@ -548,10 +662,12 @@ def _subdivide_and_eval_batch(
 def max_unambiguous_prf(
     obs_ecef_m: np.ndarray,
     sigma_t_s: np.ndarray,
-    tol_pri_us: float = 1.0,
+    tol_prf_hz: float = 0.1,
     k_sigma: float = 1.0,
-    max_nodes: int = 50_000_000,
+    max_nodes: int = 100_000_000,
     max_iters: int = 1_000_000,
+    margin_mode: int = 0,
+    strict_pri_pad_s: float = 1e-12,
 ):
     # WGS84
     a = 6378137.0
@@ -567,7 +683,14 @@ def max_unambiguous_prf(
     if nobs < 2:
         raise ValueError("Need at least 2 observers.")
 
-    # deterministic worst-case margin: sum of two largest per-observer bounds
+    if tol_prf_hz <= 0.0:
+        raise ValueError("tol_prf_hz must be > 0.")
+    if k_sigma < 0.0:
+        raise ValueError("k_sigma must be >= 0.")
+    if strict_pri_pad_s < 0.0:
+        raise ValueError("strict_pri_pad_s must be >= 0.")
+
+    # Two largest per-observer sigma values.
     s1 = 0.0
     s2 = 0.0
     for i in range(nobs):
@@ -577,11 +700,15 @@ def max_unambiguous_prf(
             s1 = s
         elif s > s2:
             s2 = s
-    # 1σ model: worst-case baseline TDOA std-dev (assuming independent Gaussian timestamp errors)
-    sigma_tdoa_1sigma = np.sqrt(s1 * s1 + s2 * s2)
 
-    # choose k_sigma for desired confidence
-    margin = k_sigma * sigma_tdoa_1sigma
+    if margin_mode == 0:
+        # Deterministic hard-bound interpretation.
+        margin = k_sigma * (s1 + s2)
+    elif margin_mode == 1:
+        # Probabilistic RSS interpretation (independent 1-sigma errors).
+        margin = k_sigma * np.sqrt(s1 * s1 + s2 * s2)
+    else:
+        raise ValueError("margin_mode must be 0 (hard) or 1 (rss_1sigma).")
 
     # ps = A p and L_g = max ||ps||
     ps = np.empty((nobs, 3), dtype=np.float64)
@@ -601,9 +728,18 @@ def max_unambiguous_prf(
     # Lipschitz for F = W + margin: L_F = 2/c
     L_F = 2.0 * inv_c
 
-    # Certified tolerance: PRI_gap <= tol_pri_us
-    eps_T = tol_pri_us * 1e-6
-    eps_F = 0.5 * eps_T
+    # Conservative global Lipschitz for radial projection u -> x(u) on WGS84.
+    # For x(u)=r(u)u with r(u) in [b,a]:
+    #   ||x(u)-x(v)|| <= a||u-v|| + |r(u)-r(v)|
+    # and since r depends only on u_z^2 for WGS84 (a=a_eq):
+    #   |r(u)-r(v)| <= (a^3/b^2 - a) ||u-v||.
+    # So a valid global bound is:
+    #   ||x(u)-x(v)|| <= (a^3/b^2) ||u-v||.
+    L_u_to_x = (a * a * a) / (b * b)
+
+    # Certified tolerance is on PRF (Hz) now:
+    # stop when PRF_upper - PRF_lower <= tol_prf_hz,
+    # where PRF_lower = 1/PRI_upper and PRF_upper = 1/PRI_lower.
 
     # Analytic clamp: W(x) <= Bmax/c for all x
     Bmax = 0.0
@@ -664,7 +800,7 @@ def max_unambiguous_prf(
             nobs,
             inva2,
             invb2,
-            a,
+            L_u_to_x,
             inv_c,
             margin,
             L_F,
@@ -730,7 +866,7 @@ def max_unambiguous_prf(
             nobs,
             inva2,
             invb2,
-            a,
+            L_u_to_x,
             inv_c,
             margin,
             L_F,
@@ -777,17 +913,32 @@ def max_unambiguous_prf(
 
         F_U = Fub_arr[heap_idx[0]]
 
-        if (F_U - F_L) <= eps_F:
-            pri_lower_s = 2.0 * F_L
-            pri_upper_s = 2.0 * F_U
-            prf_safe_hz = 1.0 / pri_upper_s
+        # Compute certified PRI and PRF bounds each iteration.
+        pri_lower_s = 2.0 * F_L
+        pri_upper_s = 2.0 * F_U
+
+        # If pri_lower_s <= 0, PRF is unbounded (or numerically unstable).
+        # In that case we cannot certify a finite PRF tolerance.
+        if pri_lower_s <= 0.0:
+            raise ValueError("PRI lower bound <= 0; cannot certify PRF tolerance.")
+
+        prf_lower_cert_hz = 1.0 / pri_upper_s
+        prf_lower_hz = 1.0 / (pri_upper_s + strict_pri_pad_s)  # strict-safe
+        prf_upper_hz = 1.0 / pri_lower_s  # optimistic upper bound
+        prf_gap_hz = prf_upper_hz - prf_lower_cert_hz
+
+        if prf_gap_hz <= tol_prf_hz:
             pri_lower_us = pri_lower_s * 1e6
             pri_upper_us = pri_upper_s * 1e6
             pri_gap_us = pri_upper_us - pri_lower_us
-            # enforce tolerance
-            if pri_gap_us > tol_pri_us:
-                raise ValueError("Internal error: tolerance condition mismatch.")
-            return prf_safe_hz, pri_upper_us, pri_lower_us, pri_gap_us
+            return (
+                prf_lower_hz,
+                prf_upper_hz,
+                prf_gap_hz,
+                pri_upper_us,
+                pri_lower_us,
+                pri_gap_us,
+            )
 
         pcount = BATCH if heap_size >= BATCH else heap_size
         for k in range(pcount):
@@ -811,7 +962,7 @@ def max_unambiguous_prf(
             nobs,
             inva2,
             invb2,
-            a,
+            L_u_to_x,
             inv_c,
             margin,
             L_F,
@@ -849,15 +1000,23 @@ if __name__ == "__main__":
 
     sig = np.array([500e-9, 500e-9, 500e-9], dtype=np.float64)
 
-    prf_hz, pri_u_us, pri_l_us, gap_us = max_unambiguous_prf(obs, sig, 1.0, 3.0)
-    print("PRF_safe_hz:", prf_hz)
+    prf_lo, prf_hi, prf_gap, pri_u_us, pri_l_us, pri_gap_us = max_unambiguous_prf(
+        obs, sig, tol_prf_hz=0.5, k_sigma=3.0
+    )
+    print("PRF_lower_hz (safe):", prf_lo)
+    print("PRF_upper_hz:", prf_hi)
+    print("PRF_gap_hz:", prf_gap)
     print("PRI_upper_us:", pri_u_us)
     print("PRI_lower_us:", pri_l_us)
-    print("PRI_gap_us:", gap_us)
+    print("PRI_gap_us:", pri_gap_us)
 
     sig = np.zeros(3, dtype=np.float64)  # zero noise case
-    prf_hz, pri_u_us, pri_l_us, gap_us = max_unambiguous_prf(obs, sig, 1.0, 3.0)
-    print("PRF_safe_hz (zero noise):", prf_hz)
-    print("PRI_upper_us (zero noise):", pri_u_us)
-    print("PRI_lower_us (zero noise):", pri_l_us)
-    print("PRI_gap_us (zero noise):", gap_us)
+    prf_lo, prf_hi, prf_gap, pri_u_us, pri_l_us, pri_gap_us = max_unambiguous_prf(
+        obs, sig, tol_prf_hz=0.5, k_sigma=3.0
+    )
+    print("PRF_lower_hz (safe):", prf_lo)
+    print("PRF_upper_hz:", prf_hi)
+    print("PRF_gap_hz:", prf_gap)
+    print("PRI_upper_us:", pri_u_us)
+    print("PRI_lower_us:", pri_l_us)
+    print("PRI_gap_us:", pri_gap_us)

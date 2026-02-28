@@ -107,6 +107,7 @@ def max_unambiguous_prf_collect_leaf_centers(
 
     # Lipschitz for F = W + margin: L_F = 2/c
     L_F = 2.0 * inv_c
+    L_u_to_x = (a * a * a) / (b * b)
 
     # Certified tolerance: PRI_gap <= tol_pri_us
     eps_T = tol_pri_us * 1e-6
@@ -167,7 +168,7 @@ def max_unambiguous_prf_collect_leaf_centers(
             nobs,
             inva2,
             invb2,
-            a,
+            L_u_to_x,
             inv_c,
             margin,
             L_F,
@@ -224,7 +225,7 @@ def max_unambiguous_prf_collect_leaf_centers(
             nobs,
             inva2,
             invb2,
-            a,
+            L_u_to_x,
             inv_c,
             margin,
             L_F,
@@ -345,7 +346,7 @@ def max_unambiguous_prf_collect_leaf_centers(
             nobs,
             inva2,
             invb2,
-            a,
+            L_u_to_x,
             inv_c,
             margin,
             L_F,

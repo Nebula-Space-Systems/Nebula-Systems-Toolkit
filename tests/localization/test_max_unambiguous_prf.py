@@ -71,7 +71,6 @@ def ps_vectors(obs_ecef: np.ndarray) -> np.ndarray:
 def visible_to_all(x_ecef: np.ndarray, obs_ecef: np.ndarray) -> bool:
     """Exact point LOS condition used by solver: p_s^T x >= 1 for all observers."""
     ps = ps_vectors(obs_ecef)
-    # For numeric tolerance, allow tiny negative slack.
     vals = ps @ x_ecef
     return bool(np.all(vals >= 1.0 - 1e-14))
 
@@ -83,13 +82,18 @@ def delay_spread_W_seconds(x_ecef: np.ndarray, obs_ecef: np.ndarray) -> float:
     return float(np.max(tau) - np.min(tau))
 
 
-def worst_case_margin_seconds(sigmas_1sigma_s: np.ndarray, k_sigma: float) -> float:
-    """Independent 1σ per observer => worst-case baseline σ = sqrt(s1^2+s2^2)."""
+def margin_hard_seconds(sigmas_s: np.ndarray, k_sigma: float) -> float:
+    s = np.sort(sigmas_s.astype(np.float64))
+    s1 = float(s[-1])
+    s2 = float(s[-2]) if s.size >= 2 else 0.0
+    return float(k_sigma * (s1 + s2))
+
+
+def margin_rss_seconds(sigmas_1sigma_s: np.ndarray, k_sigma: float) -> float:
     s = np.sort(sigmas_1sigma_s.astype(np.float64))
     s1 = float(s[-1])
     s2 = float(s[-2]) if s.size >= 2 else 0.0
-    sigma_tdoa = math.sqrt(s1 * s1 + s2 * s2)
-    return float(k_sigma * sigma_tdoa)
+    return float(k_sigma * math.sqrt(s1 * s1 + s2 * s2))
 
 
 # -----------------------------
@@ -97,7 +101,6 @@ def worst_case_margin_seconds(sigmas_1sigma_s: np.ndarray, k_sigma: float) -> fl
 # -----------------------------
 @pytest.fixture(scope="module")
 def compile_numba_once() -> None:
-    # Trigger compilation cheaply (max_iters=1 means it will likely raise quickly).
     obs = np.ascontiguousarray(
         np.array(
             [
@@ -117,7 +120,6 @@ def compile_numba_once() -> None:
 
 @pytest.fixture(scope="module")
 def baseline_geometry() -> Tuple[np.ndarray, np.ndarray]:
-    # 3 LEO observers near each other to ensure common-visible region exists.
     h = 550e3
     obs = np.array(
         [
@@ -127,7 +129,7 @@ def baseline_geometry() -> Tuple[np.ndarray, np.ndarray]:
         ],
         dtype=np.float64,
     )
-    sig = np.array([200e-9, 200e-9, 200e-9], dtype=np.float64)  # 1σ seconds
+    sig = np.array([200e-9, 200e-9, 200e-9], dtype=np.float64)
     return np.ascontiguousarray(obs), np.ascontiguousarray(sig)
 
 
@@ -136,110 +138,179 @@ def baseline_geometry() -> Tuple[np.ndarray, np.ndarray]:
 # -----------------------------
 def test_returns_are_self_consistent(compile_numba_once, baseline_geometry) -> None:
     obs, sig = baseline_geometry
+    tol_hz = 10.0
 
-    tol_us = 20.0
-    k_sigma = 3.0
-    prf_hz, pri_u_us, pri_l_us, gap_us = max_unambiguous_prf(
-        obs, sig, tol_us, k_sigma, 1_000_000, 200_000
+    prf_lo, prf_hi, prf_gap, pri_u_us, pri_l_us, pri_gap_us = max_unambiguous_prf(
+        obs,
+        sig,
+        tol_prf_hz=tol_hz,
+        k_sigma=1.0,
+        max_nodes=1_000_000,
+        max_iters=200_000,
     )
 
-    assert np.isfinite([prf_hz, pri_u_us, pri_l_us, gap_us]).all()
-    assert prf_hz > 0.0
-    assert pri_u_us >= pri_l_us
-    assert gap_us <= tol_us + 1e-6  # allow tiny numeric slack
+    assert np.isfinite([prf_lo, prf_hi, prf_gap, pri_u_us, pri_l_us, pri_gap_us]).all()
+    assert prf_lo > 0.0
+    assert prf_hi >= prf_lo
+    assert prf_gap >= 0.0
+    assert prf_gap <= tol_hz + 1e-12
+    assert pri_u_us >= pri_l_us > 0.0
+    assert abs((pri_u_us - pri_l_us) - pri_gap_us) < 1e-9
+
+    # strict-pad means safe PRF is not above the reciprocal of PRI upper bound
+    assert prf_lo <= (1.0 / (pri_u_us * 1e-6))
 
 
 def test_permutation_invariance(compile_numba_once, baseline_geometry) -> None:
     obs, sig = baseline_geometry
-    tol_us = 20.0
-    k_sigma = 3.0
+    tol_hz = 10.0
 
-    out1 = max_unambiguous_prf(obs, sig, tol_us, k_sigma, 1_000_000, 200_000)
-
+    out1 = max_unambiguous_prf(
+        obs,
+        sig,
+        tol_prf_hz=tol_hz,
+        k_sigma=1.0,
+        max_nodes=1_000_000,
+        max_iters=200_000,
+    )
     perm = np.array([2, 0, 1], dtype=np.int64)
-    obs2 = np.ascontiguousarray(obs[perm])
-    sig2 = np.ascontiguousarray(sig[perm])
-    out2 = max_unambiguous_prf(obs2, sig2, tol_us, k_sigma, 1_000_000, 200_000)
+    out2 = max_unambiguous_prf(
+        np.ascontiguousarray(obs[perm]),
+        np.ascontiguousarray(sig[perm]),
+        tol_prf_hz=tol_hz,
+        k_sigma=1.0,
+        max_nodes=1_000_000,
+        max_iters=200_000,
+    )
 
-    # Should be identical to within tiny numerical differences.
-    assert abs(out1[1] - out2[1]) < 1e-6  # pri_upper_us
-    assert abs(out1[2] - out2[2]) < 1e-6  # pri_lower_us
-    assert abs(out1[0] - out2[0]) < 1e-9  # prf_safe_hz
+    # Pri bounds should be effectively identical.
+    assert abs(out1[3] - out2[3]) < 1e-6  # pri_upper_us
+    assert abs(out1[4] - out2[4]) < 1e-6  # pri_lower_us
+    assert abs(out1[0] - out2[0]) < 1e-9  # prf_lower_hz
 
 
-def test_noise_shifts_pri_by_expected_constant(
+def test_noise_shifts_pri_by_expected_constant_hard_margin(
     compile_numba_once, baseline_geometry
 ) -> None:
     obs, sig = baseline_geometry
-    tol_us = 50.0
     k_sigma = 3.0
+    tol_hz = 12.0
 
-    # With noise
-    prf1, pri_u1, pri_l1, gap1 = max_unambiguous_prf(
-        obs, sig, tol_us, k_sigma, 1_000_000, 200_000
+    out1 = max_unambiguous_prf(
+        obs,
+        sig,
+        tol_prf_hz=tol_hz,
+        k_sigma=k_sigma,
+        max_nodes=1_000_000,
+        max_iters=200_000,
     )
-
-    # Zero noise
     sig0 = np.zeros_like(sig)
-    prf0, pri_u0, pri_l0, gap0 = max_unambiguous_prf(
-        obs, sig0, tol_us, k_sigma, 1_000_000, 200_000
+    out0 = max_unambiguous_prf(
+        obs,
+        sig0,
+        tol_prf_hz=tol_hz,
+        k_sigma=k_sigma,
+        max_nodes=1_000_000,
+        max_iters=200_000,
     )
 
-    # Expected delta PRI = 2*(margin1 - margin0)
-    m1 = worst_case_margin_seconds(sig, k_sigma)
-    m0 = worst_case_margin_seconds(sig0, k_sigma)
-    expected_delta_us = 2.0 * (m1 - m0) * 1e6
+    pri_u1, pri_l1, pri_gap1 = out1[3], out1[4], out1[5]
+    pri_u0, pri_l0, pri_gap0 = out0[3], out0[4], out0[5]
 
-    # Upper bounds each have up to tol_us looseness; allow combined slack.
-    slack_us = tol_us + tol_us + 1e-3
+    expected_delta_us = 2.0 * (margin_hard_seconds(sig, k_sigma) - 0.0) * 1e6
+    slack_us = pri_gap1 + pri_gap0 + 1e-3
+
     assert abs((pri_u1 - pri_u0) - expected_delta_us) <= slack_us
     assert abs((pri_l1 - pri_l0) - expected_delta_us) <= slack_us
+    assert out1[0] <= out0[0]  # safe PRF should drop with added timing uncertainty
 
-    # PRF should decrease when adding noise (since PRI increases).
-    assert prf1 <= prf0
+
+def test_margin_mode_ordering(compile_numba_once, baseline_geometry) -> None:
+    obs, sig = baseline_geometry
+    k_sigma = 3.0
+    tol_hz = 12.0
+
+    out_hard = max_unambiguous_prf(
+        obs,
+        sig,
+        tol_prf_hz=tol_hz,
+        k_sigma=k_sigma,
+        max_nodes=1_000_000,
+        max_iters=200_000,
+        margin_mode=0,
+    )
+    out_rss = max_unambiguous_prf(
+        obs,
+        sig,
+        tol_prf_hz=tol_hz,
+        k_sigma=k_sigma,
+        max_nodes=1_000_000,
+        max_iters=200_000,
+        margin_mode=1,
+    )
+
+    # Hard-bound margin >= RSS margin for same sigmas.
+    assert margin_hard_seconds(sig, k_sigma) >= margin_rss_seconds(sig, k_sigma)
+    assert out_hard[3] >= out_rss[3]  # pri_upper_us
+    assert out_hard[0] <= out_rss[0]  # prf_lower_hz
 
 
 def test_k_sigma_monotonicity(compile_numba_once, baseline_geometry) -> None:
     obs, sig = baseline_geometry
-    tol_us = 50.0
+    tol_hz = 12.0
 
-    prf1, pri_u1, *_ = max_unambiguous_prf(obs, sig, tol_us, 1.0, 1_000_000, 200_000)
-    prf3, pri_u3, *_ = max_unambiguous_prf(obs, sig, tol_us, 3.0, 1_000_000, 200_000)
+    out1 = max_unambiguous_prf(
+        obs,
+        sig,
+        tol_prf_hz=tol_hz,
+        k_sigma=1.0,
+        max_nodes=1_000_000,
+        max_iters=200_000,
+    )
+    out3 = max_unambiguous_prf(
+        obs,
+        sig,
+        tol_prf_hz=tol_hz,
+        k_sigma=3.0,
+        max_nodes=1_000_000,
+        max_iters=200_000,
+    )
 
-    assert pri_u3 >= pri_u1
-    assert prf3 <= prf1
+    assert out3[3] >= out1[3]  # pri_upper_us
+    assert out3[0] <= out1[0]  # prf_lower_hz
 
 
 def test_safe_for_random_visible_points(compile_numba_once, baseline_geometry) -> None:
     obs, sig = baseline_geometry
-    tol_us = 20.0
     k_sigma = 3.0
 
-    prf_hz, pri_u_us, pri_l_us, gap_us = max_unambiguous_prf(
-        obs, sig, tol_us, k_sigma, 1_000_000, 200_000
+    prf_lo, _prf_hi, _prf_gap, _pri_u_us, _pri_l_us, _pri_gap_us = max_unambiguous_prf(
+        obs,
+        sig,
+        tol_prf_hz=12.0,
+        k_sigma=k_sigma,
+        max_nodes=1_000_000,
+        max_iters=200_000,
     )
-    pri_u_s = pri_u_us * 1e-6
-    margin = worst_case_margin_seconds(sig, k_sigma)
 
-    # Random surface points; check the no-wrap inequality on those that are visible to all.
+    # Convert returned safe PRF to explicit safe PRI and verify no-wrap on sampled points.
+    pri_safe_s = 1.0 / prf_lo
+    half_pri_safe = 0.5 * pri_safe_s
+    margin = margin_hard_seconds(sig, k_sigma)
+
     u = random_unit_vectors(6000, seed=1)
     xs = np.stack([ellipsoid_surface_from_unit_dir(ui) for ui in u], axis=0)
-
     vis_mask = np.array([visible_to_all(x, obs) for x in xs], dtype=bool)
-    # Ensure we actually sampled some common-visible points
     assert int(vis_mask.sum()) > 50
 
-    # For visible points, the solver's PRI_upper should satisfy:
-    #   W(x) + margin <= PRI_upper/2   (allow tiny numeric slack)
-    half_pri = 0.5 * pri_u_s
-    slack = 5e-12  # seconds
-    for x in xs[vis_mask][:500]:  # cap work
+    # Allow tiny numerical slack.
+    slack_s = 5e-12
+    for x in xs[vis_mask][:500]:
         W = delay_spread_W_seconds(x, obs)
-        assert (W + margin) <= (half_pri + slack)
+        assert (W + margin) <= (half_pri_safe + slack_s)
 
 
 def test_empty_overlap_raises(compile_numba_once) -> None:
-    # Two antipodal observers on the WGS84 surface: no surface point is visible to both.
     obs = np.ascontiguousarray(
         np.array(
             [
@@ -252,5 +323,17 @@ def test_empty_overlap_raises(compile_numba_once) -> None:
     sig = np.ascontiguousarray(np.array([0.0, 0.0], dtype=np.float64))
 
     with pytest.raises(ValueError):
-        # Loose tolerances and small caps to keep this test quick.
-        max_unambiguous_prf(obs, sig, 1000.0, 1.0, 200_000, 50_000)
+        max_unambiguous_prf(obs, sig, tol_prf_hz=1000.0, max_nodes=200_000, max_iters=50_000)
+
+
+def test_invalid_inputs_raise(compile_numba_once, baseline_geometry) -> None:
+    obs, sig = baseline_geometry
+
+    with pytest.raises(ValueError):
+        max_unambiguous_prf(obs, sig, tol_prf_hz=0.0)
+    with pytest.raises(ValueError):
+        max_unambiguous_prf(obs, sig, k_sigma=-1.0)
+    with pytest.raises(ValueError):
+        max_unambiguous_prf(obs, sig, margin_mode=7)
+    with pytest.raises(ValueError):
+        max_unambiguous_prf(obs, sig, strict_pri_pad_s=-1e-12)
