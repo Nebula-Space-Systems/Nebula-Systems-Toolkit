@@ -62,11 +62,24 @@ Cell diameter bound:
     plus a global analytic clamp:
         F(x) <= Bmax/c + margin,  Bmax = max_{i<j} ||p_i - p_j||.
 
+Memory behavior
+---------------
+The solver preallocates arrays sized by max_nodes, so peak RAM is approximately:
+    max_nodes * (9*8 + 8 + 8 + 4) bytes
+for tri_u, gub_arr, Fub_arr, and heap_idx.
+Pruned cells are recycled via a free-list, which lowers required max_nodes for
+many geometries without affecting certification correctness.
+The njit solver can also auto-expand max_nodes on MAX_NODES pressure by
+growing internal storage and continuing from current state.
+
 Raises ValueError if:
     - certified empty overlap,
     - invalid inputs,
     - or tolerance is not achieved before caps.
 """
+
+import os
+import sys
 
 import numpy as np
 from numba import njit, prange
@@ -330,6 +343,64 @@ def _heapify(heap_idx, heap_size, key):
             j = k
 
 
+@njit(cache=True, inline="always")
+def _free_push(free_idx, free_size, idx, capacity):
+    # free list stored in reverse at the tail of free_idx
+    free_idx[capacity - 1 - free_size] = idx
+    return free_size + 1
+
+
+@njit(cache=True, inline="always")
+def _free_pop(free_idx, free_size, capacity):
+    # assumes free_size > 0
+    free_size -= 1
+    return free_idx[capacity - 1 - free_size], free_size
+
+
+@njit(cache=True, inline="always")
+def _next_capacity(capacity, growth, hard_cap):
+    new_cap = int(capacity * growth)
+    if new_cap <= capacity:
+        new_cap = capacity + 1
+    if new_cap > hard_cap:
+        new_cap = hard_cap
+    return new_cap
+
+
+@njit(cache=True)
+def _grow_storage(
+    tri_u, gub_arr, Fub_arr, idx_arr, capacity, new_capacity, heap_size, free_size
+):
+    tri_new = np.empty((new_capacity, 3, 3), dtype=np.float64)
+    gub_new = np.full(new_capacity, -1e300, dtype=np.float64)
+    Fub_new = np.full(new_capacity, -1e300, dtype=np.float64)
+    idx_new = np.empty(new_capacity, dtype=np.int32)
+
+    # Copy node geometry and bounds for existing slots.
+    for i in range(capacity):
+        tri_new[i, 0, 0] = tri_u[i, 0, 0]
+        tri_new[i, 0, 1] = tri_u[i, 0, 1]
+        tri_new[i, 0, 2] = tri_u[i, 0, 2]
+        tri_new[i, 1, 0] = tri_u[i, 1, 0]
+        tri_new[i, 1, 1] = tri_u[i, 1, 1]
+        tri_new[i, 1, 2] = tri_u[i, 1, 2]
+        tri_new[i, 2, 0] = tri_u[i, 2, 0]
+        tri_new[i, 2, 1] = tri_u[i, 2, 1]
+        tri_new[i, 2, 2] = tri_u[i, 2, 2]
+        gub_new[i] = gub_arr[i]
+        Fub_new[i] = Fub_arr[i]
+
+    # Copy active heap prefix unchanged.
+    for i in range(heap_size):
+        idx_new[i] = idx_arr[i]
+
+    # Copy free-list tail so pop order is preserved.
+    for i in range(free_size):
+        idx_new[new_capacity - 1 - i] = idx_arr[capacity - 1 - i]
+
+    return tri_new, gub_new, Fub_new, idx_new
+
+
 # -----------------------------
 # Core per-sample evaluations
 # -----------------------------
@@ -359,6 +430,27 @@ def _g_visibility_margin(x, y, z, ps, nobs):
         if v < g:
             g = v
     return g
+
+
+@njit(cache=True, inline="always")
+def _margin_from_sigmas(sigma_t_s, nobs, k_sigma, margin_mode):
+    s1 = 0.0
+    s2 = 0.0
+    for i in range(nobs):
+        s = sigma_t_s[i]
+        if s >= s1:
+            s2 = s1
+            s1 = s
+        elif s > s2:
+            s2 = s
+
+    if margin_mode == 0:
+        # Deterministic hard-bound interpretation.
+        return k_sigma * (s1 + s2)
+    if margin_mode == 1:
+        # Probabilistic RSS interpretation (independent 1-sigma errors).
+        return k_sigma * np.sqrt(s1 * s1 + s2 * s2)
+    raise ValueError("margin_mode must be 0 (hard) or 1 (rss_1sigma).")
 
 
 @njit(cache=True)
@@ -508,8 +600,10 @@ def _eval_cell(
 def _subdivide_and_eval_batch(
     parents,
     pcount,
+    child_slot1,
+    child_slot2,
+    child_slot3,
     tri_u,
-    base_new,
     obs,
     ps,
     nobs,
@@ -537,9 +631,9 @@ def _subdivide_and_eval_batch(
         u12x, u12y, u12z = _mid_dir(u1[0], u1[1], u1[2], u2[0], u2[1], u2[2])
         u20x, u20y, u20z = _mid_dir(u2[0], u2[1], u2[2], u0[0], u0[1], u0[2])
 
-        c1 = base_new + 3 * k + 0
-        c2 = base_new + 3 * k + 1
-        c3 = base_new + 3 * k + 2
+        c1 = child_slot1[k]
+        c2 = child_slot2[k]
+        c3 = child_slot3[k]
 
         # child0 overwrites idx: (u0, u01, u20)
         tri_u[idx, 0, 0], tri_u[idx, 0, 1], tri_u[idx, 0, 2] = u0[0], u0[1], u0[2]
@@ -664,10 +758,13 @@ def max_unambiguous_prf(
     sigma_t_s: np.ndarray,
     tol_prf_hz: float = 0.1,
     k_sigma: float = 1.0,
-    max_nodes: int = 100_000_000,
+    max_nodes: int = 5_000_000,
     max_iters: int = 1_000_000,
     margin_mode: int = 0,
     strict_pri_pad_s: float = 1e-12,
+    auto_expand_max_nodes: bool = True,
+    max_nodes_growth: float = 2.0,
+    max_nodes_hard_cap: int = 2_147_483_647,
 ):
     # WGS84
     a = 6378137.0
@@ -689,26 +786,14 @@ def max_unambiguous_prf(
         raise ValueError("k_sigma must be >= 0.")
     if strict_pri_pad_s < 0.0:
         raise ValueError("strict_pri_pad_s must be >= 0.")
+    if max_nodes <= 0:
+        raise ValueError("max_nodes must be > 0.")
+    if max_iters <= 0:
+        raise ValueError("max_iters must be > 0.")
+    if auto_expand_max_nodes and max_nodes_growth <= 1.0:
+        raise ValueError("max_nodes_growth must be > 1 when auto expansion is enabled.")
 
-    # Two largest per-observer sigma values.
-    s1 = 0.0
-    s2 = 0.0
-    for i in range(nobs):
-        s = sigma_t_s[i]
-        if s >= s1:
-            s2 = s1
-            s1 = s
-        elif s > s2:
-            s2 = s
-
-    if margin_mode == 0:
-        # Deterministic hard-bound interpretation.
-        margin = k_sigma * (s1 + s2)
-    elif margin_mode == 1:
-        # Probabilistic RSS interpretation (independent 1-sigma errors).
-        margin = k_sigma * np.sqrt(s1 * s1 + s2 * s2)
-    else:
-        raise ValueError("margin_mode must be 0 (hard) or 1 (rss_1sigma).")
+    margin = _margin_from_sigmas(sigma_t_s, nobs, k_sigma, margin_mode)
 
     # ps = A p and L_g = max ||ps||
     ps = np.empty((nobs, 3), dtype=np.float64)
@@ -754,20 +839,25 @@ def max_unambiguous_prf(
     F_cap = Bmax * inv_c + margin
 
     # Caps (raise if exceeded)
-    MAX_NODES = max_nodes
+    hard_cap = max_nodes_hard_cap
+    if hard_cap > 2_147_483_647:
+        hard_cap = 2_147_483_647
+    if hard_cap < max_nodes:
+        raise ValueError("max_nodes_hard_cap must be >= max_nodes.")
+
+    capacity = max_nodes
     MAX_ITERS = max_iters
     BATCH = 2048  # increase for higher CPU utilization
-    if MAX_NODES > 2_147_483_647:
-        raise ValueError("max_nodes too large for int32 indexing")
 
     # Node storage
-    tri_u = np.empty((MAX_NODES, 3, 3), dtype=np.float64)
-    gub_arr = np.full(MAX_NODES, -1e300, dtype=np.float64)
-    Fub_arr = np.full(MAX_NODES, -1e300, dtype=np.float64)
+    tri_u = np.empty((capacity, 3, 3), dtype=np.float64)
+    gub_arr = np.full(capacity, -1e300, dtype=np.float64)
+    Fub_arr = np.full(capacity, -1e300, dtype=np.float64)
 
     # Single heap array; key depends on phase
-    heap_idx = np.empty(MAX_NODES, dtype=np.int32)
+    heap_idx = np.empty(capacity, dtype=np.int32)
     heap_size = 0
+    free_size = 0
     next_free = 0
 
     # Bounds on F*
@@ -777,6 +867,24 @@ def max_unambiguous_prf(
     # Phase A key uses gub_arr; Phase B uses Fub_arr
     # Initialize with 20 base faces and insert those with gub>=0
     for f in range(_ICO_F.shape[0]):
+        if next_free >= capacity:
+            if not auto_expand_max_nodes:
+                raise ValueError("max_nodes is too small for base mesh initialization.")
+            new_capacity = _next_capacity(capacity, max_nodes_growth, hard_cap)
+            if new_capacity <= capacity:
+                raise ValueError("max_nodes is too small for base mesh initialization.")
+            tri_u, gub_arr, Fub_arr, heap_idx = _grow_storage(
+                tri_u,
+                gub_arr,
+                Fub_arr,
+                heap_idx,
+                capacity,
+                new_capacity,
+                heap_size,
+                free_size,
+            )
+            capacity = new_capacity
+
         i0 = _ICO_F[f, 0]
         i1 = _ICO_F[f, 1]
         i2 = _ICO_F[f, 2]
@@ -816,6 +924,8 @@ def max_unambiguous_prf(
                 F_L = Fvis
             if Fvis > -1e200:  # found any visible sample
                 found_feasible = True
+        else:
+            free_size = _free_push(heap_idx, free_size, next_free, capacity)
 
         next_free += 1
 
@@ -824,6 +934,9 @@ def max_unambiguous_prf(
 
     # Workspace
     parents = np.empty(BATCH, dtype=np.int32)
+    child_slot1 = np.empty(BATCH, dtype=np.int32)
+    child_slot2 = np.empty(BATCH, dtype=np.int32)
+    child_slot3 = np.empty(BATCH, dtype=np.int32)
     child_idx = np.empty(4 * BATCH, dtype=np.int32)
     child_ok = np.empty(4 * BATCH, dtype=np.int8)
     child_Fvis = np.empty(4 * BATCH, dtype=np.float64)
@@ -846,21 +959,100 @@ def max_unambiguous_prf(
             idx, heap_size = _heap_pop_max(heap_idx, heap_size, gub_arr)
             parents[k] = idx
 
-        # capacity check: each refined parent allocates 3 new nodes
-        need = 3 * pcount
-        if next_free + need >= MAX_NODES:
-            raise ValueError(
-                "Exceeded MAX_NODES before finding any feasible visible sample."
-            )
+        # Allocate 3 side-child slots per parent, preferring recycled slots.
+        for k in range(pcount):
+            if free_size > 0:
+                c1, free_size = _free_pop(heap_idx, free_size, capacity)
+            else:
+                if next_free >= capacity:
+                    if not auto_expand_max_nodes:
+                        raise ValueError(
+                            "Exceeded MAX_NODES before finding any feasible visible sample."
+                        )
+                    new_capacity = _next_capacity(capacity, max_nodes_growth, hard_cap)
+                    if new_capacity <= capacity:
+                        raise ValueError(
+                            "Exceeded MAX_NODES before finding any feasible visible sample."
+                        )
+                    tri_u, gub_arr, Fub_arr, heap_idx = _grow_storage(
+                        tri_u,
+                        gub_arr,
+                        Fub_arr,
+                        heap_idx,
+                        capacity,
+                        new_capacity,
+                        heap_size,
+                        free_size,
+                    )
+                    capacity = new_capacity
+                c1 = next_free
+                next_free += 1
 
-        base_new = next_free
-        next_free += need
+            if free_size > 0:
+                c2, free_size = _free_pop(heap_idx, free_size, capacity)
+            else:
+                if next_free >= capacity:
+                    if not auto_expand_max_nodes:
+                        raise ValueError(
+                            "Exceeded MAX_NODES before finding any feasible visible sample."
+                        )
+                    new_capacity = _next_capacity(capacity, max_nodes_growth, hard_cap)
+                    if new_capacity <= capacity:
+                        raise ValueError(
+                            "Exceeded MAX_NODES before finding any feasible visible sample."
+                        )
+                    tri_u, gub_arr, Fub_arr, heap_idx = _grow_storage(
+                        tri_u,
+                        gub_arr,
+                        Fub_arr,
+                        heap_idx,
+                        capacity,
+                        new_capacity,
+                        heap_size,
+                        free_size,
+                    )
+                    capacity = new_capacity
+                c2 = next_free
+                next_free += 1
+
+            if free_size > 0:
+                c3, free_size = _free_pop(heap_idx, free_size, capacity)
+            else:
+                if next_free >= capacity:
+                    if not auto_expand_max_nodes:
+                        raise ValueError(
+                            "Exceeded MAX_NODES before finding any feasible visible sample."
+                        )
+                    new_capacity = _next_capacity(capacity, max_nodes_growth, hard_cap)
+                    if new_capacity <= capacity:
+                        raise ValueError(
+                            "Exceeded MAX_NODES before finding any feasible visible sample."
+                        )
+                    tri_u, gub_arr, Fub_arr, heap_idx = _grow_storage(
+                        tri_u,
+                        gub_arr,
+                        Fub_arr,
+                        heap_idx,
+                        capacity,
+                        new_capacity,
+                        heap_size,
+                        free_size,
+                    )
+                    capacity = new_capacity
+                c3 = next_free
+                next_free += 1
+
+            child_slot1[k] = c1
+            child_slot2[k] = c2
+            child_slot3[k] = c3
 
         _subdivide_and_eval_batch(
             parents,
             pcount,
+            child_slot1,
+            child_slot2,
+            child_slot3,
             tri_u,
-            base_new,
             obs_ecef_m,
             ps,
             nobs,
@@ -881,14 +1073,16 @@ def max_unambiguous_prf(
 
         # Push children back into heap (still keyed by gub)
         for q in range(4 * pcount):
+            nid = child_idx[q]
             if child_ok[q] == 1:
-                nid = child_idx[q]
                 heap_size = _heap_push(heap_idx, heap_size, nid, gub_arr)
                 fv = child_Fvis[q]
                 if fv > F_L:
                     F_L = fv
                 if fv > -1e200:
                     found_feasible = True
+            else:
+                free_size = _free_push(heap_idx, free_size, nid, capacity)
 
         if heap_size == 0:
             raise ValueError("No overlapping visibility (certified empty).")
@@ -945,18 +1139,88 @@ def max_unambiguous_prf(
             idx, heap_size = _heap_pop_max(heap_idx, heap_size, Fub_arr)
             parents[k] = idx
 
-        need = 3 * pcount
-        if next_free + need >= MAX_NODES:
-            raise ValueError("Exceeded MAX_NODES before meeting tolerance.")
+        # Allocate 3 side-child slots per parent, preferring recycled slots.
+        for k in range(pcount):
+            if free_size > 0:
+                c1, free_size = _free_pop(heap_idx, free_size, capacity)
+            else:
+                if next_free >= capacity:
+                    if not auto_expand_max_nodes:
+                        raise ValueError("Exceeded MAX_NODES before meeting tolerance.")
+                    new_capacity = _next_capacity(capacity, max_nodes_growth, hard_cap)
+                    if new_capacity <= capacity:
+                        raise ValueError("Exceeded MAX_NODES before meeting tolerance.")
+                    tri_u, gub_arr, Fub_arr, heap_idx = _grow_storage(
+                        tri_u,
+                        gub_arr,
+                        Fub_arr,
+                        heap_idx,
+                        capacity,
+                        new_capacity,
+                        heap_size,
+                        free_size,
+                    )
+                    capacity = new_capacity
+                c1 = next_free
+                next_free += 1
 
-        base_new = next_free
-        next_free += need
+            if free_size > 0:
+                c2, free_size = _free_pop(heap_idx, free_size, capacity)
+            else:
+                if next_free >= capacity:
+                    if not auto_expand_max_nodes:
+                        raise ValueError("Exceeded MAX_NODES before meeting tolerance.")
+                    new_capacity = _next_capacity(capacity, max_nodes_growth, hard_cap)
+                    if new_capacity <= capacity:
+                        raise ValueError("Exceeded MAX_NODES before meeting tolerance.")
+                    tri_u, gub_arr, Fub_arr, heap_idx = _grow_storage(
+                        tri_u,
+                        gub_arr,
+                        Fub_arr,
+                        heap_idx,
+                        capacity,
+                        new_capacity,
+                        heap_size,
+                        free_size,
+                    )
+                    capacity = new_capacity
+                c2 = next_free
+                next_free += 1
+
+            if free_size > 0:
+                c3, free_size = _free_pop(heap_idx, free_size, capacity)
+            else:
+                if next_free >= capacity:
+                    if not auto_expand_max_nodes:
+                        raise ValueError("Exceeded MAX_NODES before meeting tolerance.")
+                    new_capacity = _next_capacity(capacity, max_nodes_growth, hard_cap)
+                    if new_capacity <= capacity:
+                        raise ValueError("Exceeded MAX_NODES before meeting tolerance.")
+                    tri_u, gub_arr, Fub_arr, heap_idx = _grow_storage(
+                        tri_u,
+                        gub_arr,
+                        Fub_arr,
+                        heap_idx,
+                        capacity,
+                        new_capacity,
+                        heap_size,
+                        free_size,
+                    )
+                    capacity = new_capacity
+                c3 = next_free
+                next_free += 1
+
+            child_slot1[k] = c1
+            child_slot2[k] = c2
+            child_slot3[k] = c3
 
         _subdivide_and_eval_batch(
             parents,
             pcount,
+            child_slot1,
+            child_slot2,
+            child_slot3,
             tri_u,
-            base_new,
             obs_ecef_m,
             ps,
             nobs,
@@ -977,17 +1241,882 @@ def max_unambiguous_prf(
 
         # Insert possibly-visible children into heap (keyed by Fub)
         for q in range(4 * pcount):
+            nid = child_idx[q]
             if child_ok[q] == 1:
-                nid = child_idx[q]
                 heap_size = _heap_push(heap_idx, heap_size, nid, Fub_arr)
                 fv = child_Fvis[q]
                 if fv > F_L:
                     F_L = fv
+            else:
+                free_size = _free_push(heap_idx, free_size, nid, capacity)
 
     raise ValueError("Tolerance not achieved before MAX_ITERS.")
 
 
+@njit(cache=True)
+def _max_unambiguous_prf_reuse_workspace(
+    obs_ecef_m: np.ndarray,
+    sigma_t_s: np.ndarray,
+    tol_prf_hz: float,
+    k_sigma: float,
+    max_iters: int,
+    margin_mode: int,
+    strict_pri_pad_s: float,
+    auto_expand_max_nodes: bool,
+    max_nodes_growth: float,
+    max_nodes_hard_cap: int,
+    use_warm_bounds: bool,
+    warm_F_lower: float,
+    warm_F_upper: float,
+    warm_cell_valid: bool,
+    warm_cell_u: np.ndarray,
+    tri_u: np.ndarray,
+    gub_arr: np.ndarray,
+    Fub_arr: np.ndarray,
+    heap_idx: np.ndarray,
+    parents: np.ndarray,
+    child_slot1: np.ndarray,
+    child_slot2: np.ndarray,
+    child_slot3: np.ndarray,
+    child_idx: np.ndarray,
+    child_ok: np.ndarray,
+    child_Fvis: np.ndarray,
+):
+    # WGS84
+    a = 6378137.0
+    b = 6356752.3142451793
+    inva2 = 1.0 / (a * a)
+    invb2 = 1.0 / (b * b)
+
+    # speed of light
+    c0 = 299792458.0
+    inv_c = 1.0 / c0
+
+    nobs = obs_ecef_m.shape[0]
+    if nobs < 2:
+        raise ValueError("Need at least 2 observers.")
+
+    if tol_prf_hz <= 0.0:
+        raise ValueError("tol_prf_hz must be > 0.")
+    if k_sigma < 0.0:
+        raise ValueError("k_sigma must be >= 0.")
+    if strict_pri_pad_s < 0.0:
+        raise ValueError("strict_pri_pad_s must be >= 0.")
+    if max_iters <= 0:
+        raise ValueError("max_iters must be > 0.")
+    if auto_expand_max_nodes and max_nodes_growth <= 1.0:
+        raise ValueError("max_nodes_growth must be > 1 when auto expansion is enabled.")
+    if sigma_t_s.shape[0] != nobs:
+        raise ValueError("sigma_t_s length must match number of observers.")
+
+    capacity = tri_u.shape[0]
+    if capacity <= 0:
+        raise ValueError("Workspace capacity must be > 0.")
+    if gub_arr.shape[0] != capacity or Fub_arr.shape[0] != capacity:
+        raise ValueError("Workspace bound arrays must match tri_u capacity.")
+    if heap_idx.shape[0] != capacity:
+        raise ValueError("Workspace heap array must match tri_u capacity.")
+
+    BATCH = parents.shape[0]
+    if BATCH <= 0:
+        raise ValueError("Workspace batch size must be > 0.")
+    if (
+        child_slot1.shape[0] != BATCH
+        or child_slot2.shape[0] != BATCH
+        or child_slot3.shape[0] != BATCH
+    ):
+        raise ValueError("Workspace child slot arrays must match parents length.")
+    if (
+        child_idx.shape[0] < 4 * BATCH
+        or child_ok.shape[0] < 4 * BATCH
+        or child_Fvis.shape[0] < 4 * BATCH
+    ):
+        raise ValueError("Workspace child buffers must have length >= 4*BATCH.")
+
+    margin = _margin_from_sigmas(sigma_t_s, nobs, k_sigma, margin_mode)
+
+    # ps = A p and L_g = max ||ps||
+    ps = np.empty((nobs, 3), dtype=np.float64)
+    L_g = 0.0
+    for k in range(nobs):
+        px, py, pz = obs_ecef_m[k, 0], obs_ecef_m[k, 1], obs_ecef_m[k, 2]
+        sx = px * inva2
+        sy = py * inva2
+        sz = pz * invb2
+        ps[k, 0] = sx
+        ps[k, 1] = sy
+        ps[k, 2] = sz
+        nrm = _norm3(sx, sy, sz)
+        if nrm > L_g:
+            L_g = nrm
+
+    # Lipschitz for F = W + margin: L_F = 2/c
+    L_F = 2.0 * inv_c
+
+    # Conservative global Lipschitz for radial projection u -> x(u) on WGS84.
+    L_u_to_x = (a * a * a) / (b * b)
+
+    # Analytic clamp: W(x) <= Bmax/c for all x
+    Bmax = 0.0
+    for i in range(nobs):
+        for j in range(i + 1, nobs):
+            dx = obs_ecef_m[i, 0] - obs_ecef_m[j, 0]
+            dy = obs_ecef_m[i, 1] - obs_ecef_m[j, 1]
+            dz = obs_ecef_m[i, 2] - obs_ecef_m[j, 2]
+            d = _norm3(dx, dy, dz)
+            if d > Bmax:
+                Bmax = d
+    F_cap = Bmax * inv_c + margin
+    if use_warm_bounds and warm_F_upper > 0.0 and warm_F_upper < F_cap:
+        # Certified temporal upper bound from previous time step.
+        F_cap = warm_F_upper
+
+    # Caps (raise if exceeded)
+    hard_cap = max_nodes_hard_cap
+    if hard_cap > 2_147_483_647:
+        hard_cap = 2_147_483_647
+    if hard_cap < capacity:
+        raise ValueError("max_nodes_hard_cap must be >= workspace capacity.")
+
+    MAX_ITERS = max_iters
+
+    # Per-solve state (workspace buffers are reused, not reallocated).
+    heap_size = 0
+    free_size = 0
+    next_free = 0
+
+    # Bounds on F*
+    F_L = -1e300
+    if use_warm_bounds and warm_F_lower > F_L:
+        # Certified temporal lower bound from previous time step.
+        F_L = warm_F_lower
+    found_feasible = False
+
+    if warm_cell_valid:
+        # Evaluate prior high-priority cell immediately to seed a strong feasible lower bound.
+        _, _, Fvis_warm, _ = _eval_cell(
+            warm_cell_u[0],
+            warm_cell_u[1],
+            warm_cell_u[2],
+            obs_ecef_m,
+            ps,
+            nobs,
+            inva2,
+            invb2,
+            L_u_to_x,
+            inv_c,
+            margin,
+            L_F,
+            L_g,
+            F_cap,
+        )
+        if Fvis_warm > F_L:
+            F_L = Fvis_warm
+        if Fvis_warm > -1e200:
+            found_feasible = True
+
+    # Phase A key uses gub_arr; Phase B uses Fub_arr
+    # Initialize with 20 base faces and insert those with gub>=0
+    for f in range(_ICO_F.shape[0]):
+        if next_free >= capacity:
+            if not auto_expand_max_nodes:
+                raise ValueError("max_nodes is too small for base mesh initialization.")
+            new_capacity = _next_capacity(capacity, max_nodes_growth, hard_cap)
+            if new_capacity <= capacity:
+                raise ValueError("max_nodes is too small for base mesh initialization.")
+            tri_u, gub_arr, Fub_arr, heap_idx = _grow_storage(
+                tri_u,
+                gub_arr,
+                Fub_arr,
+                heap_idx,
+                capacity,
+                new_capacity,
+                heap_size,
+                free_size,
+            )
+            capacity = new_capacity
+
+        i0 = _ICO_F[f, 0]
+        i1 = _ICO_F[f, 1]
+        i2 = _ICO_F[f, 2]
+
+        tri_u[next_free, 0, 0] = _ICO_V[i0, 0]
+        tri_u[next_free, 0, 1] = _ICO_V[i0, 1]
+        tri_u[next_free, 0, 2] = _ICO_V[i0, 2]
+        tri_u[next_free, 1, 0] = _ICO_V[i1, 0]
+        tri_u[next_free, 1, 1] = _ICO_V[i1, 1]
+        tri_u[next_free, 1, 2] = _ICO_V[i1, 2]
+        tri_u[next_free, 2, 0] = _ICO_V[i2, 0]
+        tri_u[next_free, 2, 1] = _ICO_V[i2, 1]
+        tri_u[next_free, 2, 2] = _ICO_V[i2, 2]
+
+        _, gub, Fvis, Fub = _eval_cell(
+            tri_u[next_free, 0],
+            tri_u[next_free, 1],
+            tri_u[next_free, 2],
+            obs_ecef_m,
+            ps,
+            nobs,
+            inva2,
+            invb2,
+            L_u_to_x,
+            inv_c,
+            margin,
+            L_F,
+            L_g,
+            F_cap,
+        )
+        gub_arr[next_free] = gub
+        Fub_arr[next_free] = Fub
+
+        if gub >= 0.0:
+            heap_size = _heap_push(heap_idx, heap_size, next_free, gub_arr)
+            if Fvis > F_L:
+                F_L = Fvis
+            if Fvis > -1e200:  # found any visible sample
+                found_feasible = True
+        else:
+            free_size = _free_push(heap_idx, free_size, next_free, capacity)
+
+        next_free += 1
+
+    if heap_size == 0:
+        raise ValueError("No overlapping visibility (certified empty).")
+
+    # -----------------
+    # Phase A: find any feasible visible sample (g>=0) or certify empty
+    # Heap keyed by gub_arr
+    # -----------------
+    it = 0
+    while (not found_feasible) and it < MAX_ITERS:
+        it += 1
+
+        # If best possible g upper bound is < 0, empty intersection certified.
+        top = heap_idx[0]
+        if gub_arr[top] < 0.0:
+            raise ValueError("No overlapping visibility (certified empty).")
+
+        pcount = BATCH if heap_size >= BATCH else heap_size
+        for k in range(pcount):
+            idx, heap_size = _heap_pop_max(heap_idx, heap_size, gub_arr)
+            parents[k] = idx
+
+        # Allocate 3 side-child slots per parent, preferring recycled slots.
+        for k in range(pcount):
+            if free_size > 0:
+                c1, free_size = _free_pop(heap_idx, free_size, capacity)
+            else:
+                if next_free >= capacity:
+                    if not auto_expand_max_nodes:
+                        raise ValueError(
+                            "Exceeded MAX_NODES before finding any feasible visible sample."
+                        )
+                    new_capacity = _next_capacity(capacity, max_nodes_growth, hard_cap)
+                    if new_capacity <= capacity:
+                        raise ValueError(
+                            "Exceeded MAX_NODES before finding any feasible visible sample."
+                        )
+                    tri_u, gub_arr, Fub_arr, heap_idx = _grow_storage(
+                        tri_u,
+                        gub_arr,
+                        Fub_arr,
+                        heap_idx,
+                        capacity,
+                        new_capacity,
+                        heap_size,
+                        free_size,
+                    )
+                    capacity = new_capacity
+                c1 = next_free
+                next_free += 1
+
+            if free_size > 0:
+                c2, free_size = _free_pop(heap_idx, free_size, capacity)
+            else:
+                if next_free >= capacity:
+                    if not auto_expand_max_nodes:
+                        raise ValueError(
+                            "Exceeded MAX_NODES before finding any feasible visible sample."
+                        )
+                    new_capacity = _next_capacity(capacity, max_nodes_growth, hard_cap)
+                    if new_capacity <= capacity:
+                        raise ValueError(
+                            "Exceeded MAX_NODES before finding any feasible visible sample."
+                        )
+                    tri_u, gub_arr, Fub_arr, heap_idx = _grow_storage(
+                        tri_u,
+                        gub_arr,
+                        Fub_arr,
+                        heap_idx,
+                        capacity,
+                        new_capacity,
+                        heap_size,
+                        free_size,
+                    )
+                    capacity = new_capacity
+                c2 = next_free
+                next_free += 1
+
+            if free_size > 0:
+                c3, free_size = _free_pop(heap_idx, free_size, capacity)
+            else:
+                if next_free >= capacity:
+                    if not auto_expand_max_nodes:
+                        raise ValueError(
+                            "Exceeded MAX_NODES before finding any feasible visible sample."
+                        )
+                    new_capacity = _next_capacity(capacity, max_nodes_growth, hard_cap)
+                    if new_capacity <= capacity:
+                        raise ValueError(
+                            "Exceeded MAX_NODES before finding any feasible visible sample."
+                        )
+                    tri_u, gub_arr, Fub_arr, heap_idx = _grow_storage(
+                        tri_u,
+                        gub_arr,
+                        Fub_arr,
+                        heap_idx,
+                        capacity,
+                        new_capacity,
+                        heap_size,
+                        free_size,
+                    )
+                    capacity = new_capacity
+                c3 = next_free
+                next_free += 1
+
+            child_slot1[k] = c1
+            child_slot2[k] = c2
+            child_slot3[k] = c3
+
+        _subdivide_and_eval_batch(
+            parents,
+            pcount,
+            child_slot1,
+            child_slot2,
+            child_slot3,
+            tri_u,
+            obs_ecef_m,
+            ps,
+            nobs,
+            inva2,
+            invb2,
+            L_u_to_x,
+            inv_c,
+            margin,
+            L_F,
+            L_g,
+            F_cap,
+            gub_arr,
+            Fub_arr,
+            child_idx,
+            child_ok,
+            child_Fvis,
+        )
+
+        # Push children back into heap (still keyed by gub)
+        for q in range(4 * pcount):
+            nid = child_idx[q]
+            if child_ok[q] == 1:
+                heap_size = _heap_push(heap_idx, heap_size, nid, gub_arr)
+                fv = child_Fvis[q]
+                if fv > F_L:
+                    F_L = fv
+                if fv > -1e200:
+                    found_feasible = True
+            else:
+                free_size = _free_push(heap_idx, free_size, nid, capacity)
+
+        if heap_size == 0:
+            raise ValueError("No overlapping visibility (certified empty).")
+
+    if not found_feasible:
+        raise ValueError("Failed to find feasible overlap before MAX_ITERS.")
+
+    # -----------------
+    # Phase B: tighten F bounds to tolerance
+    # Rebuild heap keyed by Fub_arr.
+    # -----------------
+    _heapify(heap_idx, heap_size, Fub_arr)
+
+    # Certified upper bound is max ub_F among active cells
+    it = 0
+    while it < MAX_ITERS:
+        it += 1
+
+        if heap_size == 0:
+            raise ValueError("No overlapping visibility (no possible cells remain).")
+
+        F_U = Fub_arr[heap_idx[0]]
+
+        # Compute certified PRI and PRF bounds each iteration.
+        pri_lower_s = 2.0 * F_L
+        pri_upper_s = 2.0 * F_U
+
+        # If pri_lower_s <= 0, PRF is unbounded (or numerically unstable).
+        # In that case we cannot certify a finite PRF tolerance.
+        if pri_lower_s <= 0.0:
+            raise ValueError("PRI lower bound <= 0; cannot certify PRF tolerance.")
+
+        prf_lower_cert_hz = 1.0 / pri_upper_s
+        prf_lower_hz = 1.0 / (pri_upper_s + strict_pri_pad_s)  # strict-safe
+        prf_upper_hz = 1.0 / pri_lower_s  # optimistic upper bound
+        prf_gap_hz = prf_upper_hz - prf_lower_cert_hz
+
+        if prf_gap_hz <= tol_prf_hz:
+            pri_lower_us = pri_lower_s * 1e6
+            pri_upper_us = pri_upper_s * 1e6
+            pri_gap_us = pri_upper_us - pri_lower_us
+            top_idx = heap_idx[0]
+            warm_cell_u[0, 0] = tri_u[top_idx, 0, 0]
+            warm_cell_u[0, 1] = tri_u[top_idx, 0, 1]
+            warm_cell_u[0, 2] = tri_u[top_idx, 0, 2]
+            warm_cell_u[1, 0] = tri_u[top_idx, 1, 0]
+            warm_cell_u[1, 1] = tri_u[top_idx, 1, 1]
+            warm_cell_u[1, 2] = tri_u[top_idx, 1, 2]
+            warm_cell_u[2, 0] = tri_u[top_idx, 2, 0]
+            warm_cell_u[2, 1] = tri_u[top_idx, 2, 1]
+            warm_cell_u[2, 2] = tri_u[top_idx, 2, 2]
+            return (
+                tri_u,
+                gub_arr,
+                Fub_arr,
+                heap_idx,
+                True,
+                prf_lower_hz,
+                prf_upper_hz,
+                prf_gap_hz,
+                pri_upper_us,
+                pri_lower_us,
+                pri_gap_us,
+            )
+
+        pcount = BATCH if heap_size >= BATCH else heap_size
+        for k in range(pcount):
+            idx, heap_size = _heap_pop_max(heap_idx, heap_size, Fub_arr)
+            parents[k] = idx
+
+        # Allocate 3 side-child slots per parent, preferring recycled slots.
+        for k in range(pcount):
+            if free_size > 0:
+                c1, free_size = _free_pop(heap_idx, free_size, capacity)
+            else:
+                if next_free >= capacity:
+                    if not auto_expand_max_nodes:
+                        raise ValueError("Exceeded MAX_NODES before meeting tolerance.")
+                    new_capacity = _next_capacity(capacity, max_nodes_growth, hard_cap)
+                    if new_capacity <= capacity:
+                        raise ValueError("Exceeded MAX_NODES before meeting tolerance.")
+                    tri_u, gub_arr, Fub_arr, heap_idx = _grow_storage(
+                        tri_u,
+                        gub_arr,
+                        Fub_arr,
+                        heap_idx,
+                        capacity,
+                        new_capacity,
+                        heap_size,
+                        free_size,
+                    )
+                    capacity = new_capacity
+                c1 = next_free
+                next_free += 1
+
+            if free_size > 0:
+                c2, free_size = _free_pop(heap_idx, free_size, capacity)
+            else:
+                if next_free >= capacity:
+                    if not auto_expand_max_nodes:
+                        raise ValueError("Exceeded MAX_NODES before meeting tolerance.")
+                    new_capacity = _next_capacity(capacity, max_nodes_growth, hard_cap)
+                    if new_capacity <= capacity:
+                        raise ValueError("Exceeded MAX_NODES before meeting tolerance.")
+                    tri_u, gub_arr, Fub_arr, heap_idx = _grow_storage(
+                        tri_u,
+                        gub_arr,
+                        Fub_arr,
+                        heap_idx,
+                        capacity,
+                        new_capacity,
+                        heap_size,
+                        free_size,
+                    )
+                    capacity = new_capacity
+                c2 = next_free
+                next_free += 1
+
+            if free_size > 0:
+                c3, free_size = _free_pop(heap_idx, free_size, capacity)
+            else:
+                if next_free >= capacity:
+                    if not auto_expand_max_nodes:
+                        raise ValueError("Exceeded MAX_NODES before meeting tolerance.")
+                    new_capacity = _next_capacity(capacity, max_nodes_growth, hard_cap)
+                    if new_capacity <= capacity:
+                        raise ValueError("Exceeded MAX_NODES before meeting tolerance.")
+                    tri_u, gub_arr, Fub_arr, heap_idx = _grow_storage(
+                        tri_u,
+                        gub_arr,
+                        Fub_arr,
+                        heap_idx,
+                        capacity,
+                        new_capacity,
+                        heap_size,
+                        free_size,
+                    )
+                    capacity = new_capacity
+                c3 = next_free
+                next_free += 1
+
+            child_slot1[k] = c1
+            child_slot2[k] = c2
+            child_slot3[k] = c3
+
+        _subdivide_and_eval_batch(
+            parents,
+            pcount,
+            child_slot1,
+            child_slot2,
+            child_slot3,
+            tri_u,
+            obs_ecef_m,
+            ps,
+            nobs,
+            inva2,
+            invb2,
+            L_u_to_x,
+            inv_c,
+            margin,
+            L_F,
+            L_g,
+            F_cap,
+            gub_arr,
+            Fub_arr,
+            child_idx,
+            child_ok,
+            child_Fvis,
+        )
+
+        # Insert possibly-visible children into heap (keyed by Fub)
+        for q in range(4 * pcount):
+            nid = child_idx[q]
+            if child_ok[q] == 1:
+                heap_size = _heap_push(heap_idx, heap_size, nid, Fub_arr)
+                fv = child_Fvis[q]
+                if fv > F_L:
+                    F_L = fv
+            else:
+                free_size = _free_push(heap_idx, free_size, nid, capacity)
+
+    raise ValueError("Tolerance not achieved before MAX_ITERS.")
+
+
+@njit(cache=True)
+def max_unambiguous_prf_batched(
+    obs_ecef_m_series: np.ndarray,
+    sigma_t_s_series: np.ndarray,
+    tol_prf_hz: float = 0.1,
+    k_sigma: float = 1.0,
+    max_nodes: int = 5_000_000,
+    max_iters: int = 1_000_000,
+    margin_mode: int = 0,
+    strict_pri_pad_s: float = 1e-12,
+    auto_expand_max_nodes: bool = True,
+    max_nodes_growth: float = 2.0,
+    max_nodes_hard_cap: int = 2_147_483_647,
+    temporal_warm_start: bool = True,
+):
+    """
+    Batched certified critical-PRF solve over time.
+
+    Parameters
+    ----------
+    obs_ecef_m_series : float64[T, N, 3]
+        Observer ECEF positions per time step.
+    sigma_t_s_series : float64[T, N]
+        Per-observer timing sigma values per time step.
+
+    Returns
+    -------
+    Tuple of float64[T] arrays:
+        (prf_lower_hz, prf_upper_hz, prf_gap_hz, pri_upper_us, pri_lower_us, pri_gap_us)
+
+    Notes
+    -----
+    This batched path reuses a single branch-and-bound workspace across all time steps.
+    That avoids repeated large allocations and can significantly reduce total runtime
+    versus repeatedly calling max_unambiguous_prf from Python.
+
+    If temporal_warm_start is enabled, each step also applies certified temporal bounds
+    derived from the previous step:
+        F*_t in [F_L_prev - dF, F_U_prev + dF]
+    where dF accounts for observer motion and sigma-margin change. This preserves
+    correctness while reducing the search volume for smooth trajectories.
+    """
+    if obs_ecef_m_series.ndim != 3:
+        raise ValueError("obs_ecef_m_series must have shape (T, N, 3).")
+    if obs_ecef_m_series.shape[2] != 3:
+        raise ValueError("obs_ecef_m_series must have shape (T, N, 3).")
+    if sigma_t_s_series.ndim != 2:
+        raise ValueError("sigma_t_s_series must have shape (T, N).")
+
+    T = obs_ecef_m_series.shape[0]
+    N = obs_ecef_m_series.shape[1]
+    if sigma_t_s_series.shape[0] != T or sigma_t_s_series.shape[1] != N:
+        raise ValueError("sigma_t_s_series must have shape (T, N) matching observers.")
+    if max_nodes <= 0:
+        raise ValueError("max_nodes must be > 0.")
+
+    prf_lower_hz = np.empty(T, dtype=np.float64)
+    prf_upper_hz = np.empty(T, dtype=np.float64)
+    prf_gap_hz = np.empty(T, dtype=np.float64)
+    pri_upper_us = np.empty(T, dtype=np.float64)
+    pri_lower_us = np.empty(T, dtype=np.float64)
+    pri_gap_us = np.empty(T, dtype=np.float64)
+
+    BATCH = 2048
+    tri_u = np.empty((max_nodes, 3, 3), dtype=np.float64)
+    gub_arr = np.empty(max_nodes, dtype=np.float64)
+    Fub_arr = np.empty(max_nodes, dtype=np.float64)
+    heap_idx = np.empty(max_nodes, dtype=np.int32)
+    parents = np.empty(BATCH, dtype=np.int32)
+    child_slot1 = np.empty(BATCH, dtype=np.int32)
+    child_slot2 = np.empty(BATCH, dtype=np.int32)
+    child_slot3 = np.empty(BATCH, dtype=np.int32)
+    child_idx = np.empty(4 * BATCH, dtype=np.int32)
+    child_ok = np.empty(4 * BATCH, dtype=np.int8)
+    child_Fvis = np.empty(4 * BATCH, dtype=np.float64)
+
+    inv_c = 1.0 / 299792458.0
+    warm_slack_s = 1e-12
+    have_prev = False
+    prev_margin = 0.0
+    prev_F_L = 0.0
+    prev_F_U = 0.0
+    warm_cell_valid = False
+    warm_cell_u = np.empty((3, 3), dtype=np.float64)
+
+    for t in range(T):
+        use_warm_bounds = False
+        warm_F_lower = -1e300
+        warm_F_upper = 1e300
+        margin_t = _margin_from_sigmas(sigma_t_s_series[t], N, k_sigma, margin_mode)
+
+        if temporal_warm_start and have_prev:
+            max_disp = 0.0
+            for i in range(N):
+                dx = obs_ecef_m_series[t, i, 0] - obs_ecef_m_series[t - 1, i, 0]
+                dy = obs_ecef_m_series[t, i, 1] - obs_ecef_m_series[t - 1, i, 1]
+                dz = obs_ecef_m_series[t, i, 2] - obs_ecef_m_series[t - 1, i, 2]
+                d = _norm3(dx, dy, dz)
+                if d > max_disp:
+                    max_disp = d
+            # Uniform temporal Lipschitz bound:
+            # |W_t(x)-W_{t-1}(x)| <= 2*max_disp/c, for all x.
+            dF = 2.0 * max_disp * inv_c + np.abs(margin_t - prev_margin) + warm_slack_s
+            warm_F_lower = prev_F_L - dF
+            warm_F_upper = prev_F_U + dF
+            use_warm_bounds = True
+
+        (
+            tri_u,
+            gub_arr,
+            Fub_arr,
+            heap_idx,
+            warm_cell_valid,
+            prf_lower_hz[t],
+            prf_upper_hz[t],
+            prf_gap_hz[t],
+            pri_upper_us[t],
+            pri_lower_us[t],
+            pri_gap_us[t],
+        ) = _max_unambiguous_prf_reuse_workspace(
+            obs_ecef_m_series[t],
+            sigma_t_s_series[t],
+            tol_prf_hz,
+            k_sigma,
+            max_iters,
+            margin_mode,
+            strict_pri_pad_s,
+            auto_expand_max_nodes,
+            max_nodes_growth,
+            max_nodes_hard_cap,
+            use_warm_bounds,
+            warm_F_lower,
+            warm_F_upper,
+            warm_cell_valid,
+            warm_cell_u,
+            tri_u,
+            gub_arr,
+            Fub_arr,
+            heap_idx,
+            parents,
+            child_slot1,
+            child_slot2,
+            child_slot3,
+            child_idx,
+            child_ok,
+            child_Fvis,
+        )
+
+        prev_margin = margin_t
+        prev_F_L = 0.5 * pri_lower_us[t] * 1e-6
+        prev_F_U = 0.5 * pri_upper_us[t] * 1e-6
+        have_prev = True
+
+    return (
+        prf_lower_hz,
+        prf_upper_hz,
+        prf_gap_hz,
+        pri_upper_us,
+        pri_lower_us,
+        pri_gap_us,
+    )
+
+
+@njit(cache=True)
+def max_unambiguous_prf_batched_const_sigma(
+    obs_ecef_m_series: np.ndarray,
+    sigma_t_s: np.ndarray,
+    tol_prf_hz: float = 0.1,
+    k_sigma: float = 1.0,
+    max_nodes: int = 5_000_000,
+    max_iters: int = 1_000_000,
+    margin_mode: int = 0,
+    strict_pri_pad_s: float = 1e-12,
+    auto_expand_max_nodes: bool = True,
+    max_nodes_growth: float = 2.0,
+    max_nodes_hard_cap: int = 2_147_483_647,
+    temporal_warm_start: bool = True,
+):
+    """
+    Batched certified critical-PRF solve over time with constant per-observer sigma.
+
+    Parameters
+    ----------
+    obs_ecef_m_series : float64[T, N, 3]
+    sigma_t_s : float64[N]
+    """
+    if obs_ecef_m_series.ndim != 3:
+        raise ValueError("obs_ecef_m_series must have shape (T, N, 3).")
+    if obs_ecef_m_series.shape[2] != 3:
+        raise ValueError("obs_ecef_m_series must have shape (T, N, 3).")
+    if sigma_t_s.ndim != 1:
+        raise ValueError("sigma_t_s must have shape (N,).")
+    if sigma_t_s.shape[0] != obs_ecef_m_series.shape[1]:
+        raise ValueError("sigma_t_s length must match number of observers.")
+    if max_nodes <= 0:
+        raise ValueError("max_nodes must be > 0.")
+
+    T = obs_ecef_m_series.shape[0]
+    prf_lower_hz = np.empty(T, dtype=np.float64)
+    prf_upper_hz = np.empty(T, dtype=np.float64)
+    prf_gap_hz = np.empty(T, dtype=np.float64)
+    pri_upper_us = np.empty(T, dtype=np.float64)
+    pri_lower_us = np.empty(T, dtype=np.float64)
+    pri_gap_us = np.empty(T, dtype=np.float64)
+
+    BATCH = 2048
+    tri_u = np.empty((max_nodes, 3, 3), dtype=np.float64)
+    gub_arr = np.empty(max_nodes, dtype=np.float64)
+    Fub_arr = np.empty(max_nodes, dtype=np.float64)
+    heap_idx = np.empty(max_nodes, dtype=np.int32)
+    parents = np.empty(BATCH, dtype=np.int32)
+    child_slot1 = np.empty(BATCH, dtype=np.int32)
+    child_slot2 = np.empty(BATCH, dtype=np.int32)
+    child_slot3 = np.empty(BATCH, dtype=np.int32)
+    child_idx = np.empty(4 * BATCH, dtype=np.int32)
+    child_ok = np.empty(4 * BATCH, dtype=np.int8)
+    child_Fvis = np.empty(4 * BATCH, dtype=np.float64)
+
+    inv_c = 1.0 / 299792458.0
+    warm_slack_s = 1e-12
+    have_prev = False
+    prev_F_L = 0.0
+    prev_F_U = 0.0
+    warm_cell_valid = False
+    warm_cell_u = np.empty((3, 3), dtype=np.float64)
+
+    for t in range(T):
+        use_warm_bounds = False
+        warm_F_lower = -1e300
+        warm_F_upper = 1e300
+
+        if temporal_warm_start and have_prev:
+            max_disp = 0.0
+            for i in range(sigma_t_s.shape[0]):
+                dx = obs_ecef_m_series[t, i, 0] - obs_ecef_m_series[t - 1, i, 0]
+                dy = obs_ecef_m_series[t, i, 1] - obs_ecef_m_series[t - 1, i, 1]
+                dz = obs_ecef_m_series[t, i, 2] - obs_ecef_m_series[t - 1, i, 2]
+                d = _norm3(dx, dy, dz)
+                if d > max_disp:
+                    max_disp = d
+            dF = 2.0 * max_disp * inv_c + warm_slack_s
+            warm_F_lower = prev_F_L - dF
+            warm_F_upper = prev_F_U + dF
+            use_warm_bounds = True
+
+        (
+            tri_u,
+            gub_arr,
+            Fub_arr,
+            heap_idx,
+            warm_cell_valid,
+            prf_lower_hz[t],
+            prf_upper_hz[t],
+            prf_gap_hz[t],
+            pri_upper_us[t],
+            pri_lower_us[t],
+            pri_gap_us[t],
+        ) = _max_unambiguous_prf_reuse_workspace(
+            obs_ecef_m_series[t],
+            sigma_t_s,
+            tol_prf_hz,
+            k_sigma,
+            max_iters,
+            margin_mode,
+            strict_pri_pad_s,
+            auto_expand_max_nodes,
+            max_nodes_growth,
+            max_nodes_hard_cap,
+            use_warm_bounds,
+            warm_F_lower,
+            warm_F_upper,
+            warm_cell_valid,
+            warm_cell_u,
+            tri_u,
+            gub_arr,
+            Fub_arr,
+            heap_idx,
+            parents,
+            child_slot1,
+            child_slot2,
+            child_slot3,
+            child_idx,
+            child_ok,
+            child_Fvis,
+        )
+
+        prev_F_L = 0.5 * pri_lower_us[t] * 1e-6
+        prev_F_U = 0.5 * pri_upper_us[t] * 1e-6
+        have_prev = True
+
+    return (
+        prf_lower_hz,
+        prf_upper_hz,
+        prf_gap_hz,
+        pri_upper_us,
+        pri_lower_us,
+        pri_gap_us,
+    )
+
+
 if __name__ == "__main__":
+    # Support direct script execution so numba cache imports can resolve `nebula`.
+    _repo_root = os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    )
+    if _repo_root not in sys.path:
+        sys.path.append(_repo_root)
+
     # Example with overlap: three near-co-located LEO observers (ECEF)
     a = 6378137.0
     h = 55000e3
@@ -1001,7 +2130,7 @@ if __name__ == "__main__":
     sig = np.array([500e-9, 500e-9, 500e-9], dtype=np.float64)
 
     prf_lo, prf_hi, prf_gap, pri_u_us, pri_l_us, pri_gap_us = max_unambiguous_prf(
-        obs, sig, tol_prf_hz=0.5, k_sigma=3.0
+        obs, sig, tol_prf_hz=1.0, k_sigma=3.0
     )
     print("PRF_lower_hz (safe):", prf_lo)
     print("PRF_upper_hz:", prf_hi)
@@ -1009,10 +2138,160 @@ if __name__ == "__main__":
     print("PRI_upper_us:", pri_u_us)
     print("PRI_lower_us:", pri_l_us)
     print("PRI_gap_us:", pri_gap_us)
+    raise SystemExit("Example complete.")
+    raise ValueError()
+
+    # Batched examples: compare equivalence vs scalar and benchmark throughput.
+    import timeit
+
+    T = 8
+    step_deg = 0.05
+    lons_series = lons[None, :] + (
+        np.arange(T, dtype=np.float64)[:, None] * step_deg * deg
+    )
+    obs_series = np.empty((T, obs.shape[0], 3), dtype=np.float64)
+    obs_series[:, :, 0] = r * np.cos(lons_series)
+    obs_series[:, :, 1] = r * np.sin(lons_series)
+    obs_series[:, :, 2] = 0.0
+
+    sig_const = np.array([500e-9, 500e-9, 500e-9], dtype=np.float64)
+    sig_series = np.empty((T, sig_const.shape[0]), dtype=np.float64)
+    for t in range(T):
+        # Small deterministic sigma variation across time.
+        scale = 1.0 + 0.10 * np.sin(0.2 * t)
+        sig_series[t] = sig_const * scale
+
+    bench_tol_prf_hz = 2.0
+
+    # Warmup compile for all interfaces before timing.
+    _ = max_unambiguous_prf(
+        obs_series[0], sig_const, tol_prf_hz=bench_tol_prf_hz, k_sigma=3.0
+    )
+    _ = max_unambiguous_prf_batched_const_sigma(
+        obs_series[:2], sig_const, tol_prf_hz=bench_tol_prf_hz, k_sigma=3.0
+    )
+    _ = max_unambiguous_prf_batched_const_sigma(
+        obs_series[:2],
+        sig_const,
+        tol_prf_hz=bench_tol_prf_hz,
+        k_sigma=3.0,
+        temporal_warm_start=False,
+    )
+    _ = max_unambiguous_prf_batched(
+        obs_series[:2], sig_series[:2], tol_prf_hz=bench_tol_prf_hz, k_sigma=3.0
+    )
+    _ = max_unambiguous_prf_batched(
+        obs_series[:2],
+        sig_series[:2],
+        tol_prf_hz=bench_tol_prf_hz,
+        k_sigma=3.0,
+        temporal_warm_start=False,
+    )
+
+    # Compare scalar-loop outputs against batched APIs.
+    scalar_const = np.empty((T, 6), dtype=np.float64)
+    for t in range(T):
+        scalar_const[t] = max_unambiguous_prf(
+            obs_series[t], sig_const, tol_prf_hz=bench_tol_prf_hz, k_sigma=3.0
+        )
+    batched_const = max_unambiguous_prf_batched_const_sigma(
+        obs_series, sig_const, tol_prf_hz=bench_tol_prf_hz, k_sigma=3.0
+    )
+    batched_const_mat = np.stack(batched_const, axis=1)
+    print(
+        "Batched const-sigma max abs diff vs scalar:",
+        np.max(np.abs(batched_const_mat - scalar_const)),
+    )
+
+    scalar_var = np.empty((T, 6), dtype=np.float64)
+    for t in range(T):
+        scalar_var[t] = max_unambiguous_prf(
+            obs_series[t], sig_series[t], tol_prf_hz=bench_tol_prf_hz, k_sigma=3.0
+        )
+    batched_var = max_unambiguous_prf_batched(
+        obs_series, sig_series, tol_prf_hz=bench_tol_prf_hz, k_sigma=3.0
+    )
+    batched_var_mat = np.stack(batched_var, axis=1)
+    print(
+        "Batched time-varying-sigma max abs diff vs scalar:",
+        np.max(np.abs(batched_var_mat - scalar_var)),
+    )
+
+    # Steady-state timing (JIT compile cost excluded by warmup above).
+    reps = 2
+    scalar_const_s = timeit.timeit(
+        lambda: [
+            max_unambiguous_prf(
+                obs_series[t], sig_const, tol_prf_hz=bench_tol_prf_hz, k_sigma=3.0
+            )
+            for t in range(T)
+        ],
+        number=reps,
+    )
+    batched_const_s = timeit.timeit(
+        lambda: max_unambiguous_prf_batched_const_sigma(
+            obs_series, sig_const, tol_prf_hz=bench_tol_prf_hz, k_sigma=3.0
+        ),
+        number=reps,
+    )
+    scalar_var_s = timeit.timeit(
+        lambda: [
+            max_unambiguous_prf(
+                obs_series[t], sig_series[t], tol_prf_hz=bench_tol_prf_hz, k_sigma=3.0
+            )
+            for t in range(T)
+        ],
+        number=reps,
+    )
+    batched_var_s = timeit.timeit(
+        lambda: max_unambiguous_prf_batched(
+            obs_series, sig_series, tol_prf_hz=bench_tol_prf_hz, k_sigma=3.0
+        ),
+        number=reps,
+    )
+    reps_no_warm = 1
+    batched_const_no_warm_s = timeit.timeit(
+        lambda: max_unambiguous_prf_batched_const_sigma(
+            obs_series,
+            sig_const,
+            tol_prf_hz=bench_tol_prf_hz,
+            k_sigma=3.0,
+            temporal_warm_start=False,
+        ),
+        number=reps_no_warm,
+    )
+    batched_var_no_warm_s = timeit.timeit(
+        lambda: max_unambiguous_prf_batched(
+            obs_series,
+            sig_series,
+            tol_prf_hz=bench_tol_prf_hz,
+            k_sigma=3.0,
+            temporal_warm_start=False,
+        ),
+        number=reps_no_warm,
+    )
+    batched_const_per_run = batched_const_s / reps
+    batched_var_per_run = batched_var_s / reps
+    batched_const_no_warm_per_run = batched_const_no_warm_s / reps_no_warm
+    batched_var_no_warm_per_run = batched_var_no_warm_s / reps_no_warm
+
+    print(f"Timing over T={T}, reps={reps}, tol_prf_hz={bench_tol_prf_hz} (seconds):")
+    print(f"  scalar loop (const sigma):        {scalar_const_s:.3f}")
+    print(f"  batched const-sigma API:          {batched_const_s:.3f}")
+    print(
+        f"  speedup const-sigma:              {scalar_const_s / batched_const_s:.2f}x"
+    )
+    print(f"  batched const/run (warm on):      {batched_const_per_run:.3f}")
+    print(f"  batched const/run (warm off):     {batched_const_no_warm_per_run:.3f}")
+    print(f"  scalar loop (time-varying sigma): {scalar_var_s:.3f}")
+    print(f"  batched varying-sigma API:        {batched_var_s:.3f}")
+    print(f"  speedup varying-sigma:            {scalar_var_s / batched_var_s:.2f}x")
+    print(f"  batched varying/run (warm on):    {batched_var_per_run:.3f}")
+    print(f"  batched varying/run (warm off):   {batched_var_no_warm_per_run:.3f}")
 
     sig = np.zeros(3, dtype=np.float64)  # zero noise case
     prf_lo, prf_hi, prf_gap, pri_u_us, pri_l_us, pri_gap_us = max_unambiguous_prf(
-        obs, sig, tol_prf_hz=0.5, k_sigma=3.0
+        obs, sig, tol_prf_hz=1.0, k_sigma=3.0
     )
     print("PRF_lower_hz (safe):", prf_lo)
     print("PRF_upper_hz:", prf_hi)

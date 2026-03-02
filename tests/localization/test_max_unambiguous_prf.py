@@ -7,6 +7,8 @@ import numpy as np
 import pytest
 
 from nebula.localization.max_unambiguous_prf import max_unambiguous_prf
+from nebula.localization.max_unambiguous_prf import max_unambiguous_prf_batched
+from nebula.localization.max_unambiguous_prf import max_unambiguous_prf_batched_const_sigma
 
 
 # -----------------------------
@@ -337,3 +339,249 @@ def test_invalid_inputs_raise(compile_numba_once, baseline_geometry) -> None:
         max_unambiguous_prf(obs, sig, margin_mode=7)
     with pytest.raises(ValueError):
         max_unambiguous_prf(obs, sig, strict_pri_pad_s=-1e-12)
+    with pytest.raises(ValueError):
+        max_unambiguous_prf(obs, sig, max_nodes=-1)
+    with pytest.raises(ValueError):
+        max_unambiguous_prf(obs, sig, auto_expand_max_nodes=True, max_nodes_growth=1.0)
+
+
+def test_auto_expand_max_nodes_recovers(compile_numba_once, baseline_geometry) -> None:
+    obs, sig = baseline_geometry
+
+    out = max_unambiguous_prf(
+        obs,
+        sig,
+        tol_prf_hz=12.0,
+        k_sigma=1.0,
+        max_nodes=100_000,
+        max_iters=200_000,
+        auto_expand_max_nodes=True,
+        max_nodes_growth=2.0,
+        max_nodes_hard_cap=2_000_000,
+    )
+    assert np.isfinite(out).all()
+
+
+def test_disable_auto_expand_can_raise_max_nodes(
+    compile_numba_once, baseline_geometry
+) -> None:
+    obs, sig = baseline_geometry
+
+    with pytest.raises(ValueError, match="MAX_NODES|max_nodes"):
+        max_unambiguous_prf(
+            obs,
+            sig,
+            tol_prf_hz=12.0,
+            k_sigma=1.0,
+            max_nodes=100_000,
+            max_iters=200_000,
+            auto_expand_max_nodes=False,
+        )
+
+
+def test_batched_matches_scalar_const_sigma(compile_numba_once) -> None:
+    h = 550e3
+    obs0 = np.array(
+        [
+            geodetic2ecef_wgs84(0.0, 0.0, h),
+            geodetic2ecef_wgs84(0.0, 1.0 * math.pi / 180.0, h),
+            geodetic2ecef_wgs84(0.0, -1.0 * math.pi / 180.0, h),
+        ],
+        dtype=np.float64,
+    )
+    obs1 = np.array(
+        [
+            geodetic2ecef_wgs84(0.1 * math.pi / 180.0, 0.2 * math.pi / 180.0, h),
+            geodetic2ecef_wgs84(0.1 * math.pi / 180.0, 1.2 * math.pi / 180.0, h),
+            geodetic2ecef_wgs84(0.1 * math.pi / 180.0, -0.8 * math.pi / 180.0, h),
+        ],
+        dtype=np.float64,
+    )
+    obs2 = np.array(
+        [
+            geodetic2ecef_wgs84(-0.1 * math.pi / 180.0, 0.3 * math.pi / 180.0, h),
+            geodetic2ecef_wgs84(-0.1 * math.pi / 180.0, 1.3 * math.pi / 180.0, h),
+            geodetic2ecef_wgs84(-0.1 * math.pi / 180.0, -0.7 * math.pi / 180.0, h),
+        ],
+        dtype=np.float64,
+    )
+    obs_series = np.ascontiguousarray(np.stack([obs0, obs1, obs2], axis=0))
+    sig = np.ascontiguousarray(np.array([200e-9, 120e-9, 90e-9], dtype=np.float64))
+
+    out_b = max_unambiguous_prf_batched_const_sigma(
+        obs_series,
+        sig,
+        tol_prf_hz=12.0,
+        k_sigma=3.0,
+        max_nodes=1_000_000,
+        max_iters=200_000,
+    )
+
+    for t in range(obs_series.shape[0]):
+        out_s = max_unambiguous_prf(
+            obs_series[t],
+            sig,
+            tol_prf_hz=12.0,
+            k_sigma=3.0,
+            max_nodes=1_000_000,
+            max_iters=200_000,
+        )
+        for i in range(6):
+            assert abs(out_b[i][t] - out_s[i]) < 1e-12
+
+
+def test_batched_matches_scalar_time_varying_sigma(compile_numba_once) -> None:
+    h = 550e3
+    obs0 = np.array(
+        [
+            geodetic2ecef_wgs84(0.0, 0.0, h),
+            geodetic2ecef_wgs84(0.0, 1.0 * math.pi / 180.0, h),
+            geodetic2ecef_wgs84(0.0, -1.0 * math.pi / 180.0, h),
+        ],
+        dtype=np.float64,
+    )
+    obs1 = np.array(
+        [
+            geodetic2ecef_wgs84(0.05 * math.pi / 180.0, 0.15 * math.pi / 180.0, h),
+            geodetic2ecef_wgs84(0.05 * math.pi / 180.0, 1.15 * math.pi / 180.0, h),
+            geodetic2ecef_wgs84(0.05 * math.pi / 180.0, -0.85 * math.pi / 180.0, h),
+        ],
+        dtype=np.float64,
+    )
+    obs_series = np.ascontiguousarray(np.stack([obs0, obs1], axis=0))
+    sig_series = np.ascontiguousarray(
+        np.array(
+            [
+                [200e-9, 120e-9, 90e-9],
+                [210e-9, 110e-9, 95e-9],
+            ],
+            dtype=np.float64,
+        )
+    )
+
+    out_b = max_unambiguous_prf_batched(
+        obs_series,
+        sig_series,
+        tol_prf_hz=12.0,
+        k_sigma=3.0,
+        max_nodes=1_000_000,
+        max_iters=200_000,
+    )
+
+    for t in range(obs_series.shape[0]):
+        out_s = max_unambiguous_prf(
+            obs_series[t],
+            sig_series[t],
+            tol_prf_hz=12.0,
+            k_sigma=3.0,
+            max_nodes=1_000_000,
+            max_iters=200_000,
+        )
+        for i in range(6):
+            assert abs(out_b[i][t] - out_s[i]) < 1e-12
+
+
+def test_batched_temporal_warm_start_matches_disabled_const_sigma(
+    compile_numba_once,
+) -> None:
+    h = 550e3
+    obs0 = np.array(
+        [
+            geodetic2ecef_wgs84(0.0, 0.0, h),
+            geodetic2ecef_wgs84(0.0, 1.0 * math.pi / 180.0, h),
+            geodetic2ecef_wgs84(0.0, -1.0 * math.pi / 180.0, h),
+        ],
+        dtype=np.float64,
+    )
+    obs1 = np.array(
+        [
+            geodetic2ecef_wgs84(0.02 * math.pi / 180.0, 0.05 * math.pi / 180.0, h),
+            geodetic2ecef_wgs84(0.02 * math.pi / 180.0, 1.05 * math.pi / 180.0, h),
+            geodetic2ecef_wgs84(0.02 * math.pi / 180.0, -0.95 * math.pi / 180.0, h),
+        ],
+        dtype=np.float64,
+    )
+    obs2 = np.array(
+        [
+            geodetic2ecef_wgs84(0.04 * math.pi / 180.0, 0.10 * math.pi / 180.0, h),
+            geodetic2ecef_wgs84(0.04 * math.pi / 180.0, 1.10 * math.pi / 180.0, h),
+            geodetic2ecef_wgs84(0.04 * math.pi / 180.0, -0.90 * math.pi / 180.0, h),
+        ],
+        dtype=np.float64,
+    )
+    obs_series = np.ascontiguousarray(np.stack([obs0, obs1, obs2], axis=0))
+    sig = np.ascontiguousarray(np.array([200e-9, 120e-9, 90e-9], dtype=np.float64))
+
+    out_warm = max_unambiguous_prf_batched_const_sigma(
+        obs_series,
+        sig,
+        tol_prf_hz=12.0,
+        k_sigma=3.0,
+        max_nodes=1_000_000,
+        max_iters=200_000,
+        temporal_warm_start=True,
+    )
+    out_cold = max_unambiguous_prf_batched_const_sigma(
+        obs_series,
+        sig,
+        tol_prf_hz=12.0,
+        k_sigma=3.0,
+        max_nodes=1_000_000,
+        max_iters=200_000,
+        temporal_warm_start=False,
+    )
+    for i in range(6):
+        assert np.max(np.abs(out_warm[i] - out_cold[i])) < 1e-12
+
+
+def test_batched_temporal_warm_start_matches_disabled_varying_sigma(
+    compile_numba_once,
+) -> None:
+    h = 550e3
+    obs0 = np.array(
+        [
+            geodetic2ecef_wgs84(0.0, 0.0, h),
+            geodetic2ecef_wgs84(0.0, 1.0 * math.pi / 180.0, h),
+            geodetic2ecef_wgs84(0.0, -1.0 * math.pi / 180.0, h),
+        ],
+        dtype=np.float64,
+    )
+    obs1 = np.array(
+        [
+            geodetic2ecef_wgs84(0.03 * math.pi / 180.0, 0.07 * math.pi / 180.0, h),
+            geodetic2ecef_wgs84(0.03 * math.pi / 180.0, 1.07 * math.pi / 180.0, h),
+            geodetic2ecef_wgs84(0.03 * math.pi / 180.0, -0.93 * math.pi / 180.0, h),
+        ],
+        dtype=np.float64,
+    )
+    obs_series = np.ascontiguousarray(np.stack([obs0, obs1], axis=0))
+    sig_series = np.ascontiguousarray(
+        np.array(
+            [
+                [200e-9, 120e-9, 90e-9],
+                [210e-9, 110e-9, 95e-9],
+            ],
+            dtype=np.float64,
+        )
+    )
+
+    out_warm = max_unambiguous_prf_batched(
+        obs_series,
+        sig_series,
+        tol_prf_hz=12.0,
+        k_sigma=3.0,
+        max_nodes=1_000_000,
+        max_iters=200_000,
+        temporal_warm_start=True,
+    )
+    out_cold = max_unambiguous_prf_batched(
+        obs_series,
+        sig_series,
+        tol_prf_hz=12.0,
+        k_sigma=3.0,
+        max_nodes=1_000_000,
+        max_iters=200_000,
+        temporal_warm_start=False,
+    )
+    for i in range(6):
+        assert np.max(np.abs(out_warm[i] - out_cold[i])) < 1e-12

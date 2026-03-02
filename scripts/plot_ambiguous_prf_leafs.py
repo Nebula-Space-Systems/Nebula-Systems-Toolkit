@@ -191,6 +191,9 @@ def max_unambiguous_prf_collect_leaf_centers(
         raise ValueError("No overlapping visibility (certified empty).")
 
     parents = np.empty(BATCH, dtype=np.int32)
+    child_slot1 = np.empty(BATCH, dtype=np.int32)
+    child_slot2 = np.empty(BATCH, dtype=np.int32)
+    child_slot3 = np.empty(BATCH, dtype=np.int32)
     child_idx = np.empty(4 * BATCH, dtype=np.int32)
     child_ok = np.empty(4 * BATCH, dtype=np.int8)
     child_Fvis = np.empty(4 * BATCH, dtype=np.float64)
@@ -214,12 +217,18 @@ def max_unambiguous_prf_collect_leaf_centers(
 
         base_new = next_free
         next_free += need
+        for k in range(pcount):
+            child_slot1[k] = base_new + 3 * k + 0
+            child_slot2[k] = base_new + 3 * k + 1
+            child_slot3[k] = base_new + 3 * k + 2
 
         _subdivide_and_eval_batch(
             parents,
             pcount,
+            child_slot1,
+            child_slot2,
+            child_slot3,
             tri_u,
-            base_new,
             obs_ecef_m,
             ps,
             nobs,
@@ -335,12 +344,18 @@ def max_unambiguous_prf_collect_leaf_centers(
 
         base_new = next_free
         next_free += need
+        for k in range(pcount):
+            child_slot1[k] = base_new + 3 * k + 0
+            child_slot2[k] = base_new + 3 * k + 1
+            child_slot3[k] = base_new + 3 * k + 2
 
         _subdivide_and_eval_batch(
             parents,
             pcount,
+            child_slot1,
+            child_slot2,
+            child_slot3,
             tri_u,
-            base_new,
             obs_ecef_m,
             ps,
             nobs,
