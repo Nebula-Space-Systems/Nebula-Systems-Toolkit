@@ -128,7 +128,7 @@ def _rasterize_lat_row_field_to_regular_grid(
 def main() -> None:
     epoch = Time("2026-01-01T00:00:00", scale="utc")
 
-    duration_s = 24.0 * 3600.0 * 10
+    duration_s = 14 * 86400.0
     step_s = 60.0
     n_steps = int(duration_s / step_s) + 1
     times = epoch + np.arange(n_steps, dtype=np.float64) * step_s * u.s
@@ -138,12 +138,12 @@ def main() -> None:
     obs_positions = [sat.pos_itrf(times) for sat in sats]
 
     config = ExactCoverageConfig(
-        nlats=181,
-        nlons_equator=361,
-        scale_longitude_by_latitude=False,
+        nlats=361,
+        nlons_equator=721,
+        scale_longitude_by_latitude=True,
         min_lon_points_per_row=1,
         min_elevation_deg=0.0,
-        max_elevation_deg=50.0,
+        max_elevation_deg=90.0,
         include_lat_endpoints=True,
         include_lon_endpoints=False,
     )

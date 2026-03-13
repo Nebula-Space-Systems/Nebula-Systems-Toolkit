@@ -23,11 +23,16 @@ _FAST_ORBIT_IMPORT_ERROR: Optional[Exception] = None
 import jdk4py
 import os
 import orekit_jpype
+from nebula.propagation._java_orbit_bridge import (
+    JAVA_ORBIT_BRIDGE_CLASS,
+    prepare_java_orbit_bridge_classpath,
+)
 
 _OREKIT_READY = False
 _OREKIT_INIT_LOCK = threading.Lock()
 _OREKIT_DATA_PATH: Optional[str] = None
 _OREKIT_FAULTHANDLER_DISABLED = False
+_JavaOrbitBridgeClass = None
 
 
 class _LazyJavaProxy:
@@ -86,6 +91,7 @@ def initialize_orekit(*, data_path: Optional[str] = None) -> None:
     - Most Orbit constructors call this automatically.
     """
     global _OREKIT_READY, _OREKIT_DATA_PATH, _OREKIT_FAULTHANDLER_DISABLED
+    global _JavaOrbitBridgeClass
     global FramesFactory, TimeScalesFactory, AbsoluteDate, IERSConventions
 
     if _OREKIT_READY:
@@ -109,7 +115,14 @@ def initialize_orekit(*, data_path: Optional[str] = None) -> None:
                 pass
 
         os.environ.setdefault("JAVA_HOME", str(jdk4py.JAVA_HOME))
-        orekit_jpype.initVM()
+        additional_classpaths = []
+        java_bridge_cp = prepare_java_orbit_bridge_classpath()
+        if java_bridge_cp:
+            additional_classpaths.append(java_bridge_cp)
+
+        orekit_jpype.initVM(
+            additional_classpaths=additional_classpaths or None,
+        )
         from orekit_jpype.pyhelpers import setup_orekit_curdir
 
         if data_path is None:
@@ -138,6 +151,14 @@ def initialize_orekit(*, data_path: Optional[str] = None) -> None:
         TimeScalesFactory.bind(_TimeScalesFactory)
         AbsoluteDate.bind(_AbsoluteDate)
         IERSConventions.bind(_IERSConventions)
+
+        try:
+            import jpype
+
+            _JavaOrbitBridgeClass = jpype.JClass(JAVA_ORBIT_BRIDGE_CLASS)
+        except Exception:
+            _JavaOrbitBridgeClass = None
+
         _OREKIT_READY = True
 
 
@@ -171,6 +192,19 @@ DEFAULT_POSITION_TOLERANCE_M = 0.1
 DEFAULT_MIN_STEP_S = 0.001
 DEFAULT_MAX_STEP_S = 180.0
 DEFAULT_INITIAL_STEP_S = 20.0
+_JAVA_INTERP_QUERY_THRESHOLD = 256
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name, "")
+    if not raw:
+        return bool(default)
+    val = raw.strip().lower()
+    if val in {"1", "true", "yes", "on"}:
+        return True
+    if val in {"0", "false", "no", "off"}:
+        return False
+    return bool(default)
 
 
 # -----------------------------------------------------------------------------
@@ -746,6 +780,50 @@ def _build_numerical_propagator(
     return propagator
 
 
+def _build_keplerian_propagator(
+    *,
+    initial_orbit,
+    initial_state,
+):
+    from org.orekit.propagation.analytical import KeplerianPropagator  # type: ignore
+
+    propagator = KeplerianPropagator(initial_orbit)
+    try:
+        propagator.resetInitialState(initial_state)
+    except Exception:
+        pass
+    return propagator
+
+
+def _can_use_keplerian_two_body(
+    *,
+    gravity_model: str,
+    enable_drag: bool,
+    enable_third_body: bool,
+    enable_solid_tides: bool,
+    enable_ocean_tides: bool,
+    enable_relativity: bool,
+    enable_de_sitter: bool,
+    enable_lense_thirring: bool,
+    enable_srp: bool,
+    enable_erp: bool,
+) -> bool:
+    if gravity_model != "newtonian":
+        return False
+    return not any(
+        (
+            bool(enable_drag),
+            bool(enable_third_body),
+            bool(enable_solid_tides),
+            bool(enable_ocean_tides),
+            bool(enable_relativity),
+            bool(enable_de_sitter),
+            bool(enable_lense_thirring),
+            bool(enable_srp),
+            bool(enable_erp),
+        )
+    )
+
 def _configure_force_models(
     *,
     propagator,
@@ -960,12 +1038,14 @@ class Orbit:
     dt_save_s: float = 60.0
     iers: Optional[object] = None
     simple_eop: bool = True
-    itrf_query_mode: ITRFQueryMode = "cached"
+    itrf_query_mode: ITRFQueryMode = "transform"
     interpolation_mode: InterpolationMode = "cubic"
 
     def __post_init__(self) -> None:
         self._mode: OrbitPropagationMode = "precision"
         self._fast_impl = None
+        self._java_bridge = None
+        self._java_engine = False
         initialize_orekit()
         if AstropyTime is None:
             raise RuntimeError("astropy is required for Orbit")
@@ -974,9 +1054,12 @@ class Orbit:
 
         self._dt = float(self.dt_save_s)
         self.iers = _resolve_iers(self.iers)
-        self._itrf_query_mode = _resolve_itrf_query_mode(self.itrf_query_mode)
+        _resolve_itrf_query_mode(self.itrf_query_mode)
+        self._itrf_query_mode = "transform"
         self._interpolation_mode = _resolve_interpolation_mode(self.interpolation_mode)
         self._use_quintic = self._interpolation_mode == "quintic"
+        self.itrf_query_mode = self._itrf_query_mode
+        self.interpolation_mode = self._interpolation_mode
 
         self._state0 = self.propagator.getInitialState()  # type: ignore
         self._t0_abs = self._state0.getDate()
@@ -985,28 +1068,49 @@ class Orbit:
         self._frame_native = self._state0.getFrame()
         self._itrf = FramesFactory.getITRF(self.iers, bool(self.simple_eop))  # type: ignore
 
+        # Keep lightweight compatibility metadata for legacy helper paths.
         self._k_min = 0
         self._k_max = 0
-
         self._first_state = self._state0
         self._last_state = self._state0
 
-        pv0 = self._state0.getPVCoordinates(self._frame_native)
-        pvi = self._state0.getPVCoordinates(self._itrf)
+        # Legacy attributes retained for compatibility with rarely used internal paths.
+        self._r_native = np.empty((0, 3), dtype=np.float64)
+        self._v_native = np.empty((0, 3), dtype=np.float64)
+        self._a_native = np.empty((0, 3), dtype=np.float64)
+        self._r_itrf = np.empty((0, 3), dtype=np.float64)
+        self._v_itrf = np.empty((0, 3), dtype=np.float64)
+        self._a_itrf = np.empty((0, 3), dtype=np.float64)
+        self._cache_itrf_samples = False
 
-        self._r_native = np.array([pv0.getPosition().toArray()], dtype=np.float64)
-        self._v_native = np.array([pv0.getVelocity().toArray()], dtype=np.float64)
-        if self._use_quintic:
-            self._a_native = np.array([_pv_acceleration_xyz(pv0)], dtype=np.float64)
-        else:
-            self._a_native = np.zeros((1, 3), dtype=np.float64)
+        if _JavaOrbitBridgeClass is None:
+            raise RuntimeError(
+                "Nebula Java Orekit backend is unavailable. "
+                "Install propagation extras and ensure the bridge JAR/class is present."
+            )
 
-        self._r_itrf = np.array([pvi.getPosition().toArray()], dtype=np.float64)
-        self._v_itrf = np.array([pvi.getVelocity().toArray()], dtype=np.float64)
-        if self._use_quintic:
-            self._a_itrf = np.array([_pv_acceleration_xyz(pvi)], dtype=np.float64)
-        else:
-            self._a_itrf = np.zeros((1, 3), dtype=np.float64)
+        try:
+            self._java_bridge = _JavaOrbitBridgeClass(
+                self.propagator,
+                self._itrf,
+                float(self._dt),
+                bool(self._use_quintic),
+                False,
+            )
+            self._java_engine = True
+        except Exception:
+            # Fallback for bridge builds that only expose the 3-arg constructor.
+            try:
+                self._java_bridge = _JavaOrbitBridgeClass(
+                    self.propagator,
+                    float(self._dt),
+                    bool(self._use_quintic),
+                )
+                self._java_engine = True
+            except Exception as exc:
+                raise RuntimeError(
+                    "Failed to initialize Java Orekit orbit backend."
+                ) from exc
 
         self._ephem_generator = None
 
@@ -1043,7 +1147,10 @@ class Orbit:
         """Return currently cached time coverage as ``(t_min_s, t_max_s)``."""
         if self._mode == "efficiency":
             return self._fast_impl.coverage()
-        return float(self._k_min) * self._dt, float(self._k_max) * self._dt
+        if not self._java_engine or self._java_bridge is None:
+            raise RuntimeError("Java orbit backend is not initialized")
+        cov = np.asarray(self._java_bridge.coverage(), dtype=np.float64).reshape(2)
+        return float(cov[0]), float(cov[1])
 
     def precompute(self, t_min_s: float, t_max_s: float) -> None:
         """
@@ -1057,9 +1164,9 @@ class Orbit:
         if self._mode == "efficiency":
             self._fast_impl.precompute(float(t_min_s), float(t_max_s))
             return
-        self._ensure_covered(
-            np.asarray([float(t_min_s), float(t_max_s)], dtype=np.float64)
-        )
+        if not self._java_engine or self._java_bridge is None:
+            raise RuntimeError("Java orbit backend is not initialized")
+        self._java_bridge.precompute(float(t_min_s), float(t_max_s))
 
     def _new_ephemeris_generator(self):
         # Prevent unbounded generator growth in repeated cache extensions.
@@ -1077,10 +1184,35 @@ class Orbit:
         v_native: np.ndarray,
         target_frame: object,
     ) -> Tuple[np.ndarray, np.ndarray]:
+        n = int(dt_s.size)
+        if n <= 0:
+            return (
+                np.empty((0, 3), dtype=np.float64),
+                np.empty((0, 3), dtype=np.float64),
+            )
+
+        if self._java_bridge is not None:
+            try:
+                dt_arr = np.asarray(dt_s, dtype=np.float64).reshape(n)
+                r_arr = np.asarray(r_native, dtype=np.float64).reshape(n, 3)
+                v_arr = np.asarray(v_native, dtype=np.float64).reshape(n, 3)
+
+                out = self._java_bridge.transformNativeToFrame(
+                    dt_arr,
+                    r_arr.reshape(-1),
+                    v_arr.reshape(-1),
+                    target_frame,
+                )
+                r_out = np.asarray(out.r, dtype=np.float64).reshape(n, 3)
+                v_out = np.asarray(out.v, dtype=np.float64).reshape(n, 3)
+                return r_out, v_out
+            except Exception:
+                # Fallback to Python loop path for compatibility.
+                pass
+
         from org.hipparchus.geometry.euclidean.threed import Vector3D  # type: ignore
         from org.orekit.utils import PVCoordinates  # type: ignore
 
-        n = int(dt_s.size)
         r_itrf = np.empty((n, 3), dtype=np.float64)
         v_itrf = np.empty((n, 3), dtype=np.float64)
 
@@ -1102,7 +1234,109 @@ class Orbit:
     ) -> Tuple[np.ndarray, np.ndarray]:
         return self._transform_native_to_frame(dt_s, r_native, v_native, self._itrf)
 
-    def pv(self, t: Any, frame: FrameKind = "native") -> Tuple[np.ndarray, np.ndarray]:
+    def _resolve_output_frame(self, frame: Any):
+        # Frame may be a convenience string or an Orekit Frame instance.
+        if isinstance(frame, str):
+            key = _normalize_frame_name(frame)
+            if key in ("native", "propagation", "inertial"):
+                return self._frame_native
+            if key in ("itrf", "ecef"):
+                return self._itrf
+            return _resolve_inertial_frame(
+                frame,
+                iers=self.iers,
+                simple_eop=bool(self.simple_eop),
+            )
+        if frame is None:
+            return self._frame_native
+        return frame
+
+    def _interpolate_cached_samples(
+        self,
+        dt_s: np.ndarray,
+        r_samples: np.ndarray,
+        v_samples: np.ndarray,
+        a_samples: Optional[np.ndarray],
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        use_java = (
+            self._java_bridge is not None
+            and int(np.asarray(dt_s).size) >= _JAVA_INTERP_QUERY_THRESHOLD
+        )
+        if use_java:
+            try:
+                out = self._java_bridge.interpolatePV(
+                    np.asarray(dt_s, dtype=np.float64),
+                    int(self._k_min),
+                    float(self._dt),
+                    np.asarray(r_samples, dtype=np.float64).reshape(-1),
+                    np.asarray(v_samples, dtype=np.float64).reshape(-1),
+                    (
+                        np.asarray(a_samples, dtype=np.float64).reshape(-1)
+                        if a_samples is not None
+                        else None
+                    ),
+                )
+                r = np.asarray(out.r, dtype=np.float64).reshape(-1, 3)
+                v = np.asarray(out.v, dtype=np.float64).reshape(-1, 3)
+                return r, v
+            except Exception:
+                pass
+
+        return _hermite_pv_uniform_twosided(
+            np.asarray(dt_s, dtype=np.float64),
+            self._k_min,
+            self._dt,
+            r_samples,
+            v_samples,
+            a_samples,
+        )
+
+    def _interpolate_native_to_frame(
+        self,
+        dt_s: np.ndarray,
+        target_frame: object,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        use_java = (
+            self._java_bridge is not None
+            and int(np.asarray(dt_s).size) >= _JAVA_INTERP_QUERY_THRESHOLD
+        )
+        if use_java:
+            try:
+                out = self._java_bridge.interpolatePVToFrame(
+                    np.asarray(dt_s, dtype=np.float64),
+                    int(self._k_min),
+                    float(self._dt),
+                    np.asarray(self._r_native, dtype=np.float64).reshape(-1),
+                    np.asarray(self._v_native, dtype=np.float64).reshape(-1),
+                    (
+                        np.asarray(self._a_native, dtype=np.float64).reshape(-1)
+                        if self._use_quintic
+                        else None
+                    ),
+                    target_frame,
+                )
+                r = np.asarray(out.r, dtype=np.float64).reshape(-1, 3)
+                v = np.asarray(out.v, dtype=np.float64).reshape(-1, 3)
+                return r, v
+            except Exception:
+                pass
+
+        r_native, v_native = _hermite_pv_uniform_twosided(
+            np.asarray(dt_s, dtype=np.float64),
+            self._k_min,
+            self._dt,
+            self._r_native,
+            self._v_native,
+            self._a_native if self._use_quintic else None,
+        )
+        return self._transform_native_to_frame(
+            np.asarray(dt_s, dtype=np.float64),
+            r_native,
+            v_native,
+            target_frame,
+        )
+
+    def pv(self, t: Any, frame: Any = "native") -> Tuple[np.ndarray, np.ndarray]:
         """
         Query position/velocity at one or more times.
 
@@ -1110,8 +1344,10 @@ class Orbit:
         ----------
         t : astropy.time.Time | float | int | np.ndarray
             Query time(s). Numeric values are seconds from ``epoch``.
-        frame : {"native", "itrf"}, default "native"
-            Output frame. ``native`` is the propagation frame.
+        frame : str | Orekit Frame, default "native"
+            Output frame selection. String values support ``"native"``,
+            ``"itrf"``/``"ecef"``, and inertial frame names; an Orekit Frame
+            instance may also be passed directly.
 
         Returns
         -------
@@ -1123,71 +1359,108 @@ class Orbit:
             return self._fast_impl.pv(t, frame=frame)
 
         dt_s, is_scalar = _dt_seconds_from_time_like(t, self._epoch_ast)
-        # If cache has only the initial sample, allow exact-knot queries without interpolation.
-        if (self._k_max - self._k_min) < 1:
-            if dt_s.size == 1:
-                t0 = float(self._k_min) * self._dt
-                if abs(float(dt_s[0]) - t0) <= 1e-9:
-                    if frame == "native":
-                        return self._r_native[0].copy(), self._v_native[0].copy()
-                    if frame == "itrf":
-                        if self._itrf_query_mode == "cached":
-                            return self._r_itrf[0].copy(), self._v_itrf[0].copy()
-                        r_i, v_i = self._transform_native_to_itrf(
-                            dt_s,
-                            self._r_native[:1],
-                            self._v_native[:1],
-                        )
-                        return r_i[0], v_i[0]
-                    raise ValueError("frame must be 'native' or 'itrf'")
+        if not self._java_engine or self._java_bridge is None:
+            raise RuntimeError("Java orbit backend is not initialized")
 
-        self._ensure_covered(dt_s)
-
-        if frame == "native":
-            r, v = _hermite_pv_uniform_twosided(
-                dt_s,
-                self._k_min,
-                self._dt,
-                self._r_native,
-                self._v_native,
-                self._a_native if self._use_quintic else None,
-            )
-        elif frame == "itrf":
-            if self._itrf_query_mode == "cached":
-                r, v = _hermite_pv_uniform_twosided(
-                    dt_s,
-                    self._k_min,
-                    self._dt,
-                    self._r_itrf,
-                    self._v_itrf,
-                    self._a_itrf if self._use_quintic else None,
-                )
-            else:
-                r_native, v_native = _hermite_pv_uniform_twosided(
-                    dt_s,
-                    self._k_min,
-                    self._dt,
-                    self._r_native,
-                    self._v_native,
-                    self._a_native if self._use_quintic else None,
-                )
-                r, v = self._transform_native_to_itrf(dt_s, r_native, v_native)
-        else:
-            raise ValueError("frame must be 'native' or 'itrf'")
+        target_frame = self._resolve_output_frame(frame)
+        out = self._java_bridge.queryPV(
+            np.asarray(dt_s, dtype=np.float64),
+            target_frame,
+        )
+        r = np.asarray(out.r, dtype=np.float64).reshape(-1, 3)
+        v = np.asarray(out.v, dtype=np.float64).reshape(-1, 3)
 
         if is_scalar:
             return r[0], v[0]
         return r, v
 
-    def pos(self, t: Any, frame: FrameKind = "native") -> np.ndarray:
+    def pos(self, t: Any, frame: Any = "native") -> np.ndarray:
         """Position query helper; equivalent to ``pv(...)[0]``."""
-        r, _ = self.pv(t, frame=frame)
+        if self._mode == "efficiency":
+            r, _ = self._fast_impl.pv(t, frame=frame)
+            return r
+        if not self._java_engine or self._java_bridge is None:
+            raise RuntimeError("Java orbit backend is not initialized")
+
+        dt_s, is_scalar = _dt_seconds_from_time_like(t, self._epoch_ast)
+        target_frame = self._resolve_output_frame(frame)
+        out = self._java_bridge.queryPosition(
+            np.asarray(dt_s, dtype=np.float64),
+            target_frame,
+        )
+        r = np.asarray(out, dtype=np.float64).reshape(-1, 3)
+        if is_scalar:
+            return r[0]
         return r
 
-    def vel(self, t: Any, frame: FrameKind = "native") -> np.ndarray:
+    def vel(self, t: Any, frame: Any = "native") -> np.ndarray:
         """Velocity query helper; equivalent to ``pv(...)[1]``."""
-        _, v = self.pv(t, frame=frame)
+        if self._mode == "efficiency":
+            _, v = self._fast_impl.pv(t, frame=frame)
+            return v
+        if not self._java_engine or self._java_bridge is None:
+            raise RuntimeError("Java orbit backend is not initialized")
+
+        dt_s, is_scalar = _dt_seconds_from_time_like(t, self._epoch_ast)
+        target_frame = self._resolve_output_frame(frame)
+        out = self._java_bridge.queryVelocity(
+            np.asarray(dt_s, dtype=np.float64),
+            target_frame,
+        )
+        v = np.asarray(out, dtype=np.float64).reshape(-1, 3)
+        if is_scalar:
+            return v[0]
         return v
+
+    def pva(self, t: Any, frame: Any = "native") -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """
+        Query position/velocity/acceleration in one call.
+
+        Parameters
+        ----------
+        t : astropy.time.Time | float | int | np.ndarray
+            Query time(s). Numeric values are seconds from ``epoch``.
+        frame : str | Orekit Frame, default "native"
+            Output frame selection.
+        """
+        if self._mode == "efficiency":
+            r, v = self._fast_impl.pv(t, frame=frame)
+            return r, v, np.zeros_like(r)
+
+        dt_s, is_scalar = _dt_seconds_from_time_like(t, self._epoch_ast)
+        if not self._java_engine or self._java_bridge is None:
+            raise RuntimeError("Java orbit backend is not initialized")
+
+        target_frame = self._resolve_output_frame(frame)
+        out = self._java_bridge.queryPVA(
+            np.asarray(dt_s, dtype=np.float64),
+            target_frame,
+        )
+        r = np.asarray(out.r, dtype=np.float64).reshape(-1, 3)
+        v = np.asarray(out.v, dtype=np.float64).reshape(-1, 3)
+        a = np.asarray(out.a, dtype=np.float64).reshape(-1, 3)
+        if is_scalar:
+            return r[0], v[0], a[0]
+        return r, v, a
+
+    def acc(self, t: Any, frame: Any = "native") -> np.ndarray:
+        """Acceleration query helper; equivalent to ``pva(...)[2]``."""
+        if self._mode == "efficiency":
+            _, _v = self._fast_impl.pv(t, frame=frame)
+            return np.zeros_like(_v)
+        if not self._java_engine or self._java_bridge is None:
+            raise RuntimeError("Java orbit backend is not initialized")
+
+        dt_s, is_scalar = _dt_seconds_from_time_like(t, self._epoch_ast)
+        target_frame = self._resolve_output_frame(frame)
+        out = self._java_bridge.queryAcceleration(
+            np.asarray(dt_s, dtype=np.float64),
+            target_frame,
+        )
+        a = np.asarray(out, dtype=np.float64).reshape(-1, 3)
+        if is_scalar:
+            return a[0]
+        return a
 
     def pv_itrf(self, t: Any) -> Tuple[np.ndarray, np.ndarray]:
         """Convenience wrapper for ``pv(t, frame=\"itrf\")``."""
@@ -1362,6 +1635,111 @@ class Orbit:
         if (self._k_max - self._k_min) < 1:
             raise RuntimeError("Cache has insufficient samples for interpolation")
 
+    def _sample_ephemeris_at_knots(
+        self,
+        ephem,
+        ks: np.ndarray,
+        *,
+        use_quintic: bool,
+        cache_itrf: bool,
+    ) -> Tuple[
+        np.ndarray,
+        np.ndarray,
+        Optional[np.ndarray],
+        Optional[np.ndarray],
+        Optional[np.ndarray],
+        Optional[np.ndarray],
+    ]:
+        n_new = int(ks.size)
+        if n_new == 0:
+            empty = np.empty((0, 3), dtype=np.float64)
+            return (
+                empty,
+                empty,
+                empty if use_quintic else None,
+                empty if cache_itrf else None,
+                empty if cache_itrf else None,
+                empty if (cache_itrf and use_quintic) else None,
+            )
+
+        if self._java_bridge is not None:
+            try:
+                dt_query = ks.astype(np.float64) * float(self._dt)
+                sampled = self._java_bridge.sampleEphemeris(
+                    ephem,
+                    dt_query,
+                    bool(use_quintic),
+                    bool(cache_itrf),
+                )
+                rN = np.asarray(sampled.rNative, dtype=np.float64).reshape(n_new, 3)
+                vN = np.asarray(sampled.vNative, dtype=np.float64).reshape(n_new, 3)
+                aN = (
+                    np.asarray(sampled.aNative, dtype=np.float64).reshape(n_new, 3)
+                    if use_quintic
+                    else None
+                )
+                rI = (
+                    np.asarray(sampled.rItrf, dtype=np.float64).reshape(n_new, 3)
+                    if cache_itrf
+                    else None
+                )
+                vI = (
+                    np.asarray(sampled.vItrf, dtype=np.float64).reshape(n_new, 3)
+                    if cache_itrf
+                    else None
+                )
+                aI = (
+                    np.asarray(sampled.aItrf, dtype=np.float64).reshape(n_new, 3)
+                    if (cache_itrf and use_quintic)
+                    else None
+                )
+                return rN, vN, aN, rI, vI, aI
+            except Exception:
+                # Keep behavior robust if Java backend is unavailable at runtime.
+                pass
+
+        t0 = self._t0_abs
+        rN = np.empty((n_new, 3), dtype=np.float64)
+        vN = np.empty((n_new, 3), dtype=np.float64)
+        aN: Optional[np.ndarray]
+        if use_quintic:
+            aN = np.empty((n_new, 3), dtype=np.float64)
+        else:
+            aN = None
+        rI: Optional[np.ndarray]
+        vI: Optional[np.ndarray]
+        aI: Optional[np.ndarray]
+        if cache_itrf:
+            rI = np.empty((n_new, 3), dtype=np.float64)
+            vI = np.empty((n_new, 3), dtype=np.float64)
+            if use_quintic:
+                aI = np.empty((n_new, 3), dtype=np.float64)
+            else:
+                aI = None
+        else:
+            rI = None
+            vI = None
+            aI = None
+
+        for j, k in enumerate(ks):
+            d = t0.shiftedBy(float(k) * self._dt)
+            st = ephem.propagate(d)
+
+            pv = st.getPVCoordinates(self._frame_native)
+            rN[j, :] = pv.getPosition().toArray()
+            vN[j, :] = pv.getVelocity().toArray()
+            if use_quintic and aN is not None:
+                aN[j, :] = _pv_acceleration_xyz(pv)
+
+            if cache_itrf and rI is not None and vI is not None:
+                pvi = st.getPVCoordinates(self._itrf)
+                rI[j, :] = pvi.getPosition().toArray()
+                vI[j, :] = pvi.getVelocity().toArray()
+                if use_quintic and aI is not None:
+                    aI[j, :] = _pv_acceleration_xyz(pvi)
+
+        return rN, vN, aN, rI, vI, aI
+
     def _extend_forward_to(self, k_target: int) -> None:
         if k_target <= self._k_max:
             return
@@ -1379,45 +1757,23 @@ class Orbit:
             ephem = gen.getGeneratedEphemeris()
 
             ks = np.arange(self._k_max + 1, k_target + 1, dtype=np.int64)
-            n_new = int(ks.size)
-
-            rN = np.empty((n_new, 3), dtype=np.float64)
-            vN = np.empty((n_new, 3), dtype=np.float64)
             use_quintic = self._use_quintic
-            if use_quintic:
-                aN = np.empty((n_new, 3), dtype=np.float64)
-            cache_itrf = self._itrf_query_mode == "cached"
-            if cache_itrf:
-                rI = np.empty((n_new, 3), dtype=np.float64)
-                vI = np.empty((n_new, 3), dtype=np.float64)
-                if use_quintic:
-                    aI = np.empty((n_new, 3), dtype=np.float64)
-
-            for j, k in enumerate(ks):
-                d = t0.shiftedBy(float(k) * dt)
-                st = ephem.propagate(d)
-
-                pv = st.getPVCoordinates(self._frame_native)
-                rN[j, :] = pv.getPosition().toArray()
-                vN[j, :] = pv.getVelocity().toArray()
-                if use_quintic:
-                    aN[j, :] = _pv_acceleration_xyz(pv)
-
-                if cache_itrf:
-                    pvi = st.getPVCoordinates(self._itrf)
-                    rI[j, :] = pvi.getPosition().toArray()
-                    vI[j, :] = pvi.getVelocity().toArray()
-                    if use_quintic:
-                        aI[j, :] = _pv_acceleration_xyz(pvi)
+            cache_itrf = self._itrf_query_mode == "cached" and self._cache_itrf_samples
+            rN, vN, aN, rI, vI, aI = self._sample_ephemeris_at_knots(
+                ephem,
+                ks,
+                use_quintic=use_quintic,
+                cache_itrf=cache_itrf,
+            )
 
             self._r_native = np.vstack([self._r_native, rN])
             self._v_native = np.vstack([self._v_native, vN])
-            if use_quintic:
+            if use_quintic and aN is not None:
                 self._a_native = np.vstack([self._a_native, aN])
-            if cache_itrf:
+            if cache_itrf and rI is not None and vI is not None:
                 self._r_itrf = np.vstack([self._r_itrf, rI])
                 self._v_itrf = np.vstack([self._v_itrf, vI])
-                if use_quintic:
+                if use_quintic and aI is not None:
                     self._a_itrf = np.vstack([self._a_itrf, aI])
 
             self._k_max = int(k_target)
@@ -1442,45 +1798,23 @@ class Orbit:
             ephem = gen.getGeneratedEphemeris()
 
             ks = np.arange(k_target, self._k_min, dtype=np.int64)
-            n_new = int(ks.size)
-
-            rN = np.empty((n_new, 3), dtype=np.float64)
-            vN = np.empty((n_new, 3), dtype=np.float64)
             use_quintic = self._use_quintic
-            if use_quintic:
-                aN = np.empty((n_new, 3), dtype=np.float64)
-            cache_itrf = self._itrf_query_mode == "cached"
-            if cache_itrf:
-                rI = np.empty((n_new, 3), dtype=np.float64)
-                vI = np.empty((n_new, 3), dtype=np.float64)
-                if use_quintic:
-                    aI = np.empty((n_new, 3), dtype=np.float64)
-
-            for j, k in enumerate(ks):
-                d = t0.shiftedBy(float(k) * dt)
-                st = ephem.propagate(d)
-
-                pv = st.getPVCoordinates(self._frame_native)
-                rN[j, :] = pv.getPosition().toArray()
-                vN[j, :] = pv.getVelocity().toArray()
-                if use_quintic:
-                    aN[j, :] = _pv_acceleration_xyz(pv)
-
-                if cache_itrf:
-                    pvi = st.getPVCoordinates(self._itrf)
-                    rI[j, :] = pvi.getPosition().toArray()
-                    vI[j, :] = pvi.getVelocity().toArray()
-                    if use_quintic:
-                        aI[j, :] = _pv_acceleration_xyz(pvi)
+            cache_itrf = self._itrf_query_mode == "cached" and self._cache_itrf_samples
+            rN, vN, aN, rI, vI, aI = self._sample_ephemeris_at_knots(
+                ephem,
+                ks,
+                use_quintic=use_quintic,
+                cache_itrf=cache_itrf,
+            )
 
             self._r_native = np.vstack([rN, self._r_native])
             self._v_native = np.vstack([vN, self._v_native])
-            if use_quintic:
+            if use_quintic and aN is not None:
                 self._a_native = np.vstack([aN, self._a_native])
-            if cache_itrf:
+            if cache_itrf and rI is not None and vI is not None:
                 self._r_itrf = np.vstack([rI, self._r_itrf])
                 self._v_itrf = np.vstack([vI, self._v_itrf])
-                if use_quintic:
+                if use_quintic and aI is not None:
                     self._a_itrf = np.vstack([aI, self._a_itrf])
 
             self._k_min = int(k_target)
@@ -1499,11 +1833,14 @@ class Orbit:
         obj.dt_save_s = float(fast_impl.dt)
         obj.iers = None
         obj.simple_eop = True
-        obj.itrf_query_mode = "cached"
+        obj.itrf_query_mode = "transform"
         obj.interpolation_mode = "cubic"
         # Unified-mode internals
         obj._mode = "efficiency"
         obj._fast_impl = fast_impl
+        obj._java_bridge = None
+        obj._java_engine = False
+        obj._cache_itrf_samples = False
         obj._dt = float(fast_impl.dt)
         obj._epoch_ast = fast_impl.epoch
         return obj
@@ -1529,7 +1866,7 @@ class Orbit:
         # frames/EOP used for ITRF + force models
         iers: Optional[object] = None,
         simple_eop: bool = True,
-        itrf_query_mode: ITRFQueryMode = "cached",
+        itrf_query_mode: ITRFQueryMode = "transform",
         interpolation_mode: InterpolationMode = "cubic",
         # integrator
         position_tolerance_m: float = DEFAULT_POSITION_TOLERANCE_M,
@@ -1585,11 +1922,11 @@ class Orbit:
 
         Notes
         -----
-        - ``itrf_query_mode=\"cached\"`` is faster for repeated Earth-fixed queries.
-            ``\"transform\"`` computes ITRF from native-frame interpolation at query
-            time for stronger frame consistency.
-        - ``interpolation_mode=\"cubic\"`` is the default speed/accuracy tradeoff;
-            ``\"quintic\"`` uses acceleration-aware interpolation.
+        - When force settings are pure two-body (Newtonian gravity only), this
+            constructor automatically uses Orekit's analytical
+            ``KeplerianPropagator`` for lower overhead.
+        - Otherwise a ``NumericalPropagator`` is used with configured force
+            models.
         - Force model flags expose common Orekit force options without requiring
             direct Orekit setup in user code.
         """
@@ -1639,50 +1976,69 @@ class Orbit:
         )
         state0 = SpacecraftState(orbit0, float(mass_kg))
 
-        propagator = _build_numerical_propagator(
-            initial_orbit=orbit0,
-            initial_state=state0,
-            position_tolerance_m=float(position_tolerance_m),
-            min_step_s=float(min_step_s),
-            max_step_s=float(max_step_s),
-            initial_step_s=float(initial_step_s),
-        )
-
-        _configure_force_models(
-            propagator=propagator,
-            itrf=itrf,
-            inertial_frame=inertial,
-            utc=utc,
-            iers=iers,
-            simple_eop=bool(simple_eop),
-            mu=mu0,
-            ae=ae,
-            earth_shape=earth_shape,
-            mass_kg=float(mass_kg),
-            gravity_model=gravity_model,
-            gravity_degree=int(gravity_degree),
-            gravity_order=int(gravity_order),
+        use_keplerian_two_body = _can_use_keplerian_two_body(
+            gravity_model=str(gravity_model),
             enable_drag=bool(enable_drag),
-            drag_area_m2=float(drag_area_m2),
-            drag_cd=float(drag_cd),
-            solar_activity_strength=solar_activity_strength,
             enable_third_body=bool(enable_third_body),
-            third_bodies=tuple(third_bodies),
             enable_solid_tides=bool(enable_solid_tides),
-            solid_tides_bodies=tuple(solid_tides_bodies),
             enable_ocean_tides=bool(enable_ocean_tides),
-            ocean_degree=int(ocean_degree),
-            ocean_order=int(ocean_order),
             enable_relativity=bool(enable_relativity),
             enable_de_sitter=bool(enable_de_sitter),
             enable_lense_thirring=bool(enable_lense_thirring),
             enable_srp=bool(enable_srp),
-            srp_area_m2=float(srp_area_m2),
-            srp_cr=float(srp_cr),
-            srp_occult_moon=bool(srp_occult_moon),
             enable_erp=bool(enable_erp),
-            erp_angular_resolution_deg=float(erp_angular_resolution_deg),
         )
+
+        if use_keplerian_two_body:
+            propagator = _build_keplerian_propagator(
+                initial_orbit=orbit0,
+                initial_state=state0,
+            )
+        else:
+            propagator = _build_numerical_propagator(
+                initial_orbit=orbit0,
+                initial_state=state0,
+                position_tolerance_m=float(position_tolerance_m),
+                min_step_s=float(min_step_s),
+                max_step_s=float(max_step_s),
+                initial_step_s=float(initial_step_s),
+            )
+
+            _configure_force_models(
+                propagator=propagator,
+                itrf=itrf,
+                inertial_frame=inertial,
+                utc=utc,
+                iers=iers,
+                simple_eop=bool(simple_eop),
+                mu=mu0,
+                ae=ae,
+                earth_shape=earth_shape,
+                mass_kg=float(mass_kg),
+                gravity_model=gravity_model,
+                gravity_degree=int(gravity_degree),
+                gravity_order=int(gravity_order),
+                enable_drag=bool(enable_drag),
+                drag_area_m2=float(drag_area_m2),
+                drag_cd=float(drag_cd),
+                solar_activity_strength=solar_activity_strength,
+                enable_third_body=bool(enable_third_body),
+                third_bodies=tuple(third_bodies),
+                enable_solid_tides=bool(enable_solid_tides),
+                solid_tides_bodies=tuple(solid_tides_bodies),
+                enable_ocean_tides=bool(enable_ocean_tides),
+                ocean_degree=int(ocean_degree),
+                ocean_order=int(ocean_order),
+                enable_relativity=bool(enable_relativity),
+                enable_de_sitter=bool(enable_de_sitter),
+                enable_lense_thirring=bool(enable_lense_thirring),
+                enable_srp=bool(enable_srp),
+                srp_area_m2=float(srp_area_m2),
+                srp_cr=float(srp_cr),
+                srp_occult_moon=bool(srp_occult_moon),
+                enable_erp=bool(enable_erp),
+                erp_angular_resolution_deg=float(erp_angular_resolution_deg),
+            )
 
         return cls(
             propagator,
@@ -1757,7 +2113,7 @@ class Orbit:
         # frames/EOP used for ITRF in the cache + force models that need it
         iers: Optional[object] = None,
         simple_eop: bool = True,
-        itrf_query_mode: ITRFQueryMode = "cached",
+        itrf_query_mode: ITRFQueryMode = "transform",
         interpolation_mode: InterpolationMode = "cubic",
         # integrator
         position_tolerance_m: float = DEFAULT_POSITION_TOLERANCE_M,
@@ -1826,50 +2182,69 @@ class Orbit:
                 state0 = SpacecraftState(orbit0, float(mass_kg))
             mass_used = float(mass_kg)
 
-        propagator = _build_numerical_propagator(
-            initial_orbit=orbit0,
-            initial_state=state0,
-            position_tolerance_m=float(position_tolerance_m),
-            min_step_s=float(min_step_s),
-            max_step_s=float(max_step_s),
-            initial_step_s=float(initial_step_s),
-        )
-
-        _configure_force_models(
-            propagator=propagator,
-            itrf=itrf,
-            inertial_frame=frame0,  # may be inertial; force models use their own frames anyway
-            utc=utc,
-            iers=iers,
-            simple_eop=bool(simple_eop),
-            mu=mu0,
-            ae=ae,
-            earth_shape=earth_shape,
-            mass_kg=mass_used,
-            gravity_model=gravity_model,
-            gravity_degree=int(gravity_degree),
-            gravity_order=int(gravity_order),
+        use_keplerian_two_body = _can_use_keplerian_two_body(
+            gravity_model=str(gravity_model),
             enable_drag=bool(enable_drag),
-            drag_area_m2=float(drag_area_m2),
-            drag_cd=float(drag_cd),
-            solar_activity_strength=solar_activity_strength,
             enable_third_body=bool(enable_third_body),
-            third_bodies=tuple(third_bodies),
             enable_solid_tides=bool(enable_solid_tides),
-            solid_tides_bodies=tuple(solid_tides_bodies),
             enable_ocean_tides=bool(enable_ocean_tides),
-            ocean_degree=int(ocean_degree),
-            ocean_order=int(ocean_order),
             enable_relativity=bool(enable_relativity),
             enable_de_sitter=bool(enable_de_sitter),
             enable_lense_thirring=bool(enable_lense_thirring),
             enable_srp=bool(enable_srp),
-            srp_area_m2=float(srp_area_m2),
-            srp_cr=float(srp_cr),
-            srp_occult_moon=bool(srp_occult_moon),
             enable_erp=bool(enable_erp),
-            erp_angular_resolution_deg=float(erp_angular_resolution_deg),
         )
+
+        if use_keplerian_two_body:
+            propagator = _build_keplerian_propagator(
+                initial_orbit=orbit0,
+                initial_state=state0,
+            )
+        else:
+            propagator = _build_numerical_propagator(
+                initial_orbit=orbit0,
+                initial_state=state0,
+                position_tolerance_m=float(position_tolerance_m),
+                min_step_s=float(min_step_s),
+                max_step_s=float(max_step_s),
+                initial_step_s=float(initial_step_s),
+            )
+
+            _configure_force_models(
+                propagator=propagator,
+                itrf=itrf,
+                inertial_frame=frame0,  # may be inertial; force models use their own frames anyway
+                utc=utc,
+                iers=iers,
+                simple_eop=bool(simple_eop),
+                mu=mu0,
+                ae=ae,
+                earth_shape=earth_shape,
+                mass_kg=mass_used,
+                gravity_model=gravity_model,
+                gravity_degree=int(gravity_degree),
+                gravity_order=int(gravity_order),
+                enable_drag=bool(enable_drag),
+                drag_area_m2=float(drag_area_m2),
+                drag_cd=float(drag_cd),
+                solar_activity_strength=solar_activity_strength,
+                enable_third_body=bool(enable_third_body),
+                third_bodies=tuple(third_bodies),
+                enable_solid_tides=bool(enable_solid_tides),
+                solid_tides_bodies=tuple(solid_tides_bodies),
+                enable_ocean_tides=bool(enable_ocean_tides),
+                ocean_degree=int(ocean_degree),
+                ocean_order=int(ocean_order),
+                enable_relativity=bool(enable_relativity),
+                enable_de_sitter=bool(enable_de_sitter),
+                enable_lense_thirring=bool(enable_lense_thirring),
+                enable_srp=bool(enable_srp),
+                srp_area_m2=float(srp_area_m2),
+                srp_cr=float(srp_cr),
+                srp_occult_moon=bool(srp_occult_moon),
+                enable_erp=bool(enable_erp),
+                erp_angular_resolution_deg=float(erp_angular_resolution_deg),
+            )
 
         return cls(
             propagator,
@@ -1894,7 +2269,7 @@ class Orbit:
         dt_save_s: float = 60.0,
         iers: Optional[object] = None,
         simple_eop: bool = True,
-        itrf_query_mode: ITRFQueryMode = "cached",
+        itrf_query_mode: ITRFQueryMode = "transform",
         interpolation_mode: InterpolationMode = "cubic",
         # integrator
         position_tolerance_m: float = DEFAULT_POSITION_TOLERANCE_M,
@@ -1987,50 +2362,69 @@ class Orbit:
         orbit0 = CartesianOrbit(pv0, frame0, date0, mu0)
         state0 = SpacecraftState(orbit0, float(mass_kg))
 
-        propagator = _build_numerical_propagator(
-            initial_orbit=orbit0,
-            initial_state=state0,
-            position_tolerance_m=float(position_tolerance_m),
-            min_step_s=float(min_step_s),
-            max_step_s=float(max_step_s),
-            initial_step_s=float(initial_step_s),
-        )
-
-        _configure_force_models(
-            propagator=propagator,
-            itrf=itrf,
-            inertial_frame=inertial,
-            utc=utc,
-            iers=iers,
-            simple_eop=bool(simple_eop),
-            mu=mu0,
-            ae=ae,
-            earth_shape=earth_shape,
-            mass_kg=float(mass_kg),
-            gravity_model=gravity_model,
-            gravity_degree=int(gravity_degree),
-            gravity_order=int(gravity_order),
+        use_keplerian_two_body = _can_use_keplerian_two_body(
+            gravity_model=str(gravity_model),
             enable_drag=bool(enable_drag),
-            drag_area_m2=float(drag_area_m2),
-            drag_cd=float(drag_cd),
-            solar_activity_strength=solar_activity_strength,
             enable_third_body=bool(enable_third_body),
-            third_bodies=tuple(third_bodies),
             enable_solid_tides=bool(enable_solid_tides),
-            solid_tides_bodies=tuple(solid_tides_bodies),
             enable_ocean_tides=bool(enable_ocean_tides),
-            ocean_degree=int(ocean_degree),
-            ocean_order=int(ocean_order),
             enable_relativity=bool(enable_relativity),
             enable_de_sitter=bool(enable_de_sitter),
             enable_lense_thirring=bool(enable_lense_thirring),
             enable_srp=bool(enable_srp),
-            srp_area_m2=float(srp_area_m2),
-            srp_cr=float(srp_cr),
-            srp_occult_moon=bool(srp_occult_moon),
             enable_erp=bool(enable_erp),
-            erp_angular_resolution_deg=float(erp_angular_resolution_deg),
         )
+
+        if use_keplerian_two_body:
+            propagator = _build_keplerian_propagator(
+                initial_orbit=orbit0,
+                initial_state=state0,
+            )
+        else:
+            propagator = _build_numerical_propagator(
+                initial_orbit=orbit0,
+                initial_state=state0,
+                position_tolerance_m=float(position_tolerance_m),
+                min_step_s=float(min_step_s),
+                max_step_s=float(max_step_s),
+                initial_step_s=float(initial_step_s),
+            )
+
+            _configure_force_models(
+                propagator=propagator,
+                itrf=itrf,
+                inertial_frame=inertial,
+                utc=utc,
+                iers=iers,
+                simple_eop=bool(simple_eop),
+                mu=mu0,
+                ae=ae,
+                earth_shape=earth_shape,
+                mass_kg=float(mass_kg),
+                gravity_model=gravity_model,
+                gravity_degree=int(gravity_degree),
+                gravity_order=int(gravity_order),
+                enable_drag=bool(enable_drag),
+                drag_area_m2=float(drag_area_m2),
+                drag_cd=float(drag_cd),
+                solar_activity_strength=solar_activity_strength,
+                enable_third_body=bool(enable_third_body),
+                third_bodies=tuple(third_bodies),
+                enable_solid_tides=bool(enable_solid_tides),
+                solid_tides_bodies=tuple(solid_tides_bodies),
+                enable_ocean_tides=bool(enable_ocean_tides),
+                ocean_degree=int(ocean_degree),
+                ocean_order=int(ocean_order),
+                enable_relativity=bool(enable_relativity),
+                enable_de_sitter=bool(enable_de_sitter),
+                enable_lense_thirring=bool(enable_lense_thirring),
+                enable_srp=bool(enable_srp),
+                srp_area_m2=float(srp_area_m2),
+                srp_cr=float(srp_cr),
+                srp_occult_moon=bool(srp_occult_moon),
+                enable_erp=bool(enable_erp),
+                erp_angular_resolution_deg=float(erp_angular_resolution_deg),
+            )
 
         return cls(
             propagator,

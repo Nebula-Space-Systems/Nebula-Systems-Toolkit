@@ -44,3 +44,16 @@ all = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["nebula"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"nebula/propagation/java/OrekitOrbitBridge.jar" = "nebula/propagation/java/OrekitOrbitBridge.jar"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "nebula/**",
+    "tests/**",
+    "examples/**",
+    "README.md",
+    "LICENSE",
+    "pyproject.toml",
+]

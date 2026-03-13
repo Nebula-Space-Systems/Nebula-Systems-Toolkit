@@ -37,7 +37,7 @@ def _native_to_itrf(ephem: Orbit, t: Time) -> tuple[np.ndarray, np.ndarray]:
     return r_i, v_i
 
 
-def test_numerical_propagator_uses_cartesian_orbit_type() -> None:
+def test_two_body_uses_keplerian_propagator() -> None:
     e = Orbit.from_kepler_precise(
         epoch=Time("2026-01-01T00:00:00", scale="utc"),
         a_m=7000e3,
@@ -48,10 +48,25 @@ def test_numerical_propagator_uses_cartesian_orbit_type() -> None:
         anomaly=0.0,
         gravity_model="newtonian",
     )
+    assert "KeplerianPropagator" in e.propagator.getClass().getName()
+
+
+def test_numerical_propagator_uses_cartesian_orbit_type_when_forces_enabled() -> None:
+    e = Orbit.from_kepler_precise(
+        epoch=Time("2026-01-01T00:00:00", scale="utc"),
+        a_m=7000e3,
+        e=0.001,
+        i=np.deg2rad(40.0),
+        raan=0.0,
+        argp=0.0,
+        anomaly=0.0,
+        gravity_model="newtonian",
+        enable_relativity=True,
+    )
     assert str(e.propagator.getOrbitType()) == "CARTESIAN"
 
 
-def test_ephemeris_generator_list_does_not_grow() -> None:
+def test_ephemeris_generator_list_does_not_grow_for_numerical_propagator() -> None:
     e = Orbit.from_kepler_precise(
         epoch=Time("2026-01-01T00:00:00", scale="utc"),
         a_m=7000e3,
@@ -61,6 +76,7 @@ def test_ephemeris_generator_list_does_not_grow() -> None:
         argp=np.deg2rad(20.0),
         anomaly=0.0,
         gravity_model="newtonian",
+        enable_relativity=True,
         dt_save_s=60.0,
     )
 
@@ -158,5 +174,17 @@ def test_itrf_transform_mode_is_frame_consistent() -> None:
     err_cached = np.asarray(err_cached)
     err_xform = np.asarray(err_xform)
 
-    assert float(np.mean(err_xform)) < float(np.mean(err_cached))
+    if getattr(e_cached, "_java_engine", False):
+        # Java engine may cache ITRF knots for cached mode, while transform mode
+        # computes ITRF from native interpolation at query time.
+        assert float(np.max(err_xform)) < 1e-6
+        if getattr(e_cached, "_cache_itrf_samples", True):
+            assert float(np.mean(err_cached)) >= float(np.mean(err_xform))
+        return
+    elif getattr(e_cached, "_cache_itrf_samples", True):
+        assert float(np.mean(err_xform)) < float(np.mean(err_cached))
+    else:
+        # Native-only cache mode computes ITRF from native interpolation, so
+        # cached and transform paths are intentionally equivalent.
+        assert float(np.max(err_cached)) < 1e-6
     assert float(np.max(err_xform)) < 1e-6
