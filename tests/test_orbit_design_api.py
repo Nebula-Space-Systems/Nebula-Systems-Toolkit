@@ -4,7 +4,8 @@ import numpy as np
 import astropy.units as u
 from astropy.time import Time
 
-from nebula.propagation.orbit import Orbit, astropy_time_to_orekit_date
+from nebula.propagation.orbit import Orbit
+from nebula.time_utils import astropy_time_to_orekit_date
 
 
 def test_orbit_quantity_accessors_shape_and_units() -> None:

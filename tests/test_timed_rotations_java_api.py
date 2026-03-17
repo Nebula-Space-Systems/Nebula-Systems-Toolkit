@@ -14,7 +14,7 @@ astropy_time = pytest.importorskip("astropy.time")
 astropy_coordinates = pytest.importorskip("astropy.coordinates")
 u = pytest.importorskip("astropy.units")
 
-from nebula.propagation.orbit import astropy_time_to_orekit_date
+from nebula.time_utils import astropy_time_to_orekit_date
 from nebula.transforms import transform
 
 Time = astropy_time.Time

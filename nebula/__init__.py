@@ -15,6 +15,7 @@ _SUBPACKAGES = {
     "propagation",
     "plotting",
 }
+_MODULE_EXPORTS = {"time_utils"}
 
 __all__ = [
     "__version__",
@@ -24,11 +25,12 @@ __all__ = [
     "transforms",
     "propagation",
     "plotting",
+    "time_utils",
 ]
 
 
 def __getattr__(name: str) -> Any:
-    if name in _SUBPACKAGES:
+    if name in _SUBPACKAGES or name in _MODULE_EXPORTS:
         mod = import_module(f"nebula.{name}")
         globals()[name] = mod
         return mod
@@ -36,4 +38,4 @@ def __getattr__(name: str) -> Any:
 
 
 def __dir__() -> list[str]:
-    return sorted(set(globals().keys()) | _SUBPACKAGES)
+    return sorted(set(globals().keys()) | _SUBPACKAGES | _MODULE_EXPORTS)

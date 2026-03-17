@@ -6,15 +6,17 @@ handling while all timed transform loops execute in Java.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Optional, Tuple, Union
 
 import astropy.units as u
 import jpype
 import numpy as np
-from astropy.time import Time
 
-from nebula.propagation.orbit import astropy_time_to_orekit_date
+from nebula.time_utils import (
+    TimedTransformTimeSpec,
+    astropy_time_to_orekit_date,
+    normalize_timed_transform_time_input,
+)
 
 from ._timed_rotations_java_bridge import (
     get_timed_rotation_bridge_class,
@@ -28,6 +30,7 @@ _JavaTimedRotationBridge = None
 FramesFactory = None
 IERSConventions = None
 AbsoluteDate = None
+TimeScalesFactory = None
 
 
 def initialize_timed_rotations(*, data_path: str | None = None) -> None:
@@ -39,6 +42,7 @@ def initialize_timed_rotations(*, data_path: str | None = None) -> None:
 def _bind_java() -> None:
     global _RUNTIME_BOUND
     global _JavaTimedRotationBridge, FramesFactory, IERSConventions, AbsoluteDate
+    global TimeScalesFactory
 
     if _RUNTIME_BOUND:
         return
@@ -47,10 +51,12 @@ def _bind_java() -> None:
 
     from org.orekit.frames import FramesFactory as _FramesFactory  # type: ignore
     from org.orekit.time import AbsoluteDate as _AbsoluteDate  # type: ignore
+    from org.orekit.time import TimeScalesFactory as _TimeScalesFactory  # type: ignore
     from org.orekit.utils import IERSConventions as _IERSConventions  # type: ignore
 
     FramesFactory = _FramesFactory
     AbsoluteDate = _AbsoluteDate
+    TimeScalesFactory = _TimeScalesFactory
     IERSConventions = _IERSConventions
     _JavaTimedRotationBridge = get_timed_rotation_bridge_class()
     _RUNTIME_BOUND = True
@@ -117,214 +123,16 @@ def _resolve_frame(frame_like: Any, *, iers, simple_eop: bool):
     return frame_like
 
 
-def _is_absolute_date(obj: Any) -> bool:
+def _normalize_time_input(time: Any) -> TimedTransformTimeSpec:
     _bind_java()
-    try:
-        return bool(AbsoluteDate.class_.isInstance(obj))
-    except Exception:
-        return False
-
-
-def _is_scalar_astropy_time(obj: Any) -> bool:
-    return isinstance(obj, Time) and getattr(obj, "shape", None) == ()
-
-
-@dataclass(frozen=True)
-class _TimeSpec:
-    mode: str  # "offsets" or "dates"
-    shape: tuple[int, ...]
-    epoch: Any | None
-    offsets: np.ndarray | None
-    dates: np.ndarray | None
-
-
-def _normalize_time_input(time: Any) -> _TimeSpec:
-    _bind_java()
-
-    if _is_absolute_date(time):
-        return _TimeSpec(
-            mode="dates",
-            shape=(),
-            epoch=None,
-            offsets=None,
-            dates=np.asarray([time], dtype=object),
-        )
-
-    if isinstance(time, Time):
-        if getattr(time, "shape", None) == ():
-            return _TimeSpec(
-                mode="offsets",
-                shape=(),
-                epoch=astropy_time_to_orekit_date(time),
-                offsets=np.asarray([0.0], dtype=np.float64),
-                dates=None,
-            )
-
-        unix = np.asarray(time.utc.unix, dtype=np.float64)
-        if unix.ndim == 0:
-            epoch_unix = float(unix)
-            return _TimeSpec(
-                mode="offsets",
-                shape=(),
-                epoch=astropy_time_to_orekit_date(
-                    Time(epoch_unix, format="unix", scale="utc")
-                ),
-                offsets=np.asarray([0.0], dtype=np.float64),
-                dates=None,
-            )
-
-        flat = np.ascontiguousarray(unix.reshape(-1), dtype=np.float64)
-        if flat.size == 0:
-            return _TimeSpec(
-                mode="offsets",
-                shape=tuple(unix.shape),
-                epoch=astropy_time_to_orekit_date(
-                    Time(0.0, format="unix", scale="utc")
-                ),
-                offsets=np.asarray([], dtype=np.float64),
-                dates=None,
-            )
-
-        epoch_unix = float(flat[0])
-        return _TimeSpec(
-            mode="offsets",
-            shape=tuple(unix.shape),
-            epoch=astropy_time_to_orekit_date(
-                Time(epoch_unix, format="unix", scale="utc")
-            ),
-            offsets=np.ascontiguousarray(flat - epoch_unix, dtype=np.float64),
-            dates=None,
-        )
-
-    if isinstance(time, u.Quantity):
-        secs = np.asarray(time.to_value(u.s), dtype=np.float64)
-        if secs.ndim == 0:
-            unix_s = float(secs)
-            return _TimeSpec(
-                mode="offsets",
-                shape=(),
-                epoch=astropy_time_to_orekit_date(
-                    Time(unix_s, format="unix", scale="utc")
-                ),
-                offsets=np.asarray([0.0], dtype=np.float64),
-                dates=None,
-            )
-        flat = np.ascontiguousarray(secs.reshape(-1), dtype=np.float64)
-        if flat.size == 0:
-            return _TimeSpec(
-                mode="offsets",
-                shape=tuple(secs.shape),
-                epoch=astropy_time_to_orekit_date(
-                    Time(0.0, format="unix", scale="utc")
-                ),
-                offsets=np.asarray([], dtype=np.float64),
-                dates=None,
-            )
-        epoch_unix = float(flat[0])
-        return _TimeSpec(
-            mode="offsets",
-            shape=tuple(secs.shape),
-            epoch=astropy_time_to_orekit_date(
-                Time(epoch_unix, format="unix", scale="utc")
-            ),
-            offsets=np.ascontiguousarray(flat - epoch_unix, dtype=np.float64),
-            dates=None,
-        )
-
-    if isinstance(time, (float, int, np.floating, np.integer)) and not isinstance(
-        time, bool
-    ):
-        unix_s = float(time)
-        return _TimeSpec(
-            mode="offsets",
-            shape=(),
-            epoch=astropy_time_to_orekit_date(Time(unix_s, format="unix", scale="utc")),
-            offsets=np.asarray([0.0], dtype=np.float64),
-            dates=None,
-        )
-
-    if isinstance(time, (list, tuple, np.ndarray)):
-        arr_obj = np.asarray(time, dtype=object)
-        if arr_obj.ndim == 0:
-            scalar_obj = arr_obj.item()
-            if _is_absolute_date(scalar_obj):
-                return _TimeSpec(
-                    mode="dates",
-                    shape=(),
-                    epoch=None,
-                    offsets=None,
-                    dates=np.asarray([scalar_obj], dtype=object),
-                )
-            if _is_scalar_astropy_time(scalar_obj):
-                return _normalize_time_input(scalar_obj)
-            return _normalize_time_input(float(scalar_obj))
-
-        if arr_obj.size > 0:
-            first = arr_obj.flat[0]
-            if _is_absolute_date(first):
-                for item in arr_obj.flat:
-                    if not _is_absolute_date(item):
-                        raise TypeError(
-                            "time iterable with AbsoluteDate values must contain only AbsoluteDate entries"
-                        )
-                return _TimeSpec(
-                    mode="dates",
-                    shape=tuple(arr_obj.shape),
-                    epoch=None,
-                    offsets=None,
-                    dates=np.ascontiguousarray(arr_obj.reshape(-1), dtype=object),
-                )
-            if _is_scalar_astropy_time(first):
-                unix_vals = np.empty(arr_obj.size, dtype=np.float64)
-                for idx, item in enumerate(arr_obj.flat):
-                    if not _is_scalar_astropy_time(item):
-                        raise TypeError(
-                            "time iterable with astropy scalar Time values must be homogeneous"
-                        )
-                    unix_vals[idx] = float(item.utc.unix)
-                epoch_unix = float(unix_vals[0])
-                return _TimeSpec(
-                    mode="offsets",
-                    shape=tuple(arr_obj.shape),
-                    epoch=astropy_time_to_orekit_date(
-                        Time(epoch_unix, format="unix", scale="utc")
-                    ),
-                    offsets=np.ascontiguousarray(
-                        unix_vals - epoch_unix, dtype=np.float64
-                    ),
-                    dates=None,
-                )
-
-        nums = np.asarray(time, dtype=np.float64)
-        if nums.ndim == 0:
-            return _normalize_time_input(float(nums))
-        if not np.all(np.isfinite(nums)):
-            raise ValueError("time contains non-finite values")
-        flat = np.ascontiguousarray(nums.reshape(-1), dtype=np.float64)
-        if flat.size == 0:
-            return _TimeSpec(
-                mode="offsets",
-                shape=tuple(nums.shape),
-                epoch=astropy_time_to_orekit_date(
-                    Time(0.0, format="unix", scale="utc")
-                ),
-                offsets=np.asarray([], dtype=np.float64),
-                dates=None,
-            )
-        epoch_unix = float(flat[0])
-        return _TimeSpec(
-            mode="offsets",
-            shape=tuple(nums.shape),
-            epoch=astropy_time_to_orekit_date(
-                Time(epoch_unix, format="unix", scale="utc")
-            ),
-            offsets=np.ascontiguousarray(flat - epoch_unix, dtype=np.float64),
-            dates=None,
-        )
-
-    raise TypeError(
-        "time must be astropy Time, Orekit AbsoluteDate, unix-seconds numeric values, "
-        "or an iterable/array of those types"
+    return normalize_timed_transform_time_input(
+        time,
+        absolute_date_cls=AbsoluteDate,
+        astropy_to_orekit=lambda t: astropy_time_to_orekit_date(
+            t,
+            absolute_date_cls=AbsoluteDate,
+            time_scales_factory=TimeScalesFactory,
+        ),
     )
 
 

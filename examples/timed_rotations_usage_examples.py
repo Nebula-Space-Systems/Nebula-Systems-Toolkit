@@ -14,7 +14,7 @@ if __package__ is None or __package__ == "":
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
 
-from nebula.propagation.orbit import astropy_time_to_orekit_date
+from nebula.time_utils import astropy_time_to_orekit_date
 from nebula.transforms import transform
 
 

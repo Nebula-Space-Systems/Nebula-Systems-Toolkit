@@ -32,7 +32,7 @@ if __package__ is None or __package__ == "":
         sys.path.insert(0, str(_REPO_ROOT))
 
 from nebula.propagation import Orbit, initialize_orekit
-from nebula.propagation.orbit import astropy_time_to_orekit_date
+from nebula.time_utils import astropy_time_to_orekit_date
 
 
 np.set_printoptions(precision=6, suppress=True)

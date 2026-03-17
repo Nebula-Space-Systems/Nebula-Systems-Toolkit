@@ -21,6 +21,13 @@ import astropy.units as u
 import numpy as np
 from astropy.time import Time
 
+from nebula.time_utils import (
+    astropy_time_to_orekit_date as _astropy_time_to_orekit_date,
+    is_orekit_absolute_date as _is_orekit_absolute_date_shared,
+    normalize_time_to_epoch_seconds as _normalize_time_to_epoch_seconds,
+    orekit_date_to_astropy_time as _orekit_date_to_astropy_time_shared,
+)
+
 from .orbit_design_java_bridge import (
     get_orbit_design_bridge_class,
     initialize_orbit_design_runtime,
@@ -128,36 +135,12 @@ def __getattr__(name: str):
 
 
 def astropy_time_to_orekit_date(time: Time):
-    """Convert scalar ``astropy.time.Time`` (UTC) to Orekit ``AbsoluteDate``.
-
-    Parameters
-    ----------
-    time : astropy.time.Time
-        Scalar UTC-compatible timestamp.
-
-    Returns
-    -------
-    org.orekit.time.AbsoluteDate
-        Equivalent Orekit absolute date in UTC.
-    """
-
+    """Convert scalar ``astropy.time.Time`` (UTC) to Orekit ``AbsoluteDate``."""
     _bind_java()
-
-    if not isinstance(time, Time):
-        raise TypeError("time must be astropy.time.Time")
-    if getattr(time, "shape", None) not in ((), None):
-        raise TypeError("time must be scalar astropy.time.Time")
-
-    utc = TimeScalesFactory.getUTC()
-    c = time.utc.ymdhms
-    return AbsoluteDate(
-        int(c.year),
-        int(c.month),
-        int(c.day),
-        int(c.hour),
-        int(c.minute),
-        float(c.second),
-        utc,
+    return _astropy_time_to_orekit_date(
+        time,
+        absolute_date_cls=AbsoluteDate,
+        time_scales_factory=TimeScalesFactory,
     )
 
 
@@ -165,21 +148,9 @@ def _orekit_date_to_astropy_time(date) -> Time:
     """Convert Orekit ``AbsoluteDate`` to scalar UTC ``astropy.time.Time``."""
 
     _bind_java()
-    utc = TimeScalesFactory.getUTC()
-    components = date.getComponents(utc)
-    d = components.getDate()
-    t = components.getTime()
-    return Time(
-        {
-            "year": int(d.getYear()),
-            "month": int(d.getMonth()),
-            "day": int(d.getDay()),
-            "hour": int(t.getHour()),
-            "minute": int(t.getMinute()),
-            "second": float(t.getSecond()),
-        },
-        format="ymdhms",
-        scale="utc",
+    return _orekit_date_to_astropy_time_shared(
+        date,
+        time_scales_factory=TimeScalesFactory,
     )
 
 
@@ -193,10 +164,7 @@ def _is_orekit_absolute_date(obj: Any) -> bool:
     """Return True when ``obj`` is an Orekit ``AbsoluteDate`` instance."""
 
     _bind_java()
-    try:
-        return bool(AbsoluteDate.class_.isInstance(obj))
-    except Exception:
-        return False
+    return _is_orekit_absolute_date_shared(obj, absolute_date_cls=AbsoluteDate)
 
 
 def _resolve_named_frame(name: str, *, iers, simple_eop: bool):
@@ -230,83 +198,15 @@ def _resolve_named_frame(name: str, *, iers, simple_eop: bool):
 
 
 def _normalize_time_input(time_like: Any, epoch: Time) -> tuple[np.ndarray, bool]:
-    """Normalize time-like input to seconds-from-epoch.
+    """Normalize time-like input to seconds-from-epoch."""
 
-    Accepted inputs:
-    - astropy Time scalar/vector
-    - Orekit AbsoluteDate scalar/vector
-    - scalar float/int seconds
-    - numpy/list of float/int seconds
-    - astropy Quantity with time units (converted to seconds)
-
-    Returns
-    -------
-    tuple[np.ndarray, bool]
-        ``(dt_seconds, is_scalar)`` where ``dt_seconds`` is 1D ``float64``
-        seconds from ``epoch``.
-    """
-
-    if _is_orekit_absolute_date(time_like):
-        epoch_date = astropy_time_to_orekit_date(epoch)
-        return np.asarray([float(time_like.durationFrom(epoch_date))], dtype=np.float64), True
-
-    if isinstance(time_like, Time):
-        is_scalar = getattr(time_like, "shape", None) == ()
-        # Avoid expensive TimeDelta array ops; unix subtraction is much faster.
-        dt = np.asarray(time_like.utc.unix, dtype=np.float64) - float(epoch.utc.unix)
-        out = np.atleast_1d(np.asarray(dt, dtype=np.float64))
-        if not np.all(np.isfinite(out)):
-            raise ValueError("time contains non-finite values")
-        return out, is_scalar
-
-    if isinstance(time_like, u.Quantity):
-        secs = np.asarray(time_like.to_value(u.s), dtype=np.float64)
-        if secs.ndim == 0:
-            out = np.asarray([float(secs)], dtype=np.float64)
-            return out, True
-        if secs.ndim > 1:
-            raise ValueError("time quantity input must be scalar or 1D")
-        if not np.all(np.isfinite(secs)):
-            raise ValueError("time contains non-finite values")
-        return secs, False
-
-    if isinstance(time_like, (float, int, np.floating, np.integer)) and not isinstance(
-        time_like, bool
-    ):
-        return np.asarray([float(time_like)], dtype=np.float64), True
-
-    if isinstance(time_like, (list, tuple, np.ndarray)):
-        arr = np.asarray(time_like)
-        if arr.ndim == 0 and _is_orekit_absolute_date(arr.item()):
-            epoch_date = astropy_time_to_orekit_date(epoch)
-            dt = float(arr.item().durationFrom(epoch_date))
-            return np.asarray([dt], dtype=np.float64), True
-
-        if arr.ndim == 0:
-            return np.asarray([float(arr)], dtype=np.float64), True
-        if arr.ndim > 1:
-            raise ValueError("time input must be scalar or 1D")
-
-        if arr.size > 0 and _is_orekit_absolute_date(arr[0]):
-            epoch_date = astropy_time_to_orekit_date(epoch)
-            out = np.empty(arr.size, dtype=np.float64)
-            for idx, val in enumerate(arr):
-                if not _is_orekit_absolute_date(val):
-                    raise TypeError(
-                        "absolute-date arrays must contain only Orekit AbsoluteDate entries"
-                    )
-                out[idx] = float(val.durationFrom(epoch_date))
-            if not np.all(np.isfinite(out)):
-                raise ValueError("time contains non-finite values")
-            return out, False
-
-        out = np.asarray(arr, dtype=np.float64)
-        if not np.all(np.isfinite(out)):
-            raise ValueError("time contains non-finite values")
-        return out, False
-
-    raise TypeError(
-        "time must be astropy Time, Orekit AbsoluteDate, seconds scalar/array, or Quantity with time units"
+    _bind_java()
+    return _normalize_time_to_epoch_seconds(
+        time_like,
+        epoch,
+        absolute_date_cls=AbsoluteDate,
+        astropy_to_orekit=astropy_time_to_orekit_date,
+        time_scales_factory=TimeScalesFactory,
     )
 
 
