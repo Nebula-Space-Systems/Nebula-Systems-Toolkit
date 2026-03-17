@@ -1,4 +1,14 @@
+"""Public API for coordinate transforms.
+
+Conventions used in this package:
+- Modules prefixed with ``_`` are internal implementation modules.
+- Public functions are re-exported from ``nebula.transforms``.
+- Timed-rotation internals live in ``_timed_rotations`` and are exposed via
+  package-level ``transform`` / ``initialize_timed_rotations``.
+"""
+
 from importlib import import_module
+from typing import Any
 
 from nebula.transforms._aer2ecef import (
     aer2ecef,
@@ -21,10 +31,16 @@ from nebula.transforms._coarse_eci2itrf import (
     DAS2R,
     EARTH_OMEGA,
     J2000_JD,
-    coarse_eci2itrf_pos,
-    coarse_eci2itrf_pos_vec,
-    coarse_eci2itrf_pos_vel,
-    coarse_eci2itrf_pos_vel_vec,
+    coarse_ecef2eci,
+    coarse_ecef2eci_pos,
+    coarse_ecef2eci_pos_vec,
+    coarse_ecef2eci_pos_vel,
+    coarse_ecef2eci_pos_vel_vec,
+    coarse_ecef2eci_vec,
+    coarse_eci2ecef_pos,
+    coarse_eci2ecef_pos_vec,
+    coarse_eci2ecef_pos_vel,
+    coarse_eci2ecef_pos_vel_vec,
 )
 from nebula.transforms._ecef2aer import ecef2aer, ecef2aer_vec_xyz
 from nebula.transforms._ecef2enu import (
@@ -91,10 +107,16 @@ __all__ = [
     "coarse_eci2geodetic_deg",
     "coarse_eci2geodetic_vec",
     "coarse_eci2geodetic_vec_deg",
-    "coarse_eci2itrf_pos",
-    "coarse_eci2itrf_pos_vel",
-    "coarse_eci2itrf_pos_vec",
-    "coarse_eci2itrf_pos_vel_vec",
+    "coarse_eci2ecef_pos",
+    "coarse_eci2ecef_pos_vel",
+    "coarse_eci2ecef_pos_vec",
+    "coarse_eci2ecef_pos_vel_vec",
+    "coarse_ecef2eci",
+    "coarse_ecef2eci_pos",
+    "coarse_ecef2eci_pos_vel",
+    "coarse_ecef2eci_vec",
+    "coarse_ecef2eci_pos_vec",
+    "coarse_ecef2eci_pos_vel_vec",
     "ecef2aer",
     "ecef2aer_vec_xyz",
     "enu_basis_from_ecef_xyz",
@@ -124,11 +146,8 @@ __all__ = [
     "geodetic2enu",
     "geodetic2enu_vec_llh",
     "geodetic2enu_vec_lla",
-    "coarse_eci2itrf",
-    "coarse_eci2itrf_pos_vel",
-    "transform_timed",
-    "transform_positions_timed",
-    "transform_pos_vel_timed",
+    "transform",
+    "initialize_timed_rotations",
     "WGS84_A",
     "WGS84_B",
     "WGS84_A2",
@@ -147,15 +166,12 @@ __all__ = [
 ]
 
 _TIMED_ROTATION_EXPORTS = {
-    "coarse_eci2itrf",
-    "coarse_eci2itrf_pos_vel",
-    "transform_timed",
-    "transform_positions_timed",
-    "transform_pos_vel_timed",
+    "transform",
+    "initialize_timed_rotations",
 }
 
 
-def __getattr__(name: str):
+def __getattr__(name: str) -> Any:
     if name in _TIMED_ROTATION_EXPORTS:
         mod = import_module("nebula.transforms._timed_rotations")
         value = getattr(mod, name)
@@ -164,5 +180,5 @@ def __getattr__(name: str):
     raise AttributeError(f"module 'nebula.transforms' has no attribute '{name}'")
 
 
-def __dir__():
+def __dir__() -> list[str]:
     return sorted(set(globals().keys()) | set(__all__))

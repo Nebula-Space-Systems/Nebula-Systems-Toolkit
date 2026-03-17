@@ -13,7 +13,7 @@ from nebula.transforms._coarse_eci2geodetic import (
     coarse_eci2geodetic_vec,
     coarse_eci2geodetic_vec_deg,
 )
-from nebula.transforms._coarse_eci2itrf import _coarse_eci2itrf_pos_iau76_shortnut
+from nebula.transforms._coarse_eci2itrf import _coarse_eci2ecef_pos_iau76_shortnut
 from nebula.transforms._ecef2geodetic import ecef2geodetic, ecef2geodetic_deg
 
 
@@ -33,7 +33,7 @@ def test_coarse_eci2geodetic_scalar_matches_composed_path() -> None:
     r_eci, jd_ut1, jd_tt = _random_eci_samples(32, seed=1)
 
     for i in range(r_eci.shape[0]):
-        x, y, z = _coarse_eci2itrf_pos_iau76_shortnut(
+        x, y, z = _coarse_eci2ecef_pos_iau76_shortnut(
             float(r_eci[i, 0]),
             float(r_eci[i, 1]),
             float(r_eci[i, 2]),
@@ -61,7 +61,7 @@ def test_coarse_eci2geodetic_deg_scalar_matches_composed_path() -> None:
     r_eci, jd_ut1, jd_tt = _random_eci_samples(32, seed=2)
 
     for i in range(r_eci.shape[0]):
-        x, y, z = _coarse_eci2itrf_pos_iau76_shortnut(
+        x, y, z = _coarse_eci2ecef_pos_iau76_shortnut(
             float(r_eci[i, 0]),
             float(r_eci[i, 1]),
             float(r_eci[i, 2]),

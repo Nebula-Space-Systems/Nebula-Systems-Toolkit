@@ -9,8 +9,8 @@ geocentric position in:
 
 - An Earth-centered inertial frame aligned with the **true equator and true
   equinox of date** (apparent-of-date, similar to the TETE frame in Astropy).
-- An Earth-fixed frame obtained using the same approximate rotation chain as
-  ``nebula.propagation._fast_orbit_backend`` (IAU-76 precession, truncated IAU-1980
+- An Earth-fixed frame obtained using the approximate coarse transform chain
+  (IAU-76 precession, truncated IAU-1980
   nutation, GAST, optional epoch polar motion), giving an ITRF-like ECEF
   realization.
 
@@ -41,7 +41,7 @@ All functions are numba-njit compatible.
 import numpy as np
 from numba import njit
 from nebula.transforms._coarse_eci2itrf import (
-    _coarse_eci2itrf_pos_iau76_shortnut,
+    _coarse_eci2ecef_pos_iau76_shortnut,
     _coarse_gmst_vallado_rad,
     _coarse_tod_to_native_pos_iau76_shortnut,
 )
@@ -233,6 +233,6 @@ def sun_position_ecef(
     )
 
     # Apply the same native->ECEF chain used in fast_orbit.
-    return _coarse_eci2itrf_pos_iau76_shortnut(
+    return _coarse_eci2ecef_pos_iau76_shortnut(
         x_eci, y_eci, z_eci, jd_ut1, jd_tt, xp_rad, yp_rad
     )

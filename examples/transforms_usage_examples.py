@@ -17,7 +17,7 @@ if __package__ is None or __package__ == "":
 from nebula.transforms import (
     aer2geodetic,
     coarse_eci2geodetic_vec_deg,
-    coarse_eci2itrf_pos_vec,
+    coarse_eci2ecef_pos_vec,
     ecef2aer,
     ecef2enu,
     ecef2geodetic,
@@ -29,8 +29,7 @@ from nebula.transforms import (
     geodetic2ecef,
     geodetic2ecef_vec_llh,
     geodetic2enu,
-    transform_pos_vel_timed,
-    transform_positions_timed,
+    transform,
 )
 
 
@@ -135,7 +134,7 @@ def example_coarse_eci_transforms() -> None:
     jd_ut1 = t_arr.ut1.jd.astype(np.float64)
     jd_tt = t_arr.tt.jd.astype(np.float64)
 
-    r_itrf = coarse_eci2itrf_pos_vec(r_eci, jd_ut1, jd_tt)
+    r_itrf = coarse_eci2ecef_pos_vec(r_eci, jd_ut1, jd_tt)
     lat_deg, lon_deg, h_m = coarse_eci2geodetic_vec_deg(r_eci, jd_ut1, jd_tt)
 
     print(f"ITRF positions shape: {r_itrf.shape}")
@@ -167,15 +166,18 @@ def example_timed_frame_transforms() -> None:
         dtype=np.float64,
     )
 
-    r_itrf = transform_positions_timed(
-        times, r_gcrf, from_frame="gcrf", to_frame="itrf"
-    )
-    r_itrf2, v_itrf2 = transform_pos_vel_timed(
-        times,
-        r_gcrf,
-        v_gcrf,
+    r_itrf, _, _ = transform(
         from_frame="gcrf",
         to_frame="itrf",
+        time=times,
+        position=r_gcrf,
+    )
+    r_itrf2, v_itrf2, _ = transform(
+        from_frame="gcrf",
+        to_frame="itrf",
+        time=times,
+        position=r_gcrf,
+        velocity=v_gcrf,
     )
 
     print(f"Position-only transform output shape: {r_itrf.shape}")

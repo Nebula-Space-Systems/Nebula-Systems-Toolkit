@@ -1,96 +1,77 @@
-"""
-Timed frame rotations for position / position+velocity arrays.
+"""High-performance timed frame transforms backed by a Java Orekit bridge.
 
-This module provides a single high-level interface that accepts:
-- times (scalar or vector),
-- positions (N,3) or (3,),
-- from/to frame names as strings,
-- optional velocities.
-
-It then applies Orekit frame transforms with grouped-time fast paths.
+This module keeps Python-side work focused on input normalization and unit
+handling while all timed transform loops execute in Java.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any, Optional, Tuple, Union
 
+import astropy.units as u
+import jpype
 import numpy as np
-from nebula.transforms._coarse_eci2itrf import (
-    coarse_eci2itrf_pos as _coarse_eci2itrf_pos_kernel,
-    coarse_eci2itrf_pos_vec as _coarse_eci2itrf_pos_vec_kernel,
-    coarse_eci2itrf_pos_vel as _coarse_eci2itrf_pos_vel_kernel,
-    coarse_eci2itrf_pos_vel_vec as _coarse_eci2itrf_pos_vel_vec_kernel,
+from astropy.time import Time
+
+from nebula.propagation.orbit import astropy_time_to_orekit_date
+
+from ._timed_rotations_java_bridge import (
+    get_timed_rotation_bridge_class,
+    initialize_timed_rotations_runtime,
 )
 
-try:
-    from astropy.time import Time as AstropyTime  # type: ignore
-except Exception:  # pragma: no cover
-    AstropyTime = None  # type: ignore
 
-from nebula.propagation.orbit import initialize_orekit
-
-# Lazily bound Orekit classes/singletons.
-_FramesFactory = None
-_AbsoluteDateType = None
-_TimeScalesFactory = None
-_IERSConventions = None
-_UTC = None
-
-_ITRF_CACHE: dict[tuple[object, bool], object] = {}
+# Lazy-initialized Java bindings
+_RUNTIME_BOUND = False
+_JavaTimedRotationBridge = None
+FramesFactory = None
+IERSConventions = None
+AbsoluteDate = None
 
 
-def _ensure_orekit_bindings() -> None:
-    global _FramesFactory, _AbsoluteDateType, _TimeScalesFactory, _IERSConventions, _UTC
-    if _FramesFactory is not None:
+def initialize_timed_rotations(*, data_path: str | None = None) -> None:
+    """Initialize JVM/runtime for Java-backed timed frame transforms."""
+
+    initialize_timed_rotations_runtime(data_path=data_path)
+
+
+def _bind_java() -> None:
+    global _RUNTIME_BOUND
+    global _JavaTimedRotationBridge, FramesFactory, IERSConventions, AbsoluteDate
+
+    if _RUNTIME_BOUND:
         return
-    initialize_orekit()
-    from org.orekit.frames import FramesFactory as _FF  # type: ignore
-    from org.orekit.time import AbsoluteDate as _AD  # type: ignore
-    from org.orekit.time import TimeScalesFactory as _TSF  # type: ignore
-    from org.orekit.utils import IERSConventions as _IC  # type: ignore
 
-    _FramesFactory = _FF
-    _AbsoluteDateType = _AD
-    _TimeScalesFactory = _TSF
-    _IERSConventions = _IC
-    _UTC = _TimeScalesFactory.getUTC()
+    initialize_timed_rotations_runtime()
+
+    from org.orekit.frames import FramesFactory as _FramesFactory  # type: ignore
+    from org.orekit.time import AbsoluteDate as _AbsoluteDate  # type: ignore
+    from org.orekit.utils import IERSConventions as _IERSConventions  # type: ignore
+
+    FramesFactory = _FramesFactory
+    AbsoluteDate = _AbsoluteDate
+    IERSConventions = _IERSConventions
+    _JavaTimedRotationBridge = get_timed_rotation_bridge_class()
+    _RUNTIME_BOUND = True
 
 
 def _normalize_frame_name(name: str) -> str:
     return str(name).strip().lower().replace("_", "").replace("-", "").replace(" ", "")
 
 
-def _resolve_iers(iers: Optional[Union[object, str]]) -> object:
-    _ensure_orekit_bindings()
-    if iers is None:
-        return _IERSConventions.IERS_2010
-    if isinstance(iers, str):
-        key = _normalize_frame_name(iers)
-        if key in ("iers2010", "2010"):
-            return _IERSConventions.IERS_2010
-        if key in ("iers2003", "2003"):
-            return _IERSConventions.IERS_2003
-        if key in ("iers1996", "1996"):
-            return _IERSConventions.IERS_1996
-        raise ValueError("iers must be one of: 'IERS_2010', 'IERS_2003', 'IERS_1996'")
-    return iers
+def _coerce_iers(iers_convention):
+    _bind_java()
+    if iers_convention is None:
+        return IERSConventions.IERS_2010
+    return iers_convention
 
 
-def _get_itrf(iers: object, simple_eop: bool):
-    key = (iers, bool(simple_eop))
-    fr = _ITRF_CACHE.get(key)
-    if fr is None:
-        fr = _FramesFactory.getITRF(iers, bool(simple_eop))
-        _ITRF_CACHE[key] = fr
-    return fr
-
-
-def _resolve_frame(name: str, *, iers: object, simple_eop: bool):
-    _ensure_orekit_bindings()
+def _resolve_named_frame(name: str, *, iers, simple_eop: bool):
+    _bind_java()
     key = _normalize_frame_name(name)
-    key = {
+
+    aliases = {
         "j2000": "eme2000",
         "gcrs": "gcrf",
         "itrs": "itrf",
@@ -100,664 +81,465 @@ def _resolve_frame(name: str, *, iers: object, simple_eop: bool):
         "veis50": "veis1950",
         "meanofdate": "mod",
         "trueofdate": "tod",
-    }.get(key, key)
+    }
+    key = aliases.get(key, key)
 
     if key == "gcrf":
-        return _FramesFactory.getGCRF()
+        return FramesFactory.getGCRF()
     if key == "icrf":
-        return _FramesFactory.getICRF()
+        return FramesFactory.getICRF()
     if key == "eme2000":
-        return _FramesFactory.getEME2000()
+        return FramesFactory.getEME2000()
     if key == "teme":
-        return _FramesFactory.getTEME()
+        return FramesFactory.getTEME()
     if key == "mod":
-        return _FramesFactory.getMOD(iers)
+        return FramesFactory.getMOD(iers)
     if key == "tod":
-        return _FramesFactory.getTOD(iers, bool(simple_eop))
+        return FramesFactory.getTOD(iers, bool(simple_eop))
     if key == "cirf":
-        return _FramesFactory.getCIRF(iers, bool(simple_eop))
+        return FramesFactory.getCIRF(iers, bool(simple_eop))
     if key == "ecliptic":
-        return _FramesFactory.getEcliptic(iers)
-    if key == "veis1950":
-        return _FramesFactory.getVeis1950()
+        return FramesFactory.getEcliptic(iers)
+    if key in ("veis1950",):
+        return FramesFactory.getVeis1950()
     if key == "itrf":
-        return _get_itrf(iers, simple_eop)
+        return FramesFactory.getITRF(iers, bool(simple_eop))
+
     raise ValueError(
-        f"Unsupported frame '{name}'. Supported: gcrf, icrf, eme2000/j2000, "
-        "teme, mod, tod, cirf, ecliptic, veis1950, itrf/ecef."
+        f"Unsupported frame string: '{name}'. "
+        "Use Orekit Frame objects for custom frames."
     )
 
 
-def _astropy_scalar_to_datetime_utc(t: "AstropyTime") -> datetime:  # type: ignore
-    dt = t.utc.to_datetime(timezone=timezone.utc)
-    if isinstance(dt, np.ndarray):
-        dt = dt.item()
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
+def _resolve_frame(frame_like: Any, *, iers, simple_eop: bool):
+    if isinstance(frame_like, str):
+        return _resolve_named_frame(frame_like, iers=iers, simple_eop=bool(simple_eop))
+    return frame_like
 
 
-def _absolutedate_from_datetime_utc(dt: datetime):
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    else:
-        dt = dt.astimezone(timezone.utc)
-    sec = float(dt.second) + float(dt.microsecond) * 1e-6
-    return _AbsoluteDateType(dt.year, dt.month, dt.day, dt.hour, dt.minute, sec, _UTC)
+def _is_absolute_date(obj: Any) -> bool:
+    _bind_java()
+    try:
+        return bool(AbsoluteDate.class_.isInstance(obj))
+    except Exception:
+        return False
 
 
-def _is_astropy_scalar_time(x: Any) -> bool:
-    return (
-        AstropyTime is not None
-        and isinstance(x, AstropyTime)
-        and getattr(x, "shape", None) == ()
-    )
-
-
-def _is_astropy_array_time(x: Any) -> bool:
-    return (
-        AstropyTime is not None
-        and isinstance(x, AstropyTime)
-        and getattr(x, "shape", None) != ()
-    )
-
-
-def _is_absolute_date(x: Any) -> bool:
-    return isinstance(x, _AbsoluteDateType)
-
-
-def _to_absolutedate_scalar(t: Any):
-    if _is_absolute_date(t):
-        return t
-    if _is_astropy_scalar_time(t):
-        return _absolutedate_from_datetime_utc(_astropy_scalar_to_datetime_utc(t))
-    raise TypeError(
-        "times must be org.orekit.time.AbsoluteDate, astropy.time.Time scalar/array, "
-        "or an iterable of AbsoluteDate / scalar astropy times."
-    )
-
-
-def _normalize_states_array(x: np.ndarray, name: str) -> tuple[np.ndarray, bool]:
-    a = np.ascontiguousarray(x, dtype=np.float64)
-    if a.ndim == 1:
-        if a.shape[0] != 3:
-            raise ValueError(f"{name} must be (3,) or (N,3); got {a.shape}")
-        return a.reshape(1, 3), True
-    if a.ndim != 2 or a.shape[1] != 3:
-        raise ValueError(f"{name} must be (3,) or (N,3); got {a.shape}")
-    return a, False
+def _is_scalar_astropy_time(obj: Any) -> bool:
+    return isinstance(obj, Time) and getattr(obj, "shape", None) == ()
 
 
 @dataclass(frozen=True)
-class _KinematicParts:
-    R: np.ndarray
-    t: np.ndarray
-    v: np.ndarray
-    omega: np.ndarray
+class _TimeSpec:
+    mode: str  # "offsets" or "dates"
+    shape: tuple[int, ...]
+    epoch: Any | None
+    offsets: np.ndarray | None
+    dates: np.ndarray | None
 
 
-def _vec3_to_np(v) -> np.ndarray:
-    return np.array([v.getX(), v.getY(), v.getZ()], dtype=np.float64)
+def _normalize_time_input(time: Any) -> _TimeSpec:
+    _bind_java()
 
-
-def _get_kinematic_parts(from_frame, to_frame, date) -> _KinematicParts:
-    tr = from_frame.getTransformTo(to_frame, date)
-    rot = tr.getRotation()
-    R = np.array(rot.getMatrix(), dtype=np.float64)
-    t = _vec3_to_np(tr.getTranslation())
-    v = _vec3_to_np(tr.getVelocity())
-    omega = _vec3_to_np(tr.getRotationRate())
-    return _KinematicParts(R=R, t=t, v=v, omega=omega)
-
-
-def _apply_transform_pos(parts: _KinematicParts, r_old: np.ndarray) -> np.ndarray:
-    return r_old @ parts.R.T + parts.t
-
-
-def _apply_transform_pos_vel(
-    parts: _KinematicParts, r_old: np.ndarray, v_old: np.ndarray
-):
-    r_new = r_old @ parts.R.T + parts.t
-    v_rot = v_old @ parts.R.T
-    v_new = v_rot + parts.v - np.cross(parts.omega, r_new)
-    return r_new, v_new
-
-
-def _group_from_inverse(inverse: np.ndarray):
-    order = np.argsort(inverse, kind="stable")
-    inv_sorted = inverse[order]
-    cuts = np.flatnonzero(inv_sorted[1:] != inv_sorted[:-1]) + 1
-    starts = np.concatenate(([0], cuts))
-    ends = np.concatenate((cuts, [inverse.size]))
-    return order, starts, ends
-
-
-def _transform_pos_grouped_by_dates(
-    r_old: np.ndarray, dates_list: list, from_frame, to_frame
-):
-    N = r_old.shape[0]
-    ids = np.fromiter((id(d) for d in dates_list), dtype=np.int64, count=N)
-    uniq_ids, inverse = np.unique(ids, return_inverse=True)
-    K = uniq_ids.size
-
-    if K > 0.8 * N:
-        out = np.empty_like(r_old)
-        for i, d in enumerate(dates_list):
-            parts = _get_kinematic_parts(from_frame, to_frame, d)
-            out[i] = _apply_transform_pos(parts, r_old[i : i + 1])[0]
-        return out
-
-    id_to_date: dict[int, Any] = {}
-    for d in dates_list:
-        did = id(d)
-        if did not in id_to_date:
-            id_to_date[did] = d
-            if len(id_to_date) == K:
-                break
-
-    order, starts, ends = _group_from_inverse(inverse)
-    out = np.empty_like(r_old)
-    for g in range(K):
-        d = id_to_date[int(uniq_ids[g])]
-        parts = _get_kinematic_parts(from_frame, to_frame, d)
-        idx = order[starts[g] : ends[g]]
-        out[idx] = _apply_transform_pos(parts, r_old[idx])
-    return out
-
-
-def _transform_pos_vel_grouped_by_dates(
-    r_old: np.ndarray, v_old: np.ndarray, dates_list: list, from_frame, to_frame
-):
-    N = r_old.shape[0]
-    ids = np.fromiter((id(d) for d in dates_list), dtype=np.int64, count=N)
-    uniq_ids, inverse = np.unique(ids, return_inverse=True)
-    K = uniq_ids.size
-
-    if K > 0.8 * N:
-        r_out = np.empty_like(r_old)
-        v_out = np.empty_like(v_old)
-        for i, d in enumerate(dates_list):
-            parts = _get_kinematic_parts(from_frame, to_frame, d)
-            ri, vi = _apply_transform_pos_vel(parts, r_old[i : i + 1], v_old[i : i + 1])
-            r_out[i] = ri[0]
-            v_out[i] = vi[0]
-        return r_out, v_out
-
-    id_to_date: dict[int, Any] = {}
-    for d in dates_list:
-        did = id(d)
-        if did not in id_to_date:
-            id_to_date[did] = d
-            if len(id_to_date) == K:
-                break
-
-    order, starts, ends = _group_from_inverse(inverse)
-    r_out = np.empty_like(r_old)
-    v_out = np.empty_like(v_old)
-    for g in range(K):
-        d = id_to_date[int(uniq_ids[g])]
-        parts = _get_kinematic_parts(from_frame, to_frame, d)
-        idx = order[starts[g] : ends[g]]
-        ri, vi = _apply_transform_pos_vel(parts, r_old[idx], v_old[idx])
-        r_out[idx] = ri
-        v_out[idx] = vi
-    return r_out, v_out
-
-
-def _transform_pos_grouped_by_astropy_time(r_old: np.ndarray, t: "AstropyTime", from_frame, to_frame):  # type: ignore
-    jd1 = np.ascontiguousarray(t.utc.jd1, dtype=np.float64)
-    jd2 = np.ascontiguousarray(t.utc.jd2, dtype=np.float64)
-    key = np.stack([jd1, jd2], axis=1)
-    uniq_key, inverse = np.unique(key, axis=0, return_inverse=True)
-    K = uniq_key.shape[0]
-
-    if K > 0.8 * r_old.shape[0]:
-        dates_list = [_to_absolutedate_scalar(ti) for ti in t.utc]
-        return _transform_pos_grouped_by_dates(r_old, dates_list, from_frame, to_frame)
-
-    uniq_dates = []
-    for k in range(K):
-        ti = AstropyTime(uniq_key[k, 0], uniq_key[k, 1], format="jd", scale="utc")  # type: ignore[misc]
-        uniq_dates.append(_to_absolutedate_scalar(ti))
-
-    order, starts, ends = _group_from_inverse(inverse)
-    out = np.empty_like(r_old)
-    for g in range(K):
-        parts = _get_kinematic_parts(from_frame, to_frame, uniq_dates[g])
-        idx = order[starts[g] : ends[g]]
-        out[idx] = _apply_transform_pos(parts, r_old[idx])
-    return out
-
-
-def _transform_pos_vel_grouped_by_astropy_time(
-    r_old: np.ndarray, v_old: np.ndarray, t: "AstropyTime", from_frame, to_frame  # type: ignore
-):
-    jd1 = np.ascontiguousarray(t.utc.jd1, dtype=np.float64)
-    jd2 = np.ascontiguousarray(t.utc.jd2, dtype=np.float64)
-    key = np.stack([jd1, jd2], axis=1)
-    uniq_key, inverse = np.unique(key, axis=0, return_inverse=True)
-    K = uniq_key.shape[0]
-
-    if K > 0.8 * r_old.shape[0]:
-        dates_list = [_to_absolutedate_scalar(ti) for ti in t.utc]
-        return _transform_pos_vel_grouped_by_dates(
-            r_old, v_old, dates_list, from_frame, to_frame
+    if _is_absolute_date(time):
+        return _TimeSpec(
+            mode="dates",
+            shape=(),
+            epoch=None,
+            offsets=None,
+            dates=np.asarray([time], dtype=object),
         )
 
-    uniq_dates = []
-    for k in range(K):
-        ti = AstropyTime(uniq_key[k, 0], uniq_key[k, 1], format="jd", scale="utc")  # type: ignore[misc]
-        uniq_dates.append(_to_absolutedate_scalar(ti))
-
-    order, starts, ends = _group_from_inverse(inverse)
-    r_out = np.empty_like(r_old)
-    v_out = np.empty_like(v_old)
-    for g in range(K):
-        parts = _get_kinematic_parts(from_frame, to_frame, uniq_dates[g])
-        idx = order[starts[g] : ends[g]]
-        ri, vi = _apply_transform_pos_vel(parts, r_old[idx], v_old[idx])
-        r_out[idx] = ri
-        v_out[idx] = vi
-    return r_out, v_out
-
-
-def transform_timed(
-    times: Any,
-    positions_m: np.ndarray,
-    from_frame: str,
-    to_frame: str,
-    velocities_mps: Optional[np.ndarray] = None,
-    *,
-    iers: Optional[Union[object, str]] = None,
-    simple_eop: bool = True,
-):
-    """
-    Transform positions (and optional velocities) between named Orekit frames.
-
-    Parameters
-    ----------
-    times
-        Scalar AbsoluteDate / scalar astropy Time, astropy Time array, or iterable of
-        AbsoluteDate / scalar astropy Time values.
-    positions_m : np.ndarray
-        Input positions in `from_frame`, shape (3,) or (N,3), meters.
-    from_frame, to_frame : str
-        Frame names (e.g., "gcrf", "itrf", "teme", "j2000"/"eme2000").
-    velocities_mps : np.ndarray | None
-        Optional input velocities in `from_frame`, shape (3,) or (N,3), m/s.
-        If provided, the function returns `(positions, velocities)`.
-    iers : object | str | None
-        IERS convention object or one of "IERS_2010", "IERS_2003", "IERS_1996".
-    simple_eop : bool
-        Orekit simple EOP flag when resolving Earth-fixed frames.
-    """
-    _ensure_orekit_bindings()
-
-    r_in, r_scalar = _normalize_states_array(positions_m, "positions_m")
-    has_vel = velocities_mps is not None
-    if has_vel:
-        v_in, v_scalar = _normalize_states_array(velocities_mps, "velocities_mps")
-        if r_in.shape[0] != v_in.shape[0]:
-            raise ValueError(
-                f"positions_m and velocities_mps must share N; got {r_in.shape[0]} and {v_in.shape[0]}"
+    if isinstance(time, Time):
+        if getattr(time, "shape", None) == ():
+            return _TimeSpec(
+                mode="offsets",
+                shape=(),
+                epoch=astropy_time_to_orekit_date(time),
+                offsets=np.asarray([0.0], dtype=np.float64),
+                dates=None,
             )
-        if r_scalar != v_scalar:
-            if r_in.shape[0] == 1 and v_in.shape[0] > 1:
-                r_in = np.repeat(r_in, v_in.shape[0], axis=0)
-            elif v_in.shape[0] == 1 and r_in.shape[0] > 1:
-                v_in = np.repeat(v_in, r_in.shape[0], axis=0)
 
-    N = r_in.shape[0]
+        unix = np.asarray(time.utc.unix, dtype=np.float64)
+        if unix.ndim == 0:
+            epoch_unix = float(unix)
+            return _TimeSpec(
+                mode="offsets",
+                shape=(),
+                epoch=astropy_time_to_orekit_date(
+                    Time(epoch_unix, format="unix", scale="utc")
+                ),
+                offsets=np.asarray([0.0], dtype=np.float64),
+                dates=None,
+            )
 
-    iers_obj = _resolve_iers(iers)
-    from_fr = _resolve_frame(from_frame, iers=iers_obj, simple_eop=bool(simple_eop))
-    to_fr = _resolve_frame(to_frame, iers=iers_obj, simple_eop=bool(simple_eop))
+        flat = np.ascontiguousarray(unix.reshape(-1), dtype=np.float64)
+        if flat.size == 0:
+            return _TimeSpec(
+                mode="offsets",
+                shape=tuple(unix.shape),
+                epoch=astropy_time_to_orekit_date(
+                    Time(0.0, format="unix", scale="utc")
+                ),
+                offsets=np.asarray([], dtype=np.float64),
+                dates=None,
+            )
 
-    if from_fr == to_fr:
-        if _is_absolute_date(times) or _is_astropy_scalar_time(times):
-            n_time = 1
-        elif _is_astropy_array_time(times):
-            n_time = int(np.prod(times.shape))
-        else:
-            n_time = len(list(times))
+        epoch_unix = float(flat[0])
+        return _TimeSpec(
+            mode="offsets",
+            shape=tuple(unix.shape),
+            epoch=astropy_time_to_orekit_date(
+                Time(epoch_unix, format="unix", scale="utc")
+            ),
+            offsets=np.ascontiguousarray(flat - epoch_unix, dtype=np.float64),
+            dates=None,
+        )
 
-        if n_time not in (1, N):
-            if N == 1 and n_time > 1:
-                r_in = np.repeat(r_in, n_time, axis=0)
-                if has_vel:
-                    v_in = np.repeat(v_in, n_time, axis=0)
-            else:
-                raise ValueError(f"times length {n_time} must match N={N}")
+    if isinstance(time, u.Quantity):
+        secs = np.asarray(time.to_value(u.s), dtype=np.float64)
+        if secs.ndim == 0:
+            unix_s = float(secs)
+            return _TimeSpec(
+                mode="offsets",
+                shape=(),
+                epoch=astropy_time_to_orekit_date(
+                    Time(unix_s, format="unix", scale="utc")
+                ),
+                offsets=np.asarray([0.0], dtype=np.float64),
+                dates=None,
+            )
+        flat = np.ascontiguousarray(secs.reshape(-1), dtype=np.float64)
+        if flat.size == 0:
+            return _TimeSpec(
+                mode="offsets",
+                shape=tuple(secs.shape),
+                epoch=astropy_time_to_orekit_date(
+                    Time(0.0, format="unix", scale="utc")
+                ),
+                offsets=np.asarray([], dtype=np.float64),
+                dates=None,
+            )
+        epoch_unix = float(flat[0])
+        return _TimeSpec(
+            mode="offsets",
+            shape=tuple(secs.shape),
+            epoch=astropy_time_to_orekit_date(
+                Time(epoch_unix, format="unix", scale="utc")
+            ),
+            offsets=np.ascontiguousarray(flat - epoch_unix, dtype=np.float64),
+            dates=None,
+        )
 
-        if has_vel:
-            r_out = r_in.copy()
-            v_out = v_in.copy()
-            if r_scalar and r_out.shape[0] == 1:
-                return r_out[0], v_out[0]
-            return r_out, v_out
-        r_out = r_in.copy()
-        if r_scalar and r_out.shape[0] == 1:
-            return r_out[0]
-        return r_out
+    if isinstance(time, (float, int, np.floating, np.integer)) and not isinstance(
+        time, bool
+    ):
+        unix_s = float(time)
+        return _TimeSpec(
+            mode="offsets",
+            shape=(),
+            epoch=astropy_time_to_orekit_date(Time(unix_s, format="unix", scale="utc")),
+            offsets=np.asarray([0.0], dtype=np.float64),
+            dates=None,
+        )
 
-    # Scalar time fast path.
-    if _is_absolute_date(times) or _is_astropy_scalar_time(times):
-        d0 = _to_absolutedate_scalar(times)
-        parts = _get_kinematic_parts(from_fr, to_fr, d0)
-        if has_vel:
-            r_out, v_out = _apply_transform_pos_vel(parts, r_in, v_in)
-            if r_scalar:
-                return r_out[0], v_out[0]
-            return r_out, v_out
-        r_out = _apply_transform_pos(parts, r_in)
-        if r_scalar:
-            return r_out[0]
-        return r_out
-
-    # Astropy vector time path.
-    if _is_astropy_array_time(times):
-        if getattr(times, "shape", None) != (N,):
-            if N == 1:
-                r_in = np.repeat(r_in, int(np.prod(times.shape)), axis=0)
-                if has_vel:
-                    v_in = np.repeat(v_in, int(np.prod(times.shape)), axis=0)
-                N = r_in.shape[0]
-                times = times.reshape((N,))
-            else:
-                raise ValueError(
-                    f"Astropy Time shape {times.shape} must be (N,) where N={N}"
+    if isinstance(time, (list, tuple, np.ndarray)):
+        arr_obj = np.asarray(time, dtype=object)
+        if arr_obj.ndim == 0:
+            scalar_obj = arr_obj.item()
+            if _is_absolute_date(scalar_obj):
+                return _TimeSpec(
+                    mode="dates",
+                    shape=(),
+                    epoch=None,
+                    offsets=None,
+                    dates=np.asarray([scalar_obj], dtype=object),
                 )
-        if has_vel:
-            r_out, v_out = _transform_pos_vel_grouped_by_astropy_time(r_in, v_in, times, from_fr, to_fr)  # type: ignore[arg-type]
-            return r_out, v_out
-        return _transform_pos_grouped_by_astropy_time(r_in, times, from_fr, to_fr)  # type: ignore[arg-type]
+            if _is_scalar_astropy_time(scalar_obj):
+                return _normalize_time_input(scalar_obj)
+            return _normalize_time_input(float(scalar_obj))
 
-    # Iterable time path.
-    times_list_raw = list(times)
-    if len(times_list_raw) != N:
-        if N == 1 and len(times_list_raw) > 1:
-            r_in = np.repeat(r_in, len(times_list_raw), axis=0)
-            if has_vel:
-                v_in = np.repeat(v_in, len(times_list_raw), axis=0)
-            N = r_in.shape[0]
-        else:
-            raise ValueError(f"times length {len(times_list_raw)} must match N={N}")
+        if arr_obj.size > 0:
+            first = arr_obj.flat[0]
+            if _is_absolute_date(first):
+                for item in arr_obj.flat:
+                    if not _is_absolute_date(item):
+                        raise TypeError(
+                            "time iterable with AbsoluteDate values must contain only AbsoluteDate entries"
+                        )
+                return _TimeSpec(
+                    mode="dates",
+                    shape=tuple(arr_obj.shape),
+                    epoch=None,
+                    offsets=None,
+                    dates=np.ascontiguousarray(arr_obj.reshape(-1), dtype=object),
+                )
+            if _is_scalar_astropy_time(first):
+                unix_vals = np.empty(arr_obj.size, dtype=np.float64)
+                for idx, item in enumerate(arr_obj.flat):
+                    if not _is_scalar_astropy_time(item):
+                        raise TypeError(
+                            "time iterable with astropy scalar Time values must be homogeneous"
+                        )
+                    unix_vals[idx] = float(item.utc.unix)
+                epoch_unix = float(unix_vals[0])
+                return _TimeSpec(
+                    mode="offsets",
+                    shape=tuple(arr_obj.shape),
+                    epoch=astropy_time_to_orekit_date(
+                        Time(epoch_unix, format="unix", scale="utc")
+                    ),
+                    offsets=np.ascontiguousarray(
+                        unix_vals - epoch_unix, dtype=np.float64
+                    ),
+                    dates=None,
+                )
 
-    dates_list = []
-    for t in times_list_raw:
-        dates_list.append(_to_absolutedate_scalar(t))
-
-    if has_vel:
-        r_out, v_out = _transform_pos_vel_grouped_by_dates(
-            r_in, v_in, dates_list, from_fr, to_fr
-        )
-        return r_out, v_out
-    return _transform_pos_grouped_by_dates(r_in, dates_list, from_fr, to_fr)
-
-
-def transform_positions_timed(
-    times: Any,
-    positions_m: np.ndarray,
-    from_frame: str,
-    to_frame: str,
-    *,
-    iers: Optional[Union[object, str]] = None,
-    simple_eop: bool = True,
-) -> np.ndarray:
-    return transform_timed(
-        times,
-        positions_m,
-        from_frame,
-        to_frame,
-        velocities_mps=None,
-        iers=iers,
-        simple_eop=simple_eop,
-    )
-
-
-def transform_pos_vel_timed(
-    times: Any,
-    positions_m: np.ndarray,
-    velocities_mps: np.ndarray,
-    from_frame: str,
-    to_frame: str,
-    *,
-    iers: Optional[Union[object, str]] = None,
-    simple_eop: bool = True,
-) -> Tuple[np.ndarray, np.ndarray]:
-    return transform_timed(
-        times,
-        positions_m,
-        from_frame,
-        to_frame,
-        velocities_mps=velocities_mps,
-        iers=iers,
-        simple_eop=simple_eop,
-    )
-
-
-def _normalize_component_input(x: Any, name: str) -> tuple[np.ndarray, bool]:
-    if isinstance(x, (float, int, np.floating, np.integer)) and not isinstance(x, bool):
-        return np.asarray([float(x)], dtype=np.float64), True
-
-    arr = np.asarray(x, dtype=np.float64)
-    if arr.ndim == 0:
-        return np.asarray([float(arr)], dtype=np.float64), True
-    if arr.ndim != 1:
-        raise ValueError(f"{name} must be scalar or 1D array; got shape {arr.shape}")
-    return np.ascontiguousarray(arr, dtype=np.float64), False
-
-
-def _normalize_astropy_time_for_coarse(times: Any) -> tuple[np.ndarray, bool]:
-    if AstropyTime is None:
-        raise RuntimeError("astropy is required for timed coarse ECI2ITRF wrappers")
-    if not isinstance(times, AstropyTime):
-        raise TypeError("times must be an astropy.time.Time scalar or 1D array")
-
-    is_scalar = getattr(times, "shape", None) == ()
-    if is_scalar:
-        return np.asarray([float(times.ut1.jd)], dtype=np.float64), True
-
-    if getattr(times, "ndim", 1) != 1:
-        raise ValueError(
-            f"times must be scalar or 1D astropy.time.Time; got shape {times.shape}"
-        )
-
-    jd_ut1 = np.asarray(times.ut1.jd, dtype=np.float64)
-    return np.ascontiguousarray(jd_ut1), False
-
-
-def _broadcast_length_for_components(
-    jd_ut1: np.ndarray, arrays: list[np.ndarray]
-) -> int:
-    n_time = int(jd_ut1.shape[0])
-    lengths = [n_time] + [int(a.shape[0]) for a in arrays]
-    n = max(lengths)
-    for ln in lengths:
-        if ln not in (1, n):
-            raise ValueError(
-                f"Input lengths must be broadcast-compatible (1 or N={n}); got {lengths}"
+        nums = np.asarray(time, dtype=np.float64)
+        if nums.ndim == 0:
+            return _normalize_time_input(float(nums))
+        if not np.all(np.isfinite(nums)):
+            raise ValueError("time contains non-finite values")
+        flat = np.ascontiguousarray(nums.reshape(-1), dtype=np.float64)
+        if flat.size == 0:
+            return _TimeSpec(
+                mode="offsets",
+                shape=tuple(nums.shape),
+                epoch=astropy_time_to_orekit_date(
+                    Time(0.0, format="unix", scale="utc")
+                ),
+                offsets=np.asarray([], dtype=np.float64),
+                dates=None,
             )
-    return n
+        epoch_unix = float(flat[0])
+        return _TimeSpec(
+            mode="offsets",
+            shape=tuple(nums.shape),
+            epoch=astropy_time_to_orekit_date(
+                Time(epoch_unix, format="unix", scale="utc")
+            ),
+            offsets=np.ascontiguousarray(flat - epoch_unix, dtype=np.float64),
+            dates=None,
+        )
+
+    raise TypeError(
+        "time must be astropy Time, Orekit AbsoluteDate, unix-seconds numeric values, "
+        "or an iterable/array of those types"
+    )
 
 
-def _repeat_if_needed(arr: np.ndarray, n: int) -> np.ndarray:
-    if arr.shape[0] == n:
-        return arr
-    if arr.shape[0] == 1:
-        return np.repeat(arr, n)
-    raise ValueError("Unexpected broadcast failure")
-
-
-def coarse_eci2itrf(
-    times: Any,
-    x_eci_m: Any,
-    y_eci_m: Any,
-    z_eci_m: Any,
+def _normalize_vector_component(
+    x: Union[np.ndarray, u.Quantity],
     *,
-    xp_rad: float = 0.0,
-    yp_rad: float = 0.0,
-):
-    """
-    Coarse ECI->ITRF conversion using astropy time(s) directly.
+    unit: u.Unit,
+    name: str,
+) -> tuple[np.ndarray, bool]:
+    is_quantity = isinstance(x, u.Quantity)
+    arr = np.asarray(x.to_value(unit) if is_quantity else x, dtype=np.float64)
+
+    if arr.ndim == 1:
+        if arr.shape[0] != 3:
+            raise ValueError(f"{name} must have shape (..., 3); got {arr.shape}")
+    elif arr.ndim >= 2:
+        if arr.shape[-1] != 3:
+            raise ValueError(f"{name} must have shape (..., 3); got {arr.shape}")
+    else:
+        raise ValueError(f"{name} must have shape (..., 3); got {arr.shape}")
+
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"{name} contains non-finite values")
+
+    return np.ascontiguousarray(arr, dtype=np.float64), is_quantity
+
+
+def _broadcast_shape(*shapes: tuple[int, ...]) -> tuple[int, ...]:
+    out: tuple[int, ...] = ()
+    for shp in shapes:
+        out = np.broadcast_shapes(out, shp)
+    return out
+
+
+def _reshape_output(flat: np.ndarray, target_shape: tuple[int, ...]) -> np.ndarray:
+    if target_shape == ():
+        return flat.reshape(3)
+    return flat.reshape(target_shape + (3,))
+
+
+def transform(
+    from_frame: Any,
+    to_frame: Any,
+    time: Any,
+    position: Union[np.ndarray, u.Quantity],
+    velocity: Optional[Union[np.ndarray, u.Quantity]] = None,
+    acceleration: Optional[Union[np.ndarray, u.Quantity]] = None,
+    *,
+    iers_convention: Any = None,
+    simple_eop: bool = True,
+) -> Tuple[
+    Union[np.ndarray, u.Quantity],
+    Optional[Union[np.ndarray, u.Quantity]],
+    Optional[Union[np.ndarray, u.Quantity]],
+]:
+    """Transform Cartesian state vectors between arbitrary Orekit frames.
 
     Parameters
     ----------
-    times : astropy.time.Time
-        Scalar or 1D time array. UT1/TT Julian dates are derived internally.
-    x_eci_m, y_eci_m, z_eci_m : float | np.ndarray
-        ECI components [m], each scalar or 1D array.
-    xp_rad, yp_rad : float, optional
-        Polar motion coordinates [rad].
+    from_frame, to_frame : Frame | str
+        Source and destination frames. Strings map common Orekit frames
+        (for example ``"gcrf"``, ``"itrf"``, ``"teme"``, ``"mod"``, ``"tod"``).
+        For any custom frame, pass an Orekit ``Frame`` object directly.
+    time : Any
+        Scalar or array-like time input. Supported forms:
+        - ``astropy.time.Time`` (scalar or array)
+        - Orekit ``AbsoluteDate`` (scalar or array/iterable)
+        - unix seconds as scalar/array numeric values
+        - time ``Quantity`` in seconds
+    position : ndarray | Quantity
+        Cartesian positions with shape ``(..., 3)`` in meters.
+    velocity : ndarray | Quantity, optional
+        Cartesian velocities with shape ``(..., 3)`` in m/s.
+    acceleration : ndarray | Quantity, optional
+        Cartesian accelerations with shape ``(..., 3)`` in m/s^2.
+        If provided without velocity, zero input velocity is assumed internally
+        to evaluate the acceleration transform.
+    iers_convention : optional
+        Orekit IERS convention object used when resolving Earth-fixed frames.
+        Defaults to ``IERS_2010``.
+    simple_eop : bool, default True
+        ``simpleEOP`` flag used when resolving Earth-fixed frames.
 
     Returns
     -------
-    (x_itrf_m, y_itrf_m, z_itrf_m)
-        Scalars for scalar inputs, otherwise 1D arrays.
+    tuple
+        ``(position, velocity, acceleration)`` transformed to ``to_frame``.
+        Missing optional components are returned as ``None``.
+        Output shape follows broadcasted input shape with trailing ``(3,)``.
     """
-    jd_ut1, t_scalar = _normalize_astropy_time_for_coarse(times)
-    jd_tt = np.asarray(
-        times.tt.jd if not t_scalar else [float(times.tt.jd)], dtype=np.float64
-    )
 
-    x_arr, x_scalar = _normalize_component_input(x_eci_m, "x_eci_m")
-    y_arr, y_scalar = _normalize_component_input(y_eci_m, "y_eci_m")
-    z_arr, z_scalar = _normalize_component_input(z_eci_m, "z_eci_m")
+    _bind_java()
 
-    n = _broadcast_length_for_components(jd_ut1, [x_arr, y_arr, z_arr])
-    x_arr = _repeat_if_needed(x_arr, n)
-    y_arr = _repeat_if_needed(y_arr, n)
-    z_arr = _repeat_if_needed(z_arr, n)
-    jd_ut1 = _repeat_if_needed(jd_ut1, n)
-    jd_tt = _repeat_if_needed(jd_tt, n)
+    iers = _coerce_iers(iers_convention)
+    from_fr = _resolve_frame(from_frame, iers=iers, simple_eop=bool(simple_eop))
+    to_fr = _resolve_frame(to_frame, iers=iers, simple_eop=bool(simple_eop))
 
-    if n == 1:
-        x, y, z = _coarse_eci2itrf_pos_kernel(
-            float(x_arr[0]),
-            float(y_arr[0]),
-            float(z_arr[0]),
-            float(jd_ut1[0]),
-            float(jd_tt[0]),
-            float(xp_rad),
-            float(yp_rad),
+    t_spec = _normalize_time_input(time)
+    p_arr, p_is_q = _normalize_vector_component(position, unit=u.m, name="position")
+    v_arr = None
+    a_arr = None
+    v_is_q = False
+    a_is_q = False
+
+    if velocity is not None:
+        v_arr, v_is_q = _normalize_vector_component(
+            velocity, unit=(u.m / u.s), name="velocity"
         )
-        if t_scalar and x_scalar and y_scalar and z_scalar:
-            return float(x), float(y), float(z)
-        return (
-            np.asarray([x], dtype=np.float64),
-            np.asarray([y], dtype=np.float64),
-            np.asarray([z], dtype=np.float64),
+    if acceleration is not None:
+        a_arr, a_is_q = _normalize_vector_component(
+            acceleration, unit=(u.m / (u.s**2)), name="acceleration"
         )
 
-    r_eci = np.column_stack((x_arr, y_arr, z_arr)).astype(np.float64)
-    r_itrf = _coarse_eci2itrf_pos_vec_kernel(
-        r_eci,
-        jd_ut1.astype(np.float64),
-        jd_tt.astype(np.float64),
-        float(xp_rad),
-        float(yp_rad),
-    )
-    return r_itrf[:, 0], r_itrf[:, 1], r_itrf[:, 2]
-
-
-def coarse_eci2itrf_pos_vel(
-    times: Any,
-    x_eci_m: Any,
-    y_eci_m: Any,
-    z_eci_m: Any,
-    vx_eci_mps: Any,
-    vy_eci_mps: Any,
-    vz_eci_mps: Any,
-    *,
-    xp_rad: float = 0.0,
-    yp_rad: float = 0.0,
-):
-    """
-    Coarse ECI->ITRF position/velocity conversion using astropy time(s).
-
-    Inputs may be scalars or 1D arrays and are broadcast against time length.
-    """
-    jd_ut1, t_scalar = _normalize_astropy_time_for_coarse(times)
-    jd_tt = np.asarray(
-        times.tt.jd if not t_scalar else [float(times.tt.jd)], dtype=np.float64
+    target_shape = _broadcast_shape(
+        t_spec.shape,
+        p_arr.shape[:-1],
+        v_arr.shape[:-1] if v_arr is not None else (),
+        a_arr.shape[:-1] if a_arr is not None else (),
     )
 
-    x_arr, x_scalar = _normalize_component_input(x_eci_m, "x_eci_m")
-    y_arr, y_scalar = _normalize_component_input(y_eci_m, "y_eci_m")
-    z_arr, z_scalar = _normalize_component_input(z_eci_m, "z_eci_m")
-    vx_arr, vx_scalar = _normalize_component_input(vx_eci_mps, "vx_eci_mps")
-    vy_arr, vy_scalar = _normalize_component_input(vy_eci_mps, "vy_eci_mps")
-    vz_arr, vz_scalar = _normalize_component_input(vz_eci_mps, "vz_eci_mps")
-
-    n = _broadcast_length_for_components(
-        jd_ut1,
-        [x_arr, y_arr, z_arr, vx_arr, vy_arr, vz_arr],
+    p_b = np.broadcast_to(p_arr, target_shape + (3,)).reshape(-1, 3)
+    v_b = (
+        np.broadcast_to(v_arr, target_shape + (3,)).reshape(-1, 3)
+        if v_arr is not None
+        else None
     )
-    x_arr = _repeat_if_needed(x_arr, n)
-    y_arr = _repeat_if_needed(y_arr, n)
-    z_arr = _repeat_if_needed(z_arr, n)
-    vx_arr = _repeat_if_needed(vx_arr, n)
-    vy_arr = _repeat_if_needed(vy_arr, n)
-    vz_arr = _repeat_if_needed(vz_arr, n)
-    jd_ut1 = _repeat_if_needed(jd_ut1, n)
-    jd_tt = _repeat_if_needed(jd_tt, n)
+    a_b = (
+        np.broadcast_to(a_arr, target_shape + (3,)).reshape(-1, 3)
+        if a_arr is not None
+        else None
+    )
 
-    if n == 1:
-        x, y, z, vx, vy, vz = _coarse_eci2itrf_pos_vel_kernel(
-            float(x_arr[0]),
-            float(y_arr[0]),
-            float(z_arr[0]),
-            float(vx_arr[0]),
-            float(vy_arr[0]),
-            float(vz_arr[0]),
-            float(jd_ut1[0]),
-            float(jd_tt[0]),
-            float(xp_rad),
-            float(yp_rad),
+    if t_spec.mode == "offsets":
+        t_arr = (
+            np.asarray(t_spec.offsets, dtype=np.float64).reshape(t_spec.shape)
+            if t_spec.shape != ()
+            else np.asarray(float(t_spec.offsets[0]), dtype=np.float64)
         )
-        if (
-            t_scalar
-            and x_scalar
-            and y_scalar
-            and z_scalar
-            and vx_scalar
-            and vy_scalar
-            and vz_scalar
-        ):
-            return float(x), float(y), float(z), float(vx), float(vy), float(vz)
-        return (
-            np.asarray([x], dtype=np.float64),
-            np.asarray([y], dtype=np.float64),
-            np.asarray([z], dtype=np.float64),
-            np.asarray([vx], dtype=np.float64),
-            np.asarray([vy], dtype=np.float64),
-            np.asarray([vz], dtype=np.float64),
+        dt_b = (
+            np.broadcast_to(t_arr, target_shape)
+            .reshape(-1)
+            .astype(np.float64, copy=False)
+        )
+        dt_b = np.ascontiguousarray(dt_b, dtype=np.float64)
+    else:
+        d_arr = (
+            np.asarray(t_spec.dates, dtype=object).reshape(t_spec.shape)
+            if t_spec.shape != ()
+            else np.asarray(t_spec.dates[0], dtype=object)
+        )
+        dates_b = np.broadcast_to(d_arr, target_shape).reshape(-1)
+        dates_b = np.ascontiguousarray(dates_b, dtype=object)
+
+    p_flat = np.ascontiguousarray(p_b.reshape(-1), dtype=np.float64)
+    v_flat = (
+        np.ascontiguousarray(v_b.reshape(-1), dtype=np.float64)
+        if v_b is not None
+        else None
+    )
+    a_flat = (
+        np.ascontiguousarray(a_b.reshape(-1), dtype=np.float64)
+        if a_b is not None
+        else None
+    )
+
+    vel_requested = v_flat is not None
+    acc_requested = a_flat is not None
+
+    v_for_java = v_flat
+    if acc_requested and not vel_requested:
+        v_for_java = np.zeros_like(p_flat)
+
+    if t_spec.mode == "offsets":
+        result = _JavaTimedRotationBridge.transformAtOffsets(
+            from_fr,
+            to_fr,
+            t_spec.epoch,
+            dt_b,
+            p_flat,
+            v_for_java,
+            a_flat,
+        )
+    else:
+        dates_java = jpype.JArray(AbsoluteDate)(list(dates_b.tolist()))
+        result = _JavaTimedRotationBridge.transformAtDates(
+            from_fr,
+            to_fr,
+            dates_java,
+            p_flat,
+            v_for_java,
+            a_flat,
         )
 
-    r_eci = np.column_stack((x_arr, y_arr, z_arr)).astype(np.float64)
-    v_eci = np.column_stack((vx_arr, vy_arr, vz_arr)).astype(np.float64)
-    r_itrf, v_itrf = _coarse_eci2itrf_pos_vel_vec_kernel(
-        r_eci,
-        v_eci,
-        jd_ut1.astype(np.float64),
-        jd_tt.astype(np.float64),
-        float(xp_rad),
-        float(yp_rad),
+    p_out_np = _reshape_output(np.asarray(result.p, dtype=np.float64), target_shape)
+    v_out_np = (
+        _reshape_output(np.asarray(result.v, dtype=np.float64), target_shape)
+        if vel_requested
+        else None
     )
-    return (
-        r_itrf[:, 0],
-        r_itrf[:, 1],
-        r_itrf[:, 2],
-        v_itrf[:, 0],
-        v_itrf[:, 1],
-        v_itrf[:, 2],
+    a_out_np = (
+        _reshape_output(np.asarray(result.a, dtype=np.float64), target_shape)
+        if acc_requested
+        else None
     )
+
+    p_out = p_out_np * u.m if p_is_q else p_out_np
+    v_out = (v_out_np * (u.m / u.s)) if (v_out_np is not None and v_is_q) else v_out_np
+    a_out = (
+        a_out_np * (u.m / (u.s**2)) if (a_out_np is not None and a_is_q) else a_out_np
+    )
+
+    return p_out, v_out, a_out
 
 
 __all__ = [
-    "transform_timed",
-    "transform_positions_timed",
-    "transform_pos_vel_timed",
-    "coarse_eci2itrf",
-    "coarse_eci2itrf_pos_vel",
+    "initialize_timed_rotations",
+    "transform",
 ]

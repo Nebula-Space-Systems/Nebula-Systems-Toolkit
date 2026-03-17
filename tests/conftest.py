@@ -6,6 +6,16 @@ from astropy.time import Time
 
 
 def pytest_configure(config) -> None:
+    try:
+        from astropy.utils import iers
+
+        iers.conf.auto_download = False
+        iers.conf.remote_timeout = 1
+        iers.conf.auto_max_age = None
+        iers.conf.iers_degraded_accuracy = "warn"
+    except Exception:
+        pass
+
     config.addinivalue_line(
         "markers",
         "slow: marks slower Orekit/JPype propagation checks",

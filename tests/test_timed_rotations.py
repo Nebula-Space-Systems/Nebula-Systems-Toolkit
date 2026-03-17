@@ -14,11 +14,7 @@ astropy_time = pytest.importorskip("astropy.time")
 astropy_coordinates = pytest.importorskip("astropy.coordinates")
 u = pytest.importorskip("astropy.units")
 
-from nebula.transforms._timed_rotations import (
-    transform_pos_vel_timed,
-    transform_positions_timed,
-    transform_timed,
-)
+from nebula.transforms import transform
 
 Time = astropy_time.Time
 GCRS = astropy_coordinates.GCRS
@@ -72,9 +68,13 @@ def test_timed_rotations_gcrf_to_itrf_vs_astropy_position() -> None:
     n = 96
     r, _ = _random_states(n, seed=1)
     t0 = Time("2026-01-01T00:00:00", scale="utc")
-    times = t0 + np.linspace(0.0, 3.0, n) * u.day
+    times = Time(
+        t0.unix + np.linspace(0.0, 3.0 * 86400.0, n, dtype=np.float64),
+        format="unix",
+        scale="utc",
+    )
 
-    r_ore = transform_positions_timed(times, r, "gcrf", "itrf")
+    r_ore, _, _ = transform("gcrf", "itrf", times, r)
     r_ast = _astropy_transform_pos(r, times, "gcrf", "itrf")
 
     err = np.linalg.norm(r_ore - r_ast, axis=1)
@@ -86,9 +86,13 @@ def test_timed_rotations_teme_to_itrf_vs_astropy_position() -> None:
     n = 96
     r, _ = _random_states(n, seed=2)
     t0 = Time("2026-03-01T00:00:00", scale="utc")
-    times = t0 + np.linspace(0.0, 2.0, n) * u.day
+    times = Time(
+        t0.unix + np.linspace(0.0, 2.0 * 86400.0, n, dtype=np.float64),
+        format="unix",
+        scale="utc",
+    )
 
-    r_ore = transform_positions_timed(times, r, "teme", "itrf")
+    r_ore, _, _ = transform("teme", "itrf", times, r)
     r_ast = _astropy_transform_pos(r, times, "teme", "itrf")
 
     err = np.linalg.norm(r_ore - r_ast, axis=1)
@@ -100,10 +104,14 @@ def test_timed_rotations_pos_vel_roundtrip_is_stable() -> None:
     n = 128
     r, v = _random_states(n, seed=3)
     t0 = Time("2027-01-01T00:00:00", scale="utc")
-    times = t0 + np.linspace(0.0, 6.0, n) * u.hour
+    times = Time(
+        t0.unix + np.linspace(0.0, 6.0 * 3600.0, n, dtype=np.float64),
+        format="unix",
+        scale="utc",
+    )
 
-    r_i, v_i = transform_pos_vel_timed(times, r, v, "gcrf", "itrf")
-    r_b, v_b = transform_pos_vel_timed(times, r_i, v_i, "itrf", "gcrf")
+    r_i, v_i, _ = transform("gcrf", "itrf", times, r, velocity=v)
+    r_b, v_b, _ = transform("itrf", "gcrf", times, r_i, velocity=v_i)
 
     np.testing.assert_allclose(r_b, r, atol=2e-6, rtol=0.0)
     np.testing.assert_allclose(v_b, v, atol=2e-9, rtol=0.0)
@@ -112,14 +120,21 @@ def test_timed_rotations_pos_vel_roundtrip_is_stable() -> None:
 def test_timed_rotations_interface_shapes_and_optional_velocity() -> None:
     r, v = _random_states(1, seed=4)
     t_scalar = Time("2026-01-01T00:00:00", scale="utc")
-    t_vec = t_scalar + np.arange(5, dtype=np.float64) * u.s
+    t_vec = Time(
+        t_scalar.unix + np.arange(5, dtype=np.float64), format="unix", scale="utc"
+    )
 
-    r1 = transform_timed(t_scalar, r[0], "gcrf", "itrf")
+    r1, v1, a1 = transform("gcrf", "itrf", t_scalar, r[0])
     assert isinstance(r1, np.ndarray) and r1.shape == (3,)
+    assert v1 is None
+    assert a1 is None
 
-    r2 = transform_timed(t_vec, r[0], "gcrf", "itrf")
+    r2, v2, a2 = transform("gcrf", "itrf", t_vec, r[0])
     assert isinstance(r2, np.ndarray) and r2.shape == (5, 3)
+    assert v2 is None
+    assert a2 is None
 
-    r3, v3 = transform_timed(t_scalar, r[0], "gcrf", "itrf", velocities_mps=v[0])
+    r3, v3, a3 = transform("gcrf", "itrf", t_scalar, r[0], velocity=v[0])
     assert r3.shape == (3,)
     assert v3.shape == (3,)
+    assert a3 is None

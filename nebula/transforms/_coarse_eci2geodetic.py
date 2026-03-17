@@ -12,7 +12,7 @@ import math
 import numpy as np
 from numba import njit, prange
 
-from ._coarse_eci2itrf import _coarse_eci2itrf_pos_iau76_shortnut
+from ._coarse_eci2itrf import _coarse_eci2ecef_pos_iau76_shortnut
 from ._ecef2geodetic import ecef2geodetic, ecef2geodetic_deg
 
 
@@ -29,7 +29,7 @@ def _coarse_eci2geodetic_iau76_shortnut(
     """
     Approximate ECI(native)->WGS84 geodetic (radians).
     """
-    x_ecef, y_ecef, z_ecef = _coarse_eci2itrf_pos_iau76_shortnut(
+    x_ecef, y_ecef, z_ecef = _coarse_eci2ecef_pos_iau76_shortnut(
         x_eci, y_eci, z_eci, jd_ut1, jd_tt, xp_rad, yp_rad
     )
     return ecef2geodetic(x_ecef, y_ecef, z_ecef)
@@ -48,7 +48,7 @@ def _coarse_eci2geodetic_deg_iau76_shortnut(
     """
     Approximate ECI(native)->WGS84 geodetic (degrees).
     """
-    x_ecef, y_ecef, z_ecef = _coarse_eci2itrf_pos_iau76_shortnut(
+    x_ecef, y_ecef, z_ecef = _coarse_eci2ecef_pos_iau76_shortnut(
         x_eci, y_eci, z_eci, jd_ut1, jd_tt, xp_rad, yp_rad
     )
     return ecef2geodetic_deg(x_ecef, y_ecef, z_ecef)

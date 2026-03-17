@@ -42,18 +42,15 @@ def _build_demo_constellation(epoch: Time) -> list[Orbit]:
         for idx in range(count):
             ma_deg = idx * (360.0 / float(count))
             sats.append(
-                Orbit.from_kepler_fast(
+                Orbit.from_kepler_two_body(
                     epoch=epoch,
-                    a_m=a_m,
+                    a=a_m,
                     e=e,
                     i=np.deg2rad(inc_deg),
                     raan=np.deg2rad(raan_deg),
                     argp=0.0,
                     anomaly=np.deg2rad(ma_deg),
                     anomaly_type="mean",
-                    dt_save_s=30.0,
-                    enable_j2=False,
-                    j2_mode="secular",
                 )
             )
 
@@ -131,11 +128,15 @@ def main() -> None:
     duration_s = 14 * 86400.0
     step_s = 60.0
     n_steps = int(duration_s / step_s) + 1
-    times = epoch + np.arange(n_steps, dtype=np.float64) * step_s * u.s
+    times = Time(
+        epoch.unix + np.arange(n_steps, dtype=np.float64) * step_s,
+        format="unix",
+        scale="utc",
+    )
     t_seconds = (times - times[0]).to_value(u.s).astype(np.float64)
 
     sats = _build_demo_constellation(epoch)
-    obs_positions = [sat.pos_itrf(times) for sat in sats]
+    obs_positions = [sat.get_p_np(times, frame="itrf") for sat in sats]
 
     config = ExactCoverageConfig(
         nlats=361,
