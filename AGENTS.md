@@ -14,10 +14,10 @@ Project-specific instructions for AI coding agents working in this repository.
 - `nebula_old/` is legacy reference code; do not modify it unless explicitly requested.
 
 ## Coding Expectations
-- Keep public behavior backward compatible unless a breaking change is explicitly requested.
 - Keep dependencies minimal; avoid adding heavy dependencies unless justified by clear value.
 - Keep changes focused to the user request; avoid unrelated refactors.
 - Use clear, maintainable code over clever shortcuts.
+- For public facing interfaces, always include good documentation for users.
 
 ## Test Expectations
 - Add or update tests for behavior changes in `tests/`.
