@@ -3,6 +3,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+import nebula
+import nebula.propagation as propagation
 import nebula.transforms as transforms
 from nebula.transforms import transform
 
@@ -47,7 +49,9 @@ def test_transform_broadcasts_scalar_state_over_time_array() -> None:
 
 def test_transform_namespace_exports_only_new_timed_api() -> None:
     assert callable(transforms.transform)
-    assert callable(transforms.initialize_timed_rotations)
+    assert callable(nebula.initialize_orekit)
+    assert not hasattr(transforms, "initialize_timed_rotations")
+    assert not hasattr(propagation, "initialize_orekit")
     assert not hasattr(transforms, "transform_timed")
     assert not hasattr(transforms, "transform_positions_timed")
     assert not hasattr(transforms, "transform_pos_vel_timed")

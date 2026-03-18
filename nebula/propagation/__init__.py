@@ -1,10 +1,10 @@
 from importlib import import_module
 from typing import Any
 
-from nebula.propagation.orbit import Orbit, initialize_orekit
+from nebula.propagation.orbit import Orbit
 from nebula.propagation.walker import build_walker_constellation
 
-__all__ = ["Orbit", "initialize_orekit", "build_walker_constellation", "orbit"]
+__all__ = ["Orbit", "build_walker_constellation", "orbit"]
 
 
 def __getattr__(name: str) -> Any:

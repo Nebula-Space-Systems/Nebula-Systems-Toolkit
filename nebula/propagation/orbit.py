@@ -2,7 +2,7 @@
 
 This module intentionally keeps Python-side work minimal. Heavy propagation,
 ephemeris interpolation, frame transforms, geodetic conversion, and attitude
-queries are executed in Java via ``OrekitOrbitDesignBridge``.
+queries are executed in Java via ``OrekitOrbitPropagationBridge``.
 
 Design goals:
 - Thin, ergonomic Python API for Orekit users.
@@ -28,15 +28,14 @@ from nebula.time_utils import (
     orekit_date_to_astropy_time as _orekit_date_to_astropy_time_shared,
 )
 
-from .orbit_design_java_bridge import (
-    get_orbit_design_bridge_class,
-    initialize_orbit_design_runtime,
+from ._orbit_propagation_bridge import (
+    get_orbit_propagation_bridge_class,
 )
 
 
 # Lazy-initialized Java bindings
 _RUNTIME_BOUND = False
-_JavaOrbitDesignBridge = None
+_JavaOrbitPropagationBridge = None
 FramesFactory = None
 PositionAngleType = None
 TimeScalesFactory = None
@@ -47,20 +46,6 @@ OneAxisEllipsoid = None
 # Lazily built WGS84 ellipsoid in ITRF/IERS2010/simpleEOP
 _WGS84_ELLIPSOID_CACHE = None
 
-
-def initialize_orekit(*, data_path: str | None = None) -> None:
-    """Initialize JVM + Orekit runtime resources used by this module.
-
-    Parameters
-    ----------
-    data_path : str | None, optional
-        Optional path to an Orekit data directory. If omitted, the runtime
-        helper resolves the package default.
-    """
-
-    initialize_orbit_design_runtime(data_path=data_path)
-
-
 def _bind_java() -> None:
     """Bind Orekit/bridge classes lazily after starting the JVM.
 
@@ -69,14 +54,16 @@ def _bind_java() -> None:
     """
 
     global _RUNTIME_BOUND
-    global _JavaOrbitDesignBridge
+    global _JavaOrbitPropagationBridge
     global FramesFactory, PositionAngleType, TimeScalesFactory
     global AbsoluteDate, IERSConventions, OneAxisEllipsoid
 
     if _RUNTIME_BOUND:
         return
 
-    initialize_orbit_design_runtime()
+    from nebula._orekit_runtime import ensure_orekit_runtime
+
+    ensure_orekit_runtime()
 
     from org.orekit.bodies import OneAxisEllipsoid as _OneAxisEllipsoid
     from org.orekit.frames import FramesFactory as _FramesFactory
@@ -92,7 +79,7 @@ def _bind_java() -> None:
     IERSConventions = _IERSConventions
     OneAxisEllipsoid = _OneAxisEllipsoid
 
-    _JavaOrbitDesignBridge = get_orbit_design_bridge_class()
+    _JavaOrbitPropagationBridge = get_orbit_propagation_bridge_class()
     _RUNTIME_BOUND = True
 
 
@@ -697,7 +684,7 @@ class OrbitCreationMixin:
 
         _bind_java()
         iers = _coerce_iers(iers_convention)
-        bridge = _JavaOrbitDesignBridge.fromSpacecraftState(state)
+        bridge = _JavaOrbitPropagationBridge.fromSpacecraftState(state)
         orbit = cls._from_bridge(
             bridge,
             iers,
@@ -770,7 +757,7 @@ class OrbitCreationMixin:
         if not bool(inertial_frame.isPseudoInertial()):
             raise ValueError("inertial_frame must be pseudo-inertial")
 
-        bridge = _JavaOrbitDesignBridge.fromKeplerTwoBody(
+        bridge = _JavaOrbitPropagationBridge.fromKeplerTwoBody(
             astropy_time_to_orekit_date(epoch),
             float(a),
             float(e),
@@ -981,7 +968,7 @@ class OrbitCreationMixin:
 
 
 class Orbit(OrbitCreationMixin):
-    """Thin Python wrapper over a Java ``OrekitOrbitDesignBridge`` instance.
+    """Thin Python wrapper over a Java ``OrekitOrbitPropagationBridge`` instance.
 
     Notes
     -----
@@ -1017,7 +1004,7 @@ class Orbit(OrbitCreationMixin):
         self.iers = _coerce_iers(iers)
         self.simple_eop = bool(simple_eop)
 
-        self._bridge = _JavaOrbitDesignBridge.fromPropagator(propagator)
+        self._bridge = _JavaOrbitPropagationBridge.fromPropagator(propagator)
         self._native_frame = self._bridge.getNativeFrame()
         self._epoch = _orekit_date_to_astropy_time(
             self.propagator.getInitialState().getDate()

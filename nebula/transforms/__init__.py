@@ -4,7 +4,7 @@ Conventions used in this package:
 - Modules prefixed with ``_`` are internal implementation modules.
 - Public functions are re-exported from ``nebula.transforms``.
 - Timed-rotation internals live in ``_timed_rotations`` and are exposed via
-  package-level ``transform`` / ``initialize_timed_rotations``.
+  package-level ``transform``.
 """
 
 from importlib import import_module
@@ -147,7 +147,6 @@ __all__ = [
     "geodetic2enu_vec_llh",
     "geodetic2enu_vec_lla",
     "transform",
-    "initialize_timed_rotations",
     "WGS84_A",
     "WGS84_B",
     "WGS84_A2",
@@ -167,7 +166,6 @@ __all__ = [
 
 _TIMED_ROTATION_EXPORTS = {
     "transform",
-    "initialize_timed_rotations",
 }
 
 

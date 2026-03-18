@@ -27,21 +27,9 @@ def _initialize_default_runtime() -> None:
     """Best-effort Orekit runtime bootstrap when no explicit binder is provided."""
 
     try:
-        from nebula.propagation.orbit_design_java_bridge import (  # local import on purpose
-            initialize_orbit_design_runtime,
-        )
+        from nebula import initialize_orekit as initialize_nebula_orekit  # local import on purpose
 
-        initialize_orbit_design_runtime()
-        return
-    except Exception:
-        pass
-
-    try:
-        from nebula.transforms._timed_rotations_java_bridge import (  # local import on purpose
-            initialize_timed_rotations_runtime,
-        )
-
-        initialize_timed_rotations_runtime()
+        initialize_nebula_orekit()
     except Exception as exc:
         raise RuntimeError(
             "Unable to initialize Orekit runtime automatically. "

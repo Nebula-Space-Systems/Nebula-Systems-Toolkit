@@ -1,4 +1,4 @@
-"""Runtime/build helpers for the Java timed-rotation bridge."""
+"""Build/class-loading helpers for the Java timed-rotation bridge."""
 
 from __future__ import annotations
 
@@ -21,9 +21,6 @@ JAVA_TIMED_ROTATION_CLASS = "com.nebula.transforms.TimedRotationBridge"
 _BUILD_LOCK = threading.Lock()
 _BUILD_DONE = False
 _BUILD_CLASSPATH: Optional[str] = None
-
-_RUNTIME_LOCK = threading.Lock()
-_RUNTIME_READY = False
 
 
 def _source_file() -> Path:
@@ -192,39 +189,10 @@ def prepare_timed_rotations_bridge_classpath() -> Optional[str]:
         return _BUILD_CLASSPATH
 
 
-def initialize_timed_rotations_runtime(*, data_path: Optional[str] = None) -> None:
-    """Initialize runtime for Java timed-rotation transforms."""
-
-    global _RUNTIME_READY
-    if _RUNTIME_READY:
-        return
-
-    with _RUNTIME_LOCK:
-        if _RUNTIME_READY:
-            return
-
-        cp = prepare_timed_rotations_bridge_classpath()
-        if cp:
-            try:
-                jpype.addClassPath(cp)
-            except Exception:
-                pass
-
-        from nebula.propagation.orbit import initialize_orekit
-
-        initialize_orekit(data_path=data_path)
-
-        if cp and jpype.isJVMStarted():
-            try:
-                jpype.addClassPath(cp)
-            except Exception:
-                pass
-
-        _RUNTIME_READY = True
-
-
 def get_timed_rotation_bridge_class():
     """Return JPype class handle for ``TimedRotationBridge``."""
 
-    initialize_timed_rotations_runtime()
+    from nebula._orekit_runtime import ensure_orekit_runtime
+
+    ensure_orekit_runtime()
     return jpype.JClass(JAVA_TIMED_ROTATION_CLASS)

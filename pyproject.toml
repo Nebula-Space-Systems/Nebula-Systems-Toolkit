@@ -46,7 +46,7 @@ all = [
 packages = ["nebula"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"nebula/propagation/java_orbit_design/OrekitOrbitDesignBridge.jar" = "nebula/propagation/java_orbit_design/OrekitOrbitDesignBridge.jar"
+"nebula/propagation/_java_orbit_propagation/OrekitOrbitPropagationBridge.jar" = "nebula/propagation/_java_orbit_propagation/OrekitOrbitPropagationBridge.jar"
 
 [tool.hatch.build.targets.sdist]
 include = [

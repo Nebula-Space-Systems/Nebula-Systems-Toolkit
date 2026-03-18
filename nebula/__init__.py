@@ -19,6 +19,7 @@ _MODULE_EXPORTS = {"time_utils"}
 
 __all__ = [
     "__version__",
+    "initialize_orekit",
     "coverage",
     "localization",
     "geometry",
@@ -27,6 +28,18 @@ __all__ = [
     "plotting",
     "time_utils",
 ]
+
+
+def initialize_orekit(*, data_path: str | None = None) -> None:
+    """Initialize Orekit/JVM runtime for Nebula.
+
+    This is the single package-level initializer for Orekit-backed features.
+    It prepares all bridge classpaths, starts the JVM, and configures Orekit data.
+    """
+
+    from nebula._orekit_runtime import ensure_orekit_runtime
+
+    ensure_orekit_runtime(data_path=data_path)
 
 
 def __getattr__(name: str) -> Any:

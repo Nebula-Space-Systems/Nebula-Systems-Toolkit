@@ -20,7 +20,6 @@ from nebula.time_utils import (
 
 from ._timed_rotations_java_bridge import (
     get_timed_rotation_bridge_class,
-    initialize_timed_rotations_runtime,
 )
 
 
@@ -32,13 +31,6 @@ IERSConventions = None
 AbsoluteDate = None
 TimeScalesFactory = None
 
-
-def initialize_timed_rotations(*, data_path: str | None = None) -> None:
-    """Initialize JVM/runtime for Java-backed timed frame transforms."""
-
-    initialize_timed_rotations_runtime(data_path=data_path)
-
-
 def _bind_java() -> None:
     global _RUNTIME_BOUND
     global _JavaTimedRotationBridge, FramesFactory, IERSConventions, AbsoluteDate
@@ -47,7 +39,9 @@ def _bind_java() -> None:
     if _RUNTIME_BOUND:
         return
 
-    initialize_timed_rotations_runtime()
+    from nebula._orekit_runtime import ensure_orekit_runtime
+
+    ensure_orekit_runtime()
 
     from org.orekit.frames import FramesFactory as _FramesFactory  # type: ignore
     from org.orekit.time import AbsoluteDate as _AbsoluteDate  # type: ignore
@@ -348,6 +342,5 @@ def transform(
 
 
 __all__ = [
-    "initialize_timed_rotations",
     "transform",
 ]

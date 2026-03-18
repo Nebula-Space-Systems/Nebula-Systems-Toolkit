@@ -1,4 +1,4 @@
-package com.nebula.orbitdesign;
+package com.nebula.propagation;
 
 import org.hipparchus.geometry.euclidean.threed.Rotation;
 import org.hipparchus.geometry.euclidean.threed.Vector3D;
@@ -21,12 +21,12 @@ import org.orekit.utils.Constants;
 import org.orekit.utils.PVCoordinates;
 
 /**
- * Java-first orbit engine for the separate orbit_design.py interface.
+ * Java-first orbit engine for the separate orbit propagation interface.
  *
  * <p>All propagation loops, ephemeris interpolation, frame transforms, geodetic conversion,
  * and attitude extraction are executed in Java.
  */
-public final class OrekitOrbitDesignBridge {
+public final class OrekitOrbitPropagationBridge {
 
     private static final double MIN_WINDOW_SECONDS = 1.0e-6;
 
@@ -39,7 +39,7 @@ public final class OrekitOrbitDesignBridge {
     private double tMinSeconds;
     private double tMaxSeconds;
 
-    public OrekitOrbitDesignBridge(final Propagator propagator) {
+    public OrekitOrbitPropagationBridge(final Propagator propagator) {
         if (propagator == null) {
             throw new IllegalArgumentException("propagator must not be null");
         }
@@ -55,11 +55,11 @@ public final class OrekitOrbitDesignBridge {
         this.tMaxSeconds = 0.0;
     }
 
-    public static OrekitOrbitDesignBridge fromPropagator(final Propagator propagator) {
-        return new OrekitOrbitDesignBridge(propagator);
+    public static OrekitOrbitPropagationBridge fromPropagator(final Propagator propagator) {
+        return new OrekitOrbitPropagationBridge(propagator);
     }
 
-    public static OrekitOrbitDesignBridge fromSpacecraftState(final SpacecraftState state) {
+    public static OrekitOrbitPropagationBridge fromSpacecraftState(final SpacecraftState state) {
         if (state == null) {
             throw new IllegalArgumentException("state must not be null");
         }
@@ -68,10 +68,10 @@ public final class OrekitOrbitDesignBridge {
         propagator.resetInitialState(state);
         applyDefaultAttitudeProvider(propagator, state.getFrame());
 
-        return new OrekitOrbitDesignBridge(propagator);
+        return new OrekitOrbitPropagationBridge(propagator);
     }
 
-    public static OrekitOrbitDesignBridge fromKeplerTwoBody(
+    public static OrekitOrbitPropagationBridge fromKeplerTwoBody(
             final AbsoluteDate epoch,
             final double a,
             final double e,
@@ -110,10 +110,10 @@ public final class OrekitOrbitDesignBridge {
         propagator.resetInitialState(initialState);
         applyDefaultAttitudeProvider(propagator, inertialFrame);
 
-        return new OrekitOrbitDesignBridge(propagator);
+        return new OrekitOrbitPropagationBridge(propagator);
     }
 
-    public static OrekitOrbitDesignBridge fromKeplerEcksteinHechler(
+    public static OrekitOrbitPropagationBridge fromKeplerEcksteinHechler(
             final AbsoluteDate epoch,
             final double a,
             final double e,
@@ -167,7 +167,7 @@ public final class OrekitOrbitDesignBridge {
 
         applyDefaultAttitudeProvider(propagator, inertialFrame);
 
-        return new OrekitOrbitDesignBridge(propagator);
+        return new OrekitOrbitPropagationBridge(propagator);
     }
 
     public Propagator getPropagator() {
@@ -468,6 +468,7 @@ public final class OrekitOrbitDesignBridge {
         }
     }
 }
+
 
 
 

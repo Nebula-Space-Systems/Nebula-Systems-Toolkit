@@ -1,12 +1,8 @@
-"""Runtime and build utilities for the standalone orbit design Java bridge.
+"""Build utilities for the standalone orbit propagation Java bridge.
 
 This module owns:
-- Java source compilation for ``OrekitOrbitDesignBridge``.
+- Java source compilation for ``OrekitOrbitPropagationBridge``.
 - Packaging compiled classes into a local prebuilt JAR.
-- JVM startup and Orekit data initialization.
-
-It is intentionally isolated from the rest of ``nebula.propagation`` so the
-Java bridge runtime/build logic remains focused and testable.
 """
 
 from __future__ import annotations
@@ -25,37 +21,34 @@ import jpype
 import orekit_jpype
 
 
-JAVA_ORBIT_DESIGN_CLASS = "com.nebula.orbitdesign.OrekitOrbitDesignBridge"
+JAVA_ORBIT_PROPAGATION_CLASS = "com.nebula.propagation.OrekitOrbitPropagationBridge"
 
 _BUILD_LOCK = threading.Lock()
 _BUILD_DONE = False
 _BUILD_CLASSPATH: Optional[str] = None
-_RUNTIME_LOCK = threading.Lock()
-_RUNTIME_READY = False
-_RUNTIME_FAULTHANDLER_DISABLED = False
 
 
 def _source_file() -> Path:
     return (
         Path(__file__).resolve().parent
-        / "java_orbit_design"
+        / "_java_orbit_propagation"
         / "com"
         / "nebula"
-        / "orbitdesign"
-        / "OrekitOrbitDesignBridge.java"
+        / "propagation"
+        / "OrekitOrbitPropagationBridge.java"
     )
 
 
 def _classes_dir() -> Path:
-    return Path(__file__).resolve().parent / "java_orbit_design" / ".build_classes"
+    return Path(__file__).resolve().parent / "_java_orbit_propagation" / ".build_classes"
 
 
 def _prebuilt_jar() -> Path:
-    return Path(__file__).resolve().parent / "java_orbit_design" / "OrekitOrbitDesignBridge.jar"
+    return Path(__file__).resolve().parent / "_java_orbit_propagation" / "OrekitOrbitPropagationBridge.jar"
 
 
 def _class_file(classes_dir: Path) -> Path:
-    return classes_dir / "com" / "nebula" / "orbitdesign" / "OrekitOrbitDesignBridge.class"
+    return classes_dir / "com" / "nebula" / "propagation" / "OrekitOrbitPropagationBridge.class"
 
 
 def _javac_path() -> Optional[Path]:
@@ -119,7 +112,7 @@ def _create_jar_with_zipfile(classes_dir: Path, jar_path: Path) -> None:
                 zf.write(file_path, arcname)
 
 
-def prepare_orbit_design_bridge_classpath() -> Optional[str]:
+def prepare_orbit_propagation_bridge_classpath() -> Optional[str]:
     """Build (if needed) and return classpath entry for the Java bridge.
 
     Returns
@@ -194,7 +187,7 @@ def prepare_orbit_design_bridge_classpath() -> Optional[str]:
 
         except Exception as exc:
             warnings.warn(
-                f"Failed to build orbit design Java bridge: {exc}",
+                f"Failed to build orbit propagation Java bridge: {exc}",
                 RuntimeWarning,
             )
 
@@ -209,60 +202,10 @@ def prepare_orbit_design_bridge_classpath() -> Optional[str]:
         return _BUILD_CLASSPATH
 
 
-def _default_data_path() -> Path:
-    return Path(__file__).resolve().parents[2] / "data" / "orekit-data"
+def get_orbit_propagation_bridge_class():
+    """Return JPype class handle for ``OrekitOrbitPropagationBridge``."""
 
+    from nebula._orekit_runtime import ensure_orekit_runtime
 
-def initialize_orbit_design_runtime(*, data_path: Optional[str] = None) -> None:
-    """Initialize JVM + Orekit data for the standalone orbit design stack.
-
-    This function is idempotent.
-    """
-
-    global _RUNTIME_READY, _RUNTIME_FAULTHANDLER_DISABLED
-
-    if _RUNTIME_READY:
-        return
-
-    with _RUNTIME_LOCK:
-        if _RUNTIME_READY:
-            return
-
-        os.environ.setdefault("JAVA_HOME", str(jdk4py.JAVA_HOME))
-
-        # On Windows, CPython faulthandler + embedded JVM (JPype/Orekit)
-        # can produce spurious access-violation crashes during teardown.
-        if os.name == "nt":
-            try:
-                import faulthandler
-
-                if faulthandler.is_enabled():
-                    faulthandler.disable()
-                    _RUNTIME_FAULTHANDLER_DISABLED = True
-            except Exception:
-                pass
-
-        cp = prepare_orbit_design_bridge_classpath()
-        if cp:
-            try:
-                # If JVM is already running, dynamically append classpath.
-                jpype.addClassPath(cp)
-            except Exception:
-                pass
-
-        orekit_jpype.initVM(additional_classpaths=[cp] if cp else None)
-
-        from orekit_jpype.pyhelpers import setup_orekit_curdir
-
-        setup_orekit_curdir(
-            filename=str(Path(data_path).resolve() if data_path else _default_data_path().resolve())
-        )
-
-        _RUNTIME_READY = True
-
-
-def get_orbit_design_bridge_class():
-    """Return JPype class handle for ``OrekitOrbitDesignBridge``."""
-
-    initialize_orbit_design_runtime()
-    return jpype.JClass(JAVA_ORBIT_DESIGN_CLASS)
+    ensure_orekit_runtime()
+    return jpype.JClass(JAVA_ORBIT_PROPAGATION_CLASS)
