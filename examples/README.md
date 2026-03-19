@@ -1,5 +1,16 @@
 # Nebula Example Learning Path
 
+## Setup (once per environment)
+
+From the repository root, install Nebula into your active environment:
+
+```powershell
+.venv\Scripts\python.exe -m pip install -e ".[all]"
+```
+
+If you see `ModuleNotFoundError: No module named 'nebula'` while running a
+notebook from this `examples/` folder, restart the kernel after install.
+
 Use these notebooks in order:
 
 1. `01_orbit_usage.ipynb`
