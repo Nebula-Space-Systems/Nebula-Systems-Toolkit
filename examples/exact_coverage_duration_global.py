@@ -16,13 +16,13 @@ if __package__ is None or __package__ == "":
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
 
-from nebula.coverage import (
+from nstk.coverage import (
     ExactCoverageConfig,
     compute_access_intervals,
     access_duration_by_target,
 )
-from nebula.propagation import Orbit
-from nebula.plotting import make_basemap, LIGHT_DETAILED
+from nstk.propagation import Orbit
+from nstk.plotting import make_basemap, LIGHT_DETAILED
 
 
 def _build_demo_constellation(epoch: Time) -> list[Orbit]:

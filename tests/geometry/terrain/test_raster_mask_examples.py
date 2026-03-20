@@ -1,6 +1,6 @@
 import math
 
-from nebula.geometry.raster_mask import RasterMask
+from nstk.geometry.raster_mask import RasterMask
 
 
 def test_raster_mask_boolean_example_smoke():

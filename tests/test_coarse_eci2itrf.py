@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 
-import nebula.transforms as transforms
-from nebula.transforms._coarse_eci2itrf import (
+import nstk.transforms as transforms
+from nstk.transforms._coarse_eci2itrf import (
     _coarse_itrf2eci_pos_iau76_shortnut,
     _coarse_itrf2eci_pv_iau76_shortnut,
     coarse_ecef2eci,

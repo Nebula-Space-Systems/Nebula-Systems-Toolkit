@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 from astropy.time import Time
 
-from nebula.propagation.orbit import Orbit, _astropy_to_absdate_utc
+from nstk.propagation.orbit import Orbit, _astropy_to_absdate_utc
 
 
 def stats(err: np.ndarray) -> dict[str, float]:

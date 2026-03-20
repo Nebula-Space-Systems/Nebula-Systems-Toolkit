@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from nebula.localization.measurements.fdoa import fdoa_hz, fdoa_jacobian_xyz_vxyz
+from nstk.localization.measurements.fdoa import fdoa_hz, fdoa_jacobian_xyz_vxyz
 
 
 def _fdoa_hz_py(

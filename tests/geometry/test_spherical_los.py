@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from nebula.geometry.spherical_los import (
+from nstk.geometry.spherical_los import (
     los_clear_sphere,
     los_clear_sphere_many_to_many,
     los_clear_sphere_one_to_many,

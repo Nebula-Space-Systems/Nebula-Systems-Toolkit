@@ -1,14 +1,14 @@
-# Nebula Example Learning Path
+# Nebula Space Toolkit Example Learning Path
 
 ## Setup (once per environment)
 
-From the repository root, install Nebula into your active environment:
+From the repository root, install Nebula Space Toolkit into your active environment:
 
 ```powershell
 .venv\Scripts\python.exe -m pip install -e ".[all]"
 ```
 
-If you see `ModuleNotFoundError: No module named 'nebula'` while running a
+If you see `ModuleNotFoundError: No module named 'nstk'` while running a
 notebook from this `examples/` folder, restart the kernel after install.
 
 Use these notebooks in order:

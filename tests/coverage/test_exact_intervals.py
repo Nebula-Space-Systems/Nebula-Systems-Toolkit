@@ -1,6 +1,6 @@
 import numpy as np
 
-from nebula.coverage import (
+from nstk.coverage import (
     ExactCoverageConfig,
     build_access_interval_store,
     compute_access_intervals,

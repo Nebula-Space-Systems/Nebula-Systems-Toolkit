@@ -4,7 +4,7 @@ import numpy as np
 import astropy.units as u
 from astropy.time import Time
 
-from nebula.time_utils import (
+from nstk.time_utils import (
     astropy_time_to_orekit_date,
     normalize_time_to_epoch_seconds,
     orekit_date_to_astropy_time,

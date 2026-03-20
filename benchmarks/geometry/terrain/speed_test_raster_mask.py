@@ -1,6 +1,6 @@
 import numpy as np
 
-from nebula.geometry.raster_mask import RasterMask
+from nstk.geometry.raster_mask import RasterMask
 
 
 def speed_test(

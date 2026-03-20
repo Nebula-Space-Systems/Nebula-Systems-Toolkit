@@ -5,7 +5,7 @@ import math
 import numpy as np
 from astropy.time import Time
 
-from nebula.propagation import Orbit, build_walker_constellation
+from nstk.propagation import Orbit, build_walker_constellation
 
 
 def _wrap_pm_pi(x: float) -> float:

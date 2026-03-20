@@ -13,7 +13,7 @@ if __package__ is None or __package__ == "":
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
 
-from nebula.propagation import Orbit, build_walker_constellation
+from nstk.propagation import Orbit, build_walker_constellation
 
 
 np.set_printoptions(precision=6, suppress=True)
@@ -114,7 +114,7 @@ def example_numerical_walker() -> None:
 
 
 def main() -> None:
-    print("Nebula Walker constellation builder examples")
+    print("Nebula Space Toolkit Walker constellation builder examples")
     print("Creates constellations from a seed orbit using T/P/F Walker geometry.")
 
     example_two_body_walker()

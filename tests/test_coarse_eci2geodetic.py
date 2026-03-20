@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 
-import nebula.transforms as transforms
-from nebula.transforms._coarse_eci2geodetic import (
+import nstk.transforms as transforms
+from nstk.transforms._coarse_eci2geodetic import (
     _coarse_eci2geodetic_deg_iau76_shortnut,
     _coarse_eci2geodetic_iau76_shortnut,
     _coarse_eci2geodetic_vec_deg_iau76_shortnut,
@@ -13,8 +13,8 @@ from nebula.transforms._coarse_eci2geodetic import (
     coarse_eci2geodetic_vec,
     coarse_eci2geodetic_vec_deg,
 )
-from nebula.transforms._coarse_eci2itrf import _coarse_eci2ecef_pos_iau76_shortnut
-from nebula.transforms._ecef2geodetic import ecef2geodetic, ecef2geodetic_deg
+from nstk.transforms._coarse_eci2itrf import _coarse_eci2ecef_pos_iau76_shortnut
+from nstk.transforms._ecef2geodetic import ecef2geodetic, ecef2geodetic_deg
 
 
 def _random_eci_samples(n: int, seed: int = 42):

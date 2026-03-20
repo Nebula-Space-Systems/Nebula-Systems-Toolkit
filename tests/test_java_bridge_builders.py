@@ -3,8 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 import warnings
 
-from nebula.propagation import _orbit_propagation_bridge as orbit_bridge
-from nebula.transforms import _timed_rotations_java_bridge as timed_bridge
+from nstk import _orekit_runtime
+from nstk.propagation import _orbit_propagation_bridge as orbit_bridge
+from nstk.transforms import _timed_rotations_java_bridge as timed_bridge
 
 
 def test_orbit_bridge_uses_prebuilt_jar_without_warning_when_javac_unavailable(monkeypatch) -> None:
@@ -37,3 +38,47 @@ def test_timed_rotation_bridge_uses_prebuilt_jar_without_warning_when_javac_unav
 
     assert classpath == str(timed_bridge._prebuilt_jar())
     assert caught == []
+
+
+def test_orbit_bridge_falls_back_to_legacy_java_package(monkeypatch) -> None:
+    calls: list[str] = []
+
+    monkeypatch.setattr(_orekit_runtime, "ensure_orekit_runtime", lambda: None)
+
+    def fake_jclass(name: str):
+        calls.append(name)
+        if name == orbit_bridge.JAVA_ORBIT_PROPAGATION_CLASS:
+            raise TypeError("missing renamed class")
+        return f"class:{name}"
+
+    monkeypatch.setattr(orbit_bridge.jpype, "JClass", fake_jclass)
+
+    result = orbit_bridge.get_orbit_propagation_bridge_class()
+
+    assert result == f"class:{orbit_bridge._LEGACY_JAVA_ORBIT_PROPAGATION_CLASS}"
+    assert calls == [
+        orbit_bridge.JAVA_ORBIT_PROPAGATION_CLASS,
+        orbit_bridge._LEGACY_JAVA_ORBIT_PROPAGATION_CLASS,
+    ]
+
+
+def test_timed_rotation_bridge_falls_back_to_legacy_java_package(monkeypatch) -> None:
+    calls: list[str] = []
+
+    monkeypatch.setattr(_orekit_runtime, "ensure_orekit_runtime", lambda: None)
+
+    def fake_jclass(name: str):
+        calls.append(name)
+        if name == timed_bridge.JAVA_TIMED_ROTATION_CLASS:
+            raise TypeError("missing renamed class")
+        return f"class:{name}"
+
+    monkeypatch.setattr(timed_bridge.jpype, "JClass", fake_jclass)
+
+    result = timed_bridge.get_timed_rotation_bridge_class()
+
+    assert result == f"class:{timed_bridge._LEGACY_JAVA_TIMED_ROTATION_CLASS}"
+    assert calls == [
+        timed_bridge.JAVA_TIMED_ROTATION_CLASS,
+        timed_bridge._LEGACY_JAVA_TIMED_ROTATION_CLASS,
+    ]

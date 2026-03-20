@@ -4,8 +4,8 @@ import math
 
 import numpy as np
 
-from nebula.localization.network_unambiguous_prf import is_pri_network_unambiguous
-from nebula.localization.network_unambiguous_prf import network_unambiguous_prf
+from nstk.localization.network_unambiguous_prf import is_pri_network_unambiguous
+from nstk.localization.network_unambiguous_prf import network_unambiguous_prf
 
 
 def geodetic2ecef_wgs84(lat_rad: float, lon_rad: float, h_m: float) -> np.ndarray:

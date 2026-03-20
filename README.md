@@ -1,31 +1,33 @@
-# Nebula Tool Kit
-# NTK
-# Nebulatk
+# Nebula Space Toolkit
 
-# Goals
-* make satellite orbits and propagate them with customizable propagators/force models
-* model attitude of a satellite
-* calculate spatio-temporo coverage/visibility metrics over areas or the entire world
-* model 
+`nstk` is the Python package for Nebula Space Toolkit, a library for space systems engineering and analysis.
 
+## Package Name
 
-# Analysis Studies:
+- Brand name: `Nebula Space Toolkit`
+- PyPI package: `nstk`
+- Python import: `import nstk`
 
-## intersatellite ranges/rates and angles/rates over time
-* calculate ranges and range rates between one satellite and another
-* calculate doppler shift between one satellite and another
+## Data Packaging
 
-Steps:
-* Propagate satellite A and B and get their positions and velocities over time at a small fixed delta time step
-* calculate body frame for satellite A over time (LVLH)
-* calculate vector from satellite A to satellite B over all scenario times
-* project vector from satellite A to satellite B into A's body frame
-* take the magnitude of the vector to get range
-* finite difference the ranges over each time step to get range rates
-* calculate azimuth and elevation from vector from A body to target
-* calculate the absolute magnitude angle between azimuth and elevation, and finite difference this angle over time
-* using range rates calculate dopler factor from A to B over time
+Nebula Space Toolkit's offline Orekit and Cartopy assets live in the separate
+`nstk-data` package. The main `nstk` package depends on `nstk-data`, which
+lets code releases move independently from the larger bundled data payload.
 
+Orekit-backed features initialize automatically on first use. If you want to
+use a custom Orekit data directory, call `nstk.set_orekit_data_path(...)`
+before using those features.
 
-Results/visualization:
-* raw timeseries results per pair for ranges/rates, angles/rates, and doppler
+## Goals
+
+- Build and propagate satellite orbits with configurable propagators and force models
+- Model spacecraft attitude and frame behavior
+- Compute coverage, access, and visibility metrics over local regions or the full globe
+- Support systems analysis workflows with reusable building blocks instead of one-off scripts
+
+## Example Analysis Studies
+
+- Intersatellite range and range-rate analysis
+- Relative angle and angle-rate analysis in spacecraft body frames
+- Doppler and geometry-driven measurement studies
+- Coverage and revisit analysis for single spacecraft and constellations

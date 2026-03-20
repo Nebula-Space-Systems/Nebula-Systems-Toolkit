@@ -14,7 +14,7 @@ astropy_time = pytest.importorskip("astropy.time")
 astropy_coordinates = pytest.importorskip("astropy.coordinates")
 u = pytest.importorskip("astropy.units")
 
-from nebula.transforms import transform
+from nstk.transforms import transform
 
 Time = astropy_time.Time
 GCRS = astropy_coordinates.GCRS

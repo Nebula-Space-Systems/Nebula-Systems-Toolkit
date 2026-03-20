@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-"""Comprehensive usage examples for ``nebula.propagation.orbit``.
+"""Comprehensive usage examples for ``nstk.propagation.orbit``.
 
 Run directly:
     python examples/orbit_usage_examples.py
@@ -31,9 +31,8 @@ if __package__ is None or __package__ == "":
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
 
-from nebula import initialize_orekit
-from nebula.propagation import Orbit
-from nebula.time_utils import astropy_time_to_orekit_date
+from nstk.propagation import Orbit
+from nstk.time_utils import astropy_time_to_orekit_date
 
 
 np.set_printoptions(precision=6, suppress=True)
@@ -236,10 +235,9 @@ def example_8_from_spacecraft_state(seed_orbit: Orbit) -> None:
 def main() -> None:
     """Run all Orbit API examples."""
 
-    initialize_orekit()
-
-    print("Nebula Orbit API examples")
+    print("Nebula Space Toolkit Orbit API examples")
     print("All heavy propagation/frame work is executed in Java through Orekit.")
+    print("Orekit runtime startup is handled lazily inside Nebula Space Toolkit.")
 
     two_body = example_1_two_body_quickstart()
     example_2_time_input_forms(two_body)

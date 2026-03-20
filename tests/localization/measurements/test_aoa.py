@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from nebula.localization.measurements.aoa import aoa_az_el, aoa_jacobian_az_el_xyz
+from nstk.localization.measurements.aoa import aoa_az_el, aoa_jacobian_az_el_xyz
 
 
 def _wrap_pi(a):

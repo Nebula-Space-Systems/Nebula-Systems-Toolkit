@@ -9,7 +9,7 @@ import os, sys
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from nebula.localization.max_unambiguous_prf import (
+from nstk.localization.max_unambiguous_prf import (
     _ICO_F,
     _ICO_V,
     _ellipsoid_intersect_dir,
@@ -24,7 +24,7 @@ from nebula.localization.max_unambiguous_prf import (
 
 # Optional: use your existing transform if available
 try:
-    from nebula.transforms._ecef2geodetic import ecef2geodetic_vec_xyz
+    from nstk.transforms._ecef2geodetic import ecef2geodetic_vec_xyz
 
     def ecef_to_latlon_deg(xyz: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         lat, lon, _h = ecef2geodetic_vec_xyz(

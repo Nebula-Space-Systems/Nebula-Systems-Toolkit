@@ -3,13 +3,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from nebula.localization.particle_initialization import (
+from nstk.localization.particle_initialization import (
     make_coarse_candidates_ecef,
     los_mask_all_observers,
     spacing_radius,
 )
-from nebula.transforms._ecef2geodetic import ecef2geodetic_vec_xyz
-from nebula.transforms._geodetic2ecef import geodetic2ecef
+from nstk.transforms._ecef2geodetic import ecef2geodetic_vec_xyz
+from nstk.transforms._geodetic2ecef import geodetic2ecef
 
 
 _DIST_PARAMS = dict(

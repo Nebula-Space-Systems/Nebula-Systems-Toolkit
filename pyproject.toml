@@ -3,9 +3,9 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "nebula"
+name = "nstk"
 version = "0.1.0"
-description = "Nebula Python library for space systems engineering and analysis."
+description = "Nebula Space Toolkit (nstk) for space systems engineering and analysis."
 requires-python = ">=3.10"
 license = { text = "Apache 2.0" }
 authors = [{ name = "Nathan Spencer", email = "nathanss1997@gmail.com" }]
@@ -13,6 +13,7 @@ dependencies = [
     "numpy>=1.22",
     "numba>=0.59.0",
     "rasterio>=1.3",
+    "nstk-data>=0.1.0",
 ]
 
 [project.optional-dependencies]
@@ -43,14 +44,14 @@ all = [
 ]
 
 [tool.hatch.build.targets.wheel]
-packages = ["nebula"]
+packages = ["nstk"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"nebula/propagation/_java_orbit_propagation/OrekitOrbitPropagationBridge.jar" = "nebula/propagation/_java_orbit_propagation/OrekitOrbitPropagationBridge.jar"
+"nstk/propagation/_java_orbit_propagation/OrekitOrbitPropagationBridge.jar" = "nstk/propagation/_java_orbit_propagation/OrekitOrbitPropagationBridge.jar"
 
 [tool.hatch.build.targets.sdist]
 include = [
-    "nebula/**",
+    "nstk/**",
     "tests/**",
     "examples/**",
     "README.md",

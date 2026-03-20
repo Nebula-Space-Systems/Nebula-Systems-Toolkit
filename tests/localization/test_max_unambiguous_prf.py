@@ -6,9 +6,9 @@ from typing import Tuple
 import numpy as np
 import pytest
 
-from nebula.localization.max_unambiguous_prf import max_unambiguous_prf
-from nebula.localization.max_unambiguous_prf import max_unambiguous_prf_batched
-from nebula.localization.max_unambiguous_prf import max_unambiguous_prf_batched_const_sigma
+from nstk.localization.max_unambiguous_prf import max_unambiguous_prf
+from nstk.localization.max_unambiguous_prf import max_unambiguous_prf_batched
+from nstk.localization.max_unambiguous_prf import max_unambiguous_prf_batched_const_sigma
 
 
 # -----------------------------

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from nebula.localization.measurements.tdoa import tdoa_jacobian_xyz, tdoa_seconds
+from nstk.localization.measurements.tdoa import tdoa_jacobian_xyz, tdoa_seconds
 
 
 def _tdoa_seconds_py(obs1_pos, obs2_pos, target_pos, c=299_792_458.0):

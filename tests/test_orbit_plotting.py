@@ -12,8 +12,8 @@ from cartopy.mpl.geoaxes import GeoAxes
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 
-from nebula.plotting import plot_orbits
-from nebula.propagation.orbit import Orbit
+from nstk.plotting import plot_orbits
+from nstk.propagation.orbit import Orbit
 
 
 def _make_orbit(*, epoch: Time, raan_deg: float, anomaly_deg: float) -> Orbit:

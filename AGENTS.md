@@ -9,9 +9,8 @@ Project-specific instructions for AI coding agents working in this repository.
 - Prefer `rg` for fast file/text search.
 
 ## Repository Scope
-- Main package code is in `nebula/`.
+- Main package code is in `nstk/`.
 - Tests are in `tests/`.
-- `nebula_old/` is legacy reference code; do not modify it unless explicitly requested.
 
 ## Coding Expectations
 - Keep dependencies minimal; avoid adding heavy dependencies unless justified by clear value.

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from nebula.coverage.intervals._exact_intervals import AccessIntervalStore
-from nebula.coverage.intervals.metrics import (
+from nstk.coverage.intervals._exact_intervals import AccessIntervalStore
+from nstk.coverage.intervals.metrics import (
     calculate_access_duration,
     calculate_access_separation,
     calculate_gap_duration,

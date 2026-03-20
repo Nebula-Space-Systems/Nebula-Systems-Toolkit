@@ -7,9 +7,9 @@ param(
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
-$src = Join-Path $repoRoot "nebula\propagation\java\com\nebula\orekit\OrekitOrbitBridge.java"
-$jarOut = Join-Path $repoRoot "nebula\propagation\java\OrekitOrbitBridge.jar"
-$tmp = Join-Path $env:TEMP "nebula_java_bridge_build"
+$src = Join-Path $repoRoot "nstk\propagation\_java_orbit_propagation\com\nstk\propagation\OrekitOrbitPropagationBridge.java"
+$jarOut = Join-Path $repoRoot "nstk\propagation\_java_orbit_propagation\OrekitOrbitPropagationBridge.jar"
+$tmp = Join-Path $env:TEMP "nstk_java_bridge_build"
 $classes = Join-Path $tmp "classes"
 
 $jarsDir = & $PythonExe -c "import pathlib, orekit_jpype; print(pathlib.Path(orekit_jpype.__file__).resolve().parent / 'jars')"

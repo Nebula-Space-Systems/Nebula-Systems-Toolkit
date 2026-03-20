@@ -3,10 +3,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-import nebula
-import nebula.propagation as propagation
-import nebula.transforms as transforms
-from nebula.transforms import transform
+import nstk
+import nstk.propagation as propagation
+import nstk.transforms as transforms
+from nstk.transforms import transform
 
 pytestmark = pytest.mark.filterwarnings(
     "ignore:Tried to get polar motions for times after IERS data is valid.*:astropy.utils.exceptions.AstropyWarning"
@@ -49,7 +49,8 @@ def test_transform_broadcasts_scalar_state_over_time_array() -> None:
 
 def test_transform_namespace_exports_only_new_timed_api() -> None:
     assert callable(transforms.transform)
-    assert callable(nebula.initialize_orekit)
+    assert callable(nstk.initialize_orekit)
+    assert callable(nstk.set_orekit_data_path)
     assert not hasattr(transforms, "initialize_timed_rotations")
     assert not hasattr(propagation, "initialize_orekit")
     assert not hasattr(transforms, "transform_timed")

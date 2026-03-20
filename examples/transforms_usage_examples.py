@@ -14,7 +14,7 @@ if __package__ is None or __package__ == "":
     if str(_REPO_ROOT) not in sys.path:
         sys.path.insert(0, str(_REPO_ROOT))
 
-from nebula.transforms import (
+from nstk.transforms import (
     aer2geodetic,
     coarse_eci2geodetic_vec_deg,
     coarse_eci2ecef_pos_vec,
@@ -186,7 +186,7 @@ def example_timed_frame_transforms() -> None:
 
 
 def main() -> None:
-    print("Nebula transform usage examples")
+    print("Nebula Space Toolkit transform usage examples")
     print(
         "Note: most transform APIs use radians for lat/lon/az/el and meters for distances."
     )

@@ -21,7 +21,7 @@ Notes
 """
 
 
-from nebula.geometry.raster_mask import (
+from nstk.geometry.raster_mask import (
     RasterMask,
     azel_to_dir,
     face_uv_to_dir,
