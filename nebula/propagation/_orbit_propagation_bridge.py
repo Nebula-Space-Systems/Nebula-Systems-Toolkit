@@ -92,6 +92,22 @@ def _orekit_jars_glob() -> Optional[str]:
     return str(jars_dir / "*")
 
 
+def _command_is_usable(path: Optional[Path]) -> bool:
+    if path is None:
+        return False
+    try:
+        probe = subprocess.run(
+            [str(path), "-version"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except Exception:
+        return False
+    return probe.returncode == 0
+
+
 def _needs_rebuild(source: Path, class_file: Path, prebuilt: Path) -> bool:
     if not prebuilt.exists() or not class_file.exists():
         return True
@@ -145,9 +161,18 @@ def prepare_orbit_propagation_bridge_classpath() -> Optional[str]:
         javac = _javac_path()
         jar_cmd = _jar_path()
         jars_glob = _orekit_jars_glob()
+        needs_rebuild = _needs_rebuild(source, class_file, prebuilt)
+        can_compile = _command_is_usable(javac)
 
         try:
-            if javac and jars_glob and _needs_rebuild(source, class_file, prebuilt):
+            if needs_rebuild and not can_compile:
+                if not prebuilt.exists() and not class_file.exists():
+                    warnings.warn(
+                        "Failed to build orbit propagation Java bridge: no usable javac was found, "
+                        "and no prebuilt bridge artifact is available.",
+                        RuntimeWarning,
+                    )
+            elif can_compile and jars_glob and needs_rebuild:
                 classes_dir.mkdir(parents=True, exist_ok=True)
                 subprocess.run(
                     [

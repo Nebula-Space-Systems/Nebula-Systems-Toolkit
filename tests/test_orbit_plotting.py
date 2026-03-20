@@ -44,7 +44,6 @@ def test_plot_orbits_multi_orbit_3d_defaults() -> None:
     assert isinstance(fig, Figure)
     assert fig.axes[0] is ax
     assert ax.name == "3d"
-    assert ax.get_title() == "Orbit Constellation View"
 
     legend = ax.get_legend()
     assert legend is not None

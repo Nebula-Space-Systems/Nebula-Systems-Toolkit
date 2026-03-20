@@ -243,7 +243,7 @@ def _make_earth_facecolors(uu: np.ndarray, vv: np.ndarray) -> np.ndarray:
 
     facecolors = np.empty((*uu.shape, 4), dtype=np.float64)
     facecolors[..., :3] = np.clip(base * brightness[..., None] + specular[..., None], 0.0, 1.0)
-    facecolors[..., 3] = 0.98
+    facecolors[..., 3] = 0.999
     return facecolors
 
 
