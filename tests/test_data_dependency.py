@@ -30,5 +30,8 @@ def test_missing_data_dependency_raises_helpful_error(monkeypatch) -> None:
 
     monkeypatch.setattr(_data_dependency, "import_module", _raise)
 
-    with pytest.raises(ModuleNotFoundError, match="nstk-data"):
+    with pytest.raises(
+        ModuleNotFoundError,
+        match=r"nstk-data|pip install nstk-data|set_orekit_data_path",
+    ):
         _data_dependency.get_installed_orekit_data_dir()

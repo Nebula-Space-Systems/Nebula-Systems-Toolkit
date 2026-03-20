@@ -5,15 +5,19 @@ from pathlib import Path
 from types import ModuleType
 
 
+_MISSING_NSTK_DATA_MESSAGE = (
+    "Nebula Space Toolkit's offline data package 'nstk-data' is not installed. "
+    "Install it in the same Python environment as nstk with "
+    "'python -m pip install nstk-data', or pass an explicit local data path via "
+    "nstk.set_orekit_data_path(...) or the relevant initializer."
+)
+
+
 def _load_nstk_data_module() -> ModuleType:
     try:
         return import_module("nstk_data")
     except ModuleNotFoundError as exc:  # pragma: no cover - exercised via callers/tests
-        raise ModuleNotFoundError(
-            "Nebula Space Toolkit's offline data package 'nstk-data' is not installed. "
-            "Install it alongside nstk, or pass an explicit local data path "
-            "to the relevant initializer."
-        ) from exc
+        raise ModuleNotFoundError(_MISSING_NSTK_DATA_MESSAGE) from exc
 
 
 def _coerce_directory(path_like: object, description: str) -> Path:

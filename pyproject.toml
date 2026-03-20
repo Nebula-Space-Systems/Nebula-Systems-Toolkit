@@ -16,6 +16,7 @@ keywords = [
     "orekit",
     "orbit",
     "coverage",
+    "satellite",
     "systems-engineering",
 ]
 classifiers = [

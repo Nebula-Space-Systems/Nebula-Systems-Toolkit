@@ -57,15 +57,22 @@ Extras are intended for:
 For local development, install from the repository root:
 
 ```bash
-pip install -e .
+python -m pip install -e .
 ```
 
 To include optional features during development:
 
 ```bash
-pip install -e ".[propagation]"
-pip install -e ".[plotting]"
-pip install -e ".[all]"
+python -m pip install -e ".[propagation]"
+python -m pip install -e ".[plotting]"
+python -m pip install -e ".[all]"
+```
+
+If Orekit-backed features later report that `nstk-data` is missing, install it
+into the same environment as `nstk` and your Jupyter kernel:
+
+```bash
+python -m pip install nstk-data
 ```
 
 ## Data and Runtime Behavior

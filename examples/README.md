@@ -8,6 +8,17 @@ From the repository root, install Nebula Space Toolkit into your active environm
 .venv\Scripts\python.exe -m pip install -e ".[all]"
 ```
 
+If an Orekit-backed notebook later reports `No module named 'nstk_data'`,
+install the bundled data package into the same environment as the notebook
+kernel:
+
+```powershell
+.venv\Scripts\python.exe -m pip install nstk-data
+```
+
+If you prefer to manage Orekit data yourself, call
+`nstk.set_orekit_data_path(...)` before using Orekit-backed examples.
+
 If you see `ModuleNotFoundError: No module named 'nstk'` while running a
 notebook from this `examples/` folder, restart the kernel after install.
 
