@@ -1,23 +1,19 @@
 from __future__ import annotations
-
-import os
 import re
 import unicodedata
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Tuple, Literal
 
 import cartopy
-from cartopy.io.shapereader import Reader, natural_earth
+from cartopy.io.shapereader import Reader
 
-from nebula_old import NEBULA_ROOT_DIR
+from ._cartopy_data import configure_cartopy_data_dir, get_natural_earth_shapefile
 
 # -----------------------------------------------------------------------------
 # Cartopy data directory setup
 # -----------------------------------------------------------------------------
 
-project_root = os.path.dirname(NEBULA_ROOT_DIR)
-cartopy.config["pre_existing_data_dir"] = os.path.join(project_root, "data", "cartopy")
-cartopy.config["data_dir"] = os.path.join(project_root, "data", "cartopy")
+configure_cartopy_data_dir()
 
 # ----------------------------
 # Utilities
@@ -147,7 +143,15 @@ def fuzzy_find_countries(
     code_keys = {"ADM0_A3", "ISO_A3", "ISO_A2", "POSTAL", "ADM0_ISO", "WB_A2", "WB_A3"}
 
     results: List[CountryMatch] = []
-    reader = Reader(natural_earth(resolution, "cultural", "admin_0_countries"))
+    reader = Reader(
+        str(
+            get_natural_earth_shapefile(
+                resolution=resolution,
+                category="cultural",
+                name="admin_0_countries",
+            )
+        )
+    )
 
     for rec in reader.records():
         attrs = rec.attributes

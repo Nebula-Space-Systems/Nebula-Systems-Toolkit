@@ -12,15 +12,13 @@ import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 from cartopy.mpl.gridliner import LATITUDE_FORMATTER, LONGITUDE_FORMATTER
 
-from nebula_old import NEBULA_ROOT_DIR
+from ._cartopy_data import configure_cartopy_data_dir, get_cartopy_raster_path
 
 # -----------------------------------------------------------------------------
 # Cartopy data directory setup
 # -----------------------------------------------------------------------------
 
-project_root = os.path.dirname(NEBULA_ROOT_DIR)
-cartopy.config["pre_existing_data_dir"] = os.path.join(project_root, "data", "cartopy")
-cartopy.config["data_dir"] = os.path.join(project_root, "data", "cartopy")
+configure_cartopy_data_dir()
 
 ProjectionName = Literal[
     "PlateCarree", "Robinson", "Mollweide", "Mercator", "Orthographic"
@@ -474,12 +472,11 @@ def _projection_from_config(cfg: ProjectionConfig) -> ccrs.Projection:
 
 
 def _default_bump_path() -> str:
-    # Your file name
-    return os.path.join(cartopy.config["data_dir"], "raster", "topo_and_bathy.png")
+    return str(get_cartopy_raster_path("topo_and_bathy.png"))
 
 
 def _default_raster_path() -> str:
-    return os.path.join(cartopy.config["data_dir"], "raster", "shadedrelief.jpg")
+    return str(get_cartopy_raster_path("shadedrelief.jpg"))
 
 
 def _load_luminance(path: str) -> np.ndarray:

@@ -1323,6 +1323,25 @@ class Orbit(OrbitCreationMixin):
 
         return self.get_attitude_np(time)
 
+    def plot(self, **kwargs):
+        """Plot this orbit using :func:`nebula.plotting.plot_orbits`.
+
+        Parameters
+        ----------
+        **kwargs
+            Forwarded to :func:`nebula.plotting.orbits.plot_orbits`,
+            including ``view="3d"`` or ``view="2d"``.
+
+        Returns
+        -------
+        tuple
+            ``(figure, axis)`` from the plotting helper.
+        """
+
+        from nebula.plotting.orbits import plot_orbits
+
+        return plot_orbits(self, **kwargs)
+
     def get_state(
         self,
         time: Union[Time, float, int, np.ndarray, u.Quantity],
