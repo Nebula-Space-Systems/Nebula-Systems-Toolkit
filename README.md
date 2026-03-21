@@ -5,7 +5,7 @@ systems engineering and analysis. It is designed for users who need reusable
 building blocks for orbit propagation, coordinate transforms, geometry,
 coverage analysis, localization workflows, and mission-oriented plotting.
 
-## What Nstk Provides
+## What NSTK Provides
 
 - Orbit construction and propagation interfaces built around Orekit
 - Coordinate and frame transforms for common astrodynamics workflows
@@ -140,3 +140,8 @@ Additional usage examples are provided in the `examples/` directory, including:
 - Brand name: `Nebula Space Toolkit`
 - PyPI package: `nstk`
 - Python import: `import nstk`
+
+
+## Attribution
+
+NSTK is a part of Nebula Space Systems
