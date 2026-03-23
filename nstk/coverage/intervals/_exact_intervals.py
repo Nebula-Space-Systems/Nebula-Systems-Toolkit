@@ -637,25 +637,6 @@ def _passes_threshold_at_s(
 
 
 @njit(cache=True, inline="always")
-def _band_access_state_at_s(
-    a: float,
-    b: float,
-    c: float,
-    d: float,
-    e: float,
-    s: float,
-    sin2_min: float,
-    sin2_max: float,
-    use_max: bool,
-) -> bool:
-    if not _passes_threshold_at_s(a, b, c, d, e, s, sin2_min):
-        return False
-    if use_max and _passes_threshold_at_s(a, b, c, d, e, s, sin2_max):
-        return False
-    return True
-
-
-@njit(cache=True, inline="always")
 def _elevation_minus_threshold(
     a: float, b: float, c: float, d: float, e: float, s: float, threshold_rad: float
 ) -> float:
@@ -932,34 +913,6 @@ def _elevation_minus_threshold_cubic(
 
 
 @njit(cache=True, inline="always")
-def _passes_threshold_at_s_cubic(
-    cx0: float,
-    cx1: float,
-    cx2: float,
-    cx3: float,
-    cy0: float,
-    cy1: float,
-    cy2: float,
-    cy3: float,
-    cz0: float,
-    cz1: float,
-    cz2: float,
-    cz3: float,
-    ux: float,
-    uy: float,
-    uz: float,
-    s: float,
-    threshold_rad: float,
-) -> bool:
-    sin2 = np.sin(threshold_rad)
-    sin2 = sin2 * sin2
-    du, v2 = _du_v2_at_s_cubic(
-        cx0, cx1, cx2, cx3, cy0, cy1, cy2, cy3, cz0, cz1, cz2, cz3, ux, uy, uz, s
-    )
-    return _passes_threshold_from_du_v2(du, v2, sin2)
-
-
-@njit(cache=True, inline="always")
 def _bisect_elevation_root_cubic(
     cx0: float,
     cx1: float,
@@ -1062,121 +1015,6 @@ def _bisect_elevation_root_cubic(
             l = m
             fl = fm
     return 0.5 * (l + r)
-
-
-@njit(cache=True, inline="always")
-def _add_root_unique(roots: np.ndarray, n: int, x: float, tol: float) -> int:
-    if x <= _ROOT_EPS or x >= (1.0 - _ROOT_EPS):
-        return n
-    for i in range(n):
-        if abs(roots[i] - x) <= tol:
-            return n
-    roots[n] = x
-    return n + 1
-
-
-@njit(cache=True, inline="always")
-def _collect_roots_cubic_threshold(
-    cx0: float,
-    cx1: float,
-    cx2: float,
-    cx3: float,
-    cy0: float,
-    cy1: float,
-    cy2: float,
-    cy3: float,
-    cz0: float,
-    cz1: float,
-    cz2: float,
-    cz3: float,
-    ux: float,
-    uy: float,
-    uz: float,
-    threshold_rad: float,
-    n_scan: int,
-    s_tol: float,
-    max_iter: int,
-    roots: np.ndarray,
-) -> int:
-    n = 0
-    ds = 1.0 / float(n_scan)
-    s_prev = 0.0
-    f_prev = _elevation_minus_threshold_cubic(
-        cx0,
-        cx1,
-        cx2,
-        cx3,
-        cy0,
-        cy1,
-        cy2,
-        cy3,
-        cz0,
-        cz1,
-        cz2,
-        cz3,
-        ux,
-        uy,
-        uz,
-        s_prev,
-        threshold_rad,
-    )
-
-    if abs(f_prev) <= _ROOT_EPS:
-        n = _add_root_unique(roots, n, s_prev, max(s_tol, _ROOT_EPS))
-
-    for j in range(1, n_scan + 1):
-        s_cur = 1.0 if j == n_scan else (j * ds)
-        f_cur = _elevation_minus_threshold_cubic(
-            cx0,
-            cx1,
-            cx2,
-            cx3,
-            cy0,
-            cy1,
-            cy2,
-            cy3,
-            cz0,
-            cz1,
-            cz2,
-            cz3,
-            ux,
-            uy,
-            uz,
-            s_cur,
-            threshold_rad,
-        )
-
-        if abs(f_cur) <= _ROOT_EPS:
-            n = _add_root_unique(roots, n, s_cur, max(s_tol, _ROOT_EPS))
-        elif f_prev * f_cur < 0.0:
-            r = _bisect_elevation_root_cubic(
-                cx0,
-                cx1,
-                cx2,
-                cx3,
-                cy0,
-                cy1,
-                cy2,
-                cy3,
-                cz0,
-                cz1,
-                cz2,
-                cz3,
-                ux,
-                uy,
-                uz,
-                threshold_rad,
-                s_prev,
-                s_cur,
-                s_tol,
-                max_iter,
-            )
-            n = _add_root_unique(roots, n, r, max(s_tol, _ROOT_EPS))
-
-        s_prev = s_cur
-        f_prev = f_cur
-
-    return n
 
 
 @njit(cache=True, inline="always")
