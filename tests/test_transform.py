@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import math
 
 import numpy as np
@@ -71,6 +72,25 @@ def _wrap_pi(a):
 
 def _ang_diff(a, b):
     return _wrap_pi(a - b)
+
+
+def test_transform_public_api_exposes_signature() -> None:
+    sig = inspect.signature(transforms.transform)
+
+    assert transforms.transform.__module__ == "nstk.transforms"
+    assert tuple(sig.parameters) == (
+        "from_frame",
+        "to_frame",
+        "time",
+        "position",
+        "velocity",
+        "acceleration",
+        "iers_convention",
+        "simple_eop",
+    )
+    assert sig.parameters["velocity"].default is None
+    assert sig.parameters["acceleration"].default is None
+    assert sig.parameters["simple_eop"].default is True
 
 
 def test_aer2ecef() -> None:

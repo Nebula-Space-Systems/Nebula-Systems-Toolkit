@@ -8,6 +8,8 @@ from nstk.coverage import (
     max_asset_by_target,
     mtta_by_target,
 )
+from nstk.coverage.intervals._exact_intervals import build_surface_targets_from_config
+from nstk.transforms.constants import WGS84_A, WGS84_E2
 
 
 def _observer_from_z(z: np.ndarray) -> np.ndarray:
@@ -15,6 +17,27 @@ def _observer_from_z(z: np.ndarray) -> np.ndarray:
     out = np.zeros((z.size, 3), dtype=np.float64)
     out[:, 2] = z
     return out
+
+
+def _target_from_latlon(lat_deg: float, lon_deg: float) -> tuple[np.ndarray, np.ndarray]:
+    lat_rad = np.deg2rad(float(lat_deg))
+    lon_rad = np.deg2rad(float(lon_deg))
+    sin_lat = np.sin(lat_rad)
+    cos_lat = np.cos(lat_rad)
+    sin_lon = np.sin(lon_rad)
+    cos_lon = np.cos(lon_rad)
+
+    prime_vertical_radius = WGS84_A / np.sqrt(1.0 - WGS84_E2 * sin_lat * sin_lat)
+    position = np.array(
+        [
+            prime_vertical_radius * cos_lat * cos_lon,
+            prime_vertical_radius * cos_lat * sin_lon,
+            (1.0 - WGS84_E2) * prime_vertical_radius * sin_lat,
+        ],
+        dtype=np.float64,
+    )
+    up = np.array([cos_lat * cos_lon, cos_lat * sin_lon, sin_lat], dtype=np.float64)
+    return position, up
 
 
 def test_exact_interval_crossing_and_merge_across_segments() -> None:
@@ -107,6 +130,79 @@ def test_config_wrapper_sets_target_shape_for_grid_queries() -> None:
     mx_flat = max_asset_by_target(store, reshape=False)
     assert mx_grid.shape == (2, 3)
     assert mx_flat.shape == (6,)
+
+
+def test_build_surface_targets_from_config_matches_geodetic_geometry() -> None:
+    cfg = ExactCoverageConfig(
+        nlats=181,
+        nlons_equator=361,
+        scale_longitude_by_latitude=True,
+        include_lat_endpoints=True,
+        include_lon_endpoints=False,
+    )
+
+    target_positions, target_up = build_surface_targets_from_config(cfg)
+
+    for lat_deg, lon_deg in [(0.0, 0.0), (30.0, 0.0), (60.0, 0.0), (80.0, 0.0)]:
+        idx = int(
+            np.argmin(
+                (cfg.lat_deg_flat - lat_deg) ** 2
+                + (((cfg.lon_deg_flat - lon_deg + 180.0) % 360.0) - 180.0) ** 2
+            )
+        )
+        expected_position, expected_up = _target_from_latlon(
+            cfg.lat_deg_flat[idx],
+            cfg.lon_deg_flat[idx],
+        )
+        np.testing.assert_allclose(target_positions[idx], expected_position, atol=1e-9)
+        np.testing.assert_allclose(target_up[idx], expected_up, atol=1e-12)
+
+
+def test_compute_access_intervals_matches_manual_target_build_for_selected_points() -> None:
+    cfg = ExactCoverageConfig(
+        nlats=181,
+        nlons_equator=361,
+        scale_longitude_by_latitude=True,
+        include_lat_endpoints=True,
+        include_lon_endpoints=False,
+    )
+    time = np.linspace(0.0, 1800.0, 7, dtype=np.float64)
+    observer = np.tile(np.array([[8_000_000.0, 0.0, 0.0]], dtype=np.float64), (time.size, 1))
+
+    config_store = compute_access_intervals(
+        config=cfg,
+        time=time,
+        observer_positions=[observer],
+        interpolation="linear",
+    )
+
+    sample_points = [(0.0, 0.0), (30.0, 0.0), (60.0, 0.0), (80.0, 0.0)]
+    sample_indices = [config_store.nearest_target_index(lat_deg=lat, lon_deg=lon) for lat, lon in sample_points]
+
+    manual_positions = np.empty((len(sample_indices), 3), dtype=np.float64)
+    manual_up = np.empty((len(sample_indices), 3), dtype=np.float64)
+    for out_idx, sample_idx in enumerate(sample_indices):
+        position, up = _target_from_latlon(
+            cfg.lat_deg_flat[sample_idx],
+            cfg.lon_deg_flat[sample_idx],
+        )
+        manual_positions[out_idx] = position
+        manual_up[out_idx] = up
+
+    manual_store = build_access_interval_store(
+        time=time,
+        observer_positions=[observer],
+        target_positions=manual_positions,
+        target_up_vectors=manual_up,
+        min_elevation=cfg.min_elevation_deg,
+        max_elevation=cfg.max_elevation_deg,
+        degrees=True,
+        interpolation="linear",
+    )
+
+    config_duration = access_duration_by_target(config_store, reshape=False)[sample_indices]
+    manual_duration = access_duration_by_target(manual_store, reshape=False)
+    np.testing.assert_allclose(config_duration, manual_duration, atol=1e-10)
 
 
 def test_root_tolerance_controls_transition_time_refinement() -> None:

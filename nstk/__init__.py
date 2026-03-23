@@ -1,7 +1,16 @@
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
 import os
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from . import coverage as coverage
+    from . import geometry as geometry
+    from . import localization as localization
+    from . import plotting as plotting
+    from . import propagation as propagation
+    from . import time_utils as time_utils
+    from . import transforms as transforms
 
 try:
     __version__ = version("nstk")

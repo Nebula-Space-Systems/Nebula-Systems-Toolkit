@@ -20,8 +20,17 @@ _MAP_EXPORTS = {
     "make_basemap",
 }
 _ORBIT_EXPORTS = {"plot_orbits"}
+_COVERAGE_EXPORTS = {
+    "plot_interval_metric",
+    "plot_interval_access_duration",
+    "plot_interval_max_asset",
+    "plot_interval_mtta",
+    "plot_interval_gap_duration",
+    "plot_interval_revisit_time",
+    "plot_interval_target_timeline",
+}
 
-__all__ = sorted(_MAP_EXPORTS | _ORBIT_EXPORTS)
+__all__ = sorted(_MAP_EXPORTS | _ORBIT_EXPORTS | _COVERAGE_EXPORTS)
 
 
 def __getattr__(name: str) -> Any:
@@ -32,6 +41,11 @@ def __getattr__(name: str) -> Any:
         return value
     if name in _ORBIT_EXPORTS:
         mod = import_module("nstk.plotting.orbits")
+        value = getattr(mod, name)
+        globals()[name] = value
+        return value
+    if name in _COVERAGE_EXPORTS:
+        mod = import_module("nstk.plotting.coverage")
         value = getattr(mod, name)
         globals()[name] = value
         return value

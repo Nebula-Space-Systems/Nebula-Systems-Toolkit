@@ -44,6 +44,28 @@ def _astropy_transform_pos_gcrf_to_itrf(r_m: np.ndarray, times: Time) -> np.ndar
     return c1.cartesian.xyz.to_value(u.m).T.astype(np.float64)
 
 
+def _latest_itrf_version():
+    from org.orekit.frames import ITRFVersion
+
+    years = sorted(
+        int(name.removeprefix("ITRF_"))
+        for name in dir(ITRFVersion)
+        if name.startswith("ITRF_") and name.removeprefix("ITRF_").isdigit()
+    )
+    return getattr(ITRFVersion, f"ITRF_{years[-1]}")
+
+
+def _latest_iers_convention():
+    from org.orekit.utils import IERSConventions
+
+    years = sorted(
+        int(name.removeprefix("IERS_"))
+        for name in dir(IERSConventions)
+        if name.startswith("IERS_") and name.removeprefix("IERS_").isdigit()
+    )
+    return getattr(IERSConventions, f"IERS_{years[-1]}")
+
+
 def test_transform_identity_with_broadcast_scalar_time() -> None:
     r, v, a = _random_states(8, seed=11)
     t = Time("2026-01-01T00:00:00", scale="utc")
@@ -158,3 +180,152 @@ def test_transform_scalar_position_and_scalar_time_shape() -> None:
     assert p_out.shape == (3,)
     assert v_out is None
     assert a_out is None
+
+
+def test_transform_accepts_versioned_itrf_string_aliases() -> None:
+    from nstk._orekit_runtime import ensure_orekit_runtime
+
+    ensure_orekit_runtime()
+
+    from org.orekit.frames import FramesFactory, ITRFVersion
+    from org.orekit.utils import IERSConventions
+
+    t = Time("2026-03-01T00:00:00", scale="utc")
+    p, v, _ = _random_states(4, seed=15)
+    itrf2014 = FramesFactory.getITRF(
+        ITRFVersion.ITRF_2014,
+        IERSConventions.IERS_2010,
+        True,
+    )
+
+    p_ref, v_ref, _ = transform("gcrf", itrf2014, t, p, velocity=v)
+
+    for name in ("itrf2014", "ITRF_2014", "itrs2014", "ecef2014"):
+        p_out, v_out, a_out = transform("gcrf", name, t, p, velocity=v)
+
+        assert a_out is None
+        np.testing.assert_allclose(p_out, p_ref, atol=1e-8, rtol=0.0)
+        np.testing.assert_allclose(v_out, v_ref, atol=1e-12, rtol=0.0)
+
+
+def test_transform_uses_latest_itrf_when_no_version_is_specified() -> None:
+    from nstk._orekit_runtime import ensure_orekit_runtime
+
+    ensure_orekit_runtime()
+
+    from org.orekit.frames import FramesFactory
+
+    t = Time("2026-03-01T00:00:00", scale="utc")
+    p, v, _ = _random_states(4, seed=18)
+    iers = _latest_iers_convention()
+    latest_itrf = FramesFactory.getITRF(_latest_itrf_version(), iers, True)
+    p_ref, v_ref, _ = transform("gcrf", latest_itrf, t, p, velocity=v)
+
+    for name in ("itrf", "itrs", "ecef"):
+        p_out, v_out, a_out = transform("gcrf", name, t, p, velocity=v)
+
+        assert a_out is None
+        np.testing.assert_allclose(p_out, p_ref, atol=1e-8, rtol=0.0)
+        np.testing.assert_allclose(v_out, v_ref, atol=1e-12, rtol=0.0)
+
+
+def test_transform_rejects_unknown_itrf_version_string() -> None:
+    t = Time("2026-03-01T00:00:00", scale="utc")
+    p = np.array([7000e3, 0.0, 0.0], dtype=np.float64)
+
+    with pytest.raises(ValueError, match="Supported ITRF versions"):
+        transform("gcrf", "itrf2099", t, p)
+
+
+def test_transform_accepts_iers_versioned_frame_shorthands() -> None:
+    from nstk._orekit_runtime import ensure_orekit_runtime
+
+    ensure_orekit_runtime()
+
+    from org.orekit.frames import FramesFactory
+    from org.orekit.utils import IERSConventions
+
+    t = Time("2026-03-01T00:00:00", scale="utc")
+    p, v, _ = _random_states(4, seed=16)
+
+    cases = [
+        ("tod2010", FramesFactory.getTOD(IERSConventions.IERS_2010, True)),
+        ("mod2003", FramesFactory.getMOD(IERSConventions.IERS_2003)),
+        ("cirf1996", FramesFactory.getCIRF(IERSConventions.IERS_1996, True)),
+        ("gtod2010", FramesFactory.getGTOD(IERSConventions.IERS_2010, True)),
+        ("tirf2003", FramesFactory.getTIRF(IERSConventions.IERS_2003, True)),
+        ("ecliptic1996", FramesFactory.getEcliptic(IERSConventions.IERS_1996)),
+        ("itrfcio2010", FramesFactory.getITRF(IERSConventions.IERS_2010, True)),
+        (
+            "itrfequinox2003",
+            FramesFactory.getITRFEquinox(IERSConventions.IERS_2003, True),
+        ),
+    ]
+
+    for name, frame in cases:
+        p_out, v_out, a_out = transform("gcrf", name, t, p, velocity=v)
+        p_ref, v_ref, a_ref = transform("gcrf", frame, t, p, velocity=v)
+
+        assert a_out is None
+        assert a_ref is None
+        np.testing.assert_allclose(p_out, p_ref, atol=1e-8, rtol=0.0)
+        np.testing.assert_allclose(v_out, v_ref, atol=1e-12, rtol=0.0)
+
+
+def test_transform_uses_latest_iers_convention_when_no_year_is_specified() -> None:
+    from nstk._orekit_runtime import ensure_orekit_runtime
+
+    ensure_orekit_runtime()
+
+    from org.orekit.frames import FramesFactory
+
+    t = Time("2026-03-01T00:00:00", scale="utc")
+    p, v, _ = _random_states(4, seed=19)
+    iers = _latest_iers_convention()
+
+    cases = [
+        ("tod", FramesFactory.getTOD(iers, True)),
+        ("mod", FramesFactory.getMOD(iers)),
+        ("cirf", FramesFactory.getCIRF(iers, True)),
+        ("gtod", FramesFactory.getGTOD(iers, True)),
+        ("tirf", FramesFactory.getTIRF(iers, True)),
+        ("ecliptic", FramesFactory.getEcliptic(iers)),
+        ("itrfcio", FramesFactory.getITRF(iers, True)),
+        ("itrfequinox", FramesFactory.getITRFEquinox(iers, True)),
+    ]
+
+    for name, frame in cases:
+        p_out, v_out, a_out = transform("gcrf", name, t, p, velocity=v)
+        p_ref, v_ref, a_ref = transform("gcrf", frame, t, p, velocity=v)
+
+        assert a_out is None
+        assert a_ref is None
+        np.testing.assert_allclose(p_out, p_ref, atol=1e-8, rtol=0.0)
+        np.testing.assert_allclose(v_out, v_ref, atol=1e-12, rtol=0.0)
+
+
+def test_transform_accepts_orekit_predefined_frame_names() -> None:
+    from nstk._orekit_runtime import ensure_orekit_runtime
+
+    ensure_orekit_runtime()
+
+    from org.orekit.frames import FramesFactory, Predefined
+
+    t = Time("2026-03-01T00:00:00", scale="utc")
+    p, v, _ = _random_states(4, seed=17)
+
+    cases = [
+        "TOD_CONVENTIONS_2010_SIMPLE_EOP",
+        "GTOD_WITHOUT_EOP_CORRECTIONS",
+        "ITRF_EQUINOX_CONV_2003_ACCURATE_EOP",
+    ]
+
+    for name in cases:
+        frame = FramesFactory.getFrame(getattr(Predefined, name))
+        p_out, v_out, a_out = transform("gcrf", name, t, p, velocity=v)
+        p_ref, v_ref, a_ref = transform("gcrf", frame, t, p, velocity=v)
+
+        assert a_out is None
+        assert a_ref is None
+        np.testing.assert_allclose(p_out, p_ref, atol=1e-8, rtol=0.0)
+        np.testing.assert_allclose(v_out, v_ref, atol=1e-12, rtol=0.0)

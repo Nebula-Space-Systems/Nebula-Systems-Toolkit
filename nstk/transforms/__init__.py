@@ -7,8 +7,9 @@ Conventions used in this package:
   package-level ``transform``.
 """
 
-from importlib import import_module
-from typing import Any
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
 
 from nstk.transforms._aer2ecef import (
     aer2ecef,
@@ -95,6 +96,10 @@ from nstk.transforms.constants import (
     WGS84_EP2,
 )
 
+if TYPE_CHECKING:
+    import astropy.units as u
+    import numpy as np
+
 __all__ = [
     "aer2enu",
     "aer2ecef",
@@ -164,18 +169,41 @@ __all__ = [
     "DAS2R",
 ]
 
-_TIMED_ROTATION_EXPORTS = {
-    "transform",
-}
 
+def transform(
+    from_frame: Any,
+    to_frame: Any,
+    time: Any,
+    position: np.ndarray | u.Quantity,
+    velocity: np.ndarray | u.Quantity | None = None,
+    acceleration: np.ndarray | u.Quantity | None = None,
+    *,
+    iers_convention: Any = None,
+    simple_eop: bool = True,
+) -> tuple[
+    np.ndarray | u.Quantity,
+    np.ndarray | u.Quantity | None,
+    np.ndarray | u.Quantity | None,
+]:
+    """Transform Cartesian state vectors between arbitrary Orekit frames.
 
-def __getattr__(name: str) -> Any:
-    if name in _TIMED_ROTATION_EXPORTS:
-        mod = import_module("nstk.transforms._timed_rotations")
-        value = getattr(mod, name)
-        globals()[name] = value
-        return value
-    raise AttributeError(f"module 'nstk.transforms' has no attribute '{name}'")
+    This lightweight wrapper keeps the public ``nstk.transforms.transform``
+    symbol visible to static analysis tools while importing the Orekit-backed
+    implementation only when the function is called.
+    """
+
+    from nstk.transforms._timed_rotations import transform as _transform
+
+    return _transform(
+        from_frame=from_frame,
+        to_frame=to_frame,
+        time=time,
+        position=position,
+        velocity=velocity,
+        acceleration=acceleration,
+        iers_convention=iers_convention,
+        simple_eop=simple_eop,
+    )
 
 
 def __dir__() -> list[str]:

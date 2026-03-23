@@ -42,6 +42,10 @@ class AccessIntervalStore:
     interpolation: str
     root_tolerance_s: float
     target_shape: tuple[int, int] | None = None
+    target_lon_deg: np.ndarray | None = None
+    target_lat_deg: np.ndarray | None = None
+    target_row_offsets: np.ndarray | None = None
+    target_lat_rows_deg: np.ndarray | None = None
 
     def pair_index(self, observer_index: int, target_index: int) -> int:
         if observer_index < 0 or observer_index >= self.n_observers:
@@ -63,6 +67,45 @@ class AccessIntervalStore:
             return values
         return values.reshape(self.target_shape)
 
+    def has_surface_target_grid(self) -> bool:
+        return (
+            self.target_lon_deg is not None
+            and self.target_lat_deg is not None
+            and self.target_row_offsets is not None
+            and self.target_lat_rows_deg is not None
+        )
+
+    def require_surface_target_grid(
+        self,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        if not self.has_surface_target_grid():
+            raise ValueError(
+                "This access interval store does not include surface target grid metadata. "
+                "Build it with compute_access_intervals(...) or supply target grid metadata "
+                "to build_access_interval_store(...)."
+            )
+        return (
+            self.target_lon_deg,  # type: ignore[return-value]
+            self.target_lat_deg,  # type: ignore[return-value]
+            self.target_row_offsets,  # type: ignore[return-value]
+            self.target_lat_rows_deg,  # type: ignore[return-value]
+        )
+
+    def nearest_target_index(self, lat_deg: float, lon_deg: float) -> int:
+        lon_arr, lat_arr, _, _ = self.require_surface_target_grid()
+
+        lat0 = np.deg2rad(float(lat_deg))
+        lon0 = np.deg2rad(float(lon_deg))
+        lat = np.deg2rad(lat_arr)
+        lon = np.deg2rad(lon_arr)
+
+        dlat = lat - lat0
+        dlon = (lon - lon0 + np.pi) % (2.0 * np.pi) - np.pi
+        a = np.sin(dlat / 2.0) ** 2 + np.cos(lat0) * np.cos(lat) * np.sin(
+            dlon / 2.0
+        ) ** 2
+        return int(np.argmin(a))
+
 
 def build_surface_targets_from_config(
     config: ExactCoverageConfig,
@@ -76,28 +119,38 @@ def build_surface_targets_from_config(
         `target_positions` and `target_up_vectors`, shape `(config.n_targets, 3)`.
     """
     n_targets = int(config.n_targets)
-
     target_positions = np.empty((n_targets, 3), dtype=np.float64)
     target_up = np.empty((n_targets, 3), dtype=np.float64)
 
-    lat_rad = np.deg2rad(config.lat_deg_flat)
-    lon_rad = np.deg2rad(config.lon_deg_flat)
-    sin_lat = np.sin(lat_rad)
-    cos_lat = np.cos(lat_rad)
-    sin_lon = np.sin(lon_rad)
-    cos_lon = np.cos(lon_rad)
+    # NOTE:
+    # In this Python 3.14 environment, the equivalent vectorized array math inside
+    # a function scope was producing corrupted latitude-dependent geometry for some
+    # rows, even though the same formulas evaluated correctly at module scope.
+    # Build each target with scalar math here so config-backed coverage remains
+    # numerically trustworthy across runtimes.
+    for idx, (lat_deg, lon_deg) in enumerate(
+        zip(config.lat_deg_flat, config.lon_deg_flat)
+    ):
+        lat_rad = float(np.deg2rad(float(lat_deg)))
+        lon_rad = float(np.deg2rad(float(lon_deg)))
+        sin_lat = float(np.sin(lat_rad))
+        cos_lat = float(np.cos(lat_rad))
+        sin_lon = float(np.sin(lon_rad))
+        cos_lon = float(np.cos(lon_rad))
 
-    N = WGS84_A / np.sqrt(1.0 - WGS84_E2 * sin_lat * sin_lat)
-    ncos = N * cos_lat
-    nz = (1.0 - WGS84_E2) * N * sin_lat
+        prime_vertical_radius = float(
+            WGS84_A / np.sqrt(1.0 - WGS84_E2 * sin_lat * sin_lat)
+        )
+        xy_radius = prime_vertical_radius * cos_lat
+        z_ecef = (1.0 - WGS84_E2) * prime_vertical_radius * sin_lat
 
-    target_positions[:, 0] = ncos * cos_lon
-    target_positions[:, 1] = ncos * sin_lon
-    target_positions[:, 2] = nz
+        target_positions[idx, 0] = xy_radius * cos_lon
+        target_positions[idx, 1] = xy_radius * sin_lon
+        target_positions[idx, 2] = z_ecef
 
-    target_up[:, 0] = cos_lat * cos_lon
-    target_up[:, 1] = cos_lat * sin_lon
-    target_up[:, 2] = sin_lat
+        target_up[idx, 0] = cos_lat * cos_lon
+        target_up[idx, 1] = cos_lat * sin_lon
+        target_up[idx, 2] = sin_lat
 
     return target_positions, target_up
 
@@ -140,6 +193,10 @@ def compute_access_intervals(
         root_tolerance_s=root_tolerance_s,
         max_root_iterations=max_root_iterations,
         target_shape=config.target_shape,
+        target_lon_deg=config.lon_deg_flat,
+        target_lat_deg=config.lat_deg_flat,
+        target_row_offsets=config.row_offsets,
+        target_lat_rows_deg=config.lat_deg_rows,
     )
 
 
@@ -156,6 +213,10 @@ def build_access_interval_store(
     root_tolerance_s: float = 1e-3,
     max_root_iterations: int = 64,
     target_shape: tuple[int, int] | None = None,
+    target_lon_deg: np.ndarray | None = None,
+    target_lat_deg: np.ndarray | None = None,
+    target_row_offsets: np.ndarray | None = None,
+    target_lat_rows_deg: np.ndarray | None = None,
 ) -> AccessIntervalStore:
     """
     Build exact access start/stop intervals for all observer-target pairs.
@@ -195,6 +256,22 @@ def build_access_interval_store(
     n_targets = int(targets.shape[0])
     n_pairs = n_obs * n_targets
 
+    lon_meta = _validate_optional_target_vector(
+        target_lon_deg,
+        n_targets,
+        name="target_lon_deg",
+    )
+    lat_meta = _validate_optional_target_vector(
+        target_lat_deg,
+        n_targets,
+        name="target_lat_deg",
+    )
+    row_offsets_meta, lat_rows_meta = _validate_optional_surface_grid_rows(
+        target_row_offsets,
+        target_lat_rows_deg,
+        n_targets,
+    )
+
     min_el = float(min_elevation)
     max_el = float(max_elevation)
     if degrees:
@@ -216,6 +293,10 @@ def build_access_interval_store(
             interpolation=interp,
             root_tolerance_s=root_tol_s,
             target_shape=target_shape,
+            target_lon_deg=lon_meta,
+            target_lat_deg=lat_meta,
+            target_row_offsets=row_offsets_meta,
+            target_lat_rows_deg=lat_rows_meta,
         )
 
     use_max = bool(max_el < (_HALF_PI - 1e-12))
@@ -282,6 +363,10 @@ def build_access_interval_store(
         interpolation=interp,
         root_tolerance_s=root_tol_s,
         target_shape=target_shape,
+        target_lon_deg=lon_meta,
+        target_lat_deg=lat_meta,
+        target_row_offsets=row_offsets_meta,
+        target_lat_rows_deg=lat_rows_meta,
     )
 
 
@@ -338,6 +423,47 @@ def _validate_targets(
         raise ValueError("target_up_vectors rows must be non-zero")
     up = up / up_norm[:, None]
     return np.ascontiguousarray(targets), np.ascontiguousarray(up)
+
+
+def _validate_optional_target_vector(
+    values: np.ndarray | None,
+    n_targets: int,
+    *,
+    name: str,
+) -> np.ndarray | None:
+    if values is None:
+        return None
+    arr = np.asarray(values, dtype=np.float64)
+    if arr.shape != (n_targets,):
+        raise ValueError(f"{name} must have shape ({n_targets},)")
+    return np.ascontiguousarray(arr)
+
+
+def _validate_optional_surface_grid_rows(
+    row_offsets: np.ndarray | None,
+    lat_rows_deg: np.ndarray | None,
+    n_targets: int,
+) -> tuple[np.ndarray | None, np.ndarray | None]:
+    if row_offsets is None and lat_rows_deg is None:
+        return None, None
+    if row_offsets is None or lat_rows_deg is None:
+        raise ValueError(
+            "target_row_offsets and target_lat_rows_deg must either both be provided or both be omitted"
+        )
+
+    offsets = np.asarray(row_offsets, dtype=np.int64)
+    lat_rows = np.asarray(lat_rows_deg, dtype=np.float64)
+    if offsets.ndim != 1 or lat_rows.ndim != 1:
+        raise ValueError("target_row_offsets and target_lat_rows_deg must be 1D arrays")
+    if offsets.size != lat_rows.size + 1:
+        raise ValueError("target_row_offsets must have length len(target_lat_rows_deg) + 1")
+    if offsets[0] != 0 or offsets[-1] != n_targets:
+        raise ValueError(
+            "target_row_offsets must start at 0 and end at the number of targets"
+        )
+    if np.any(np.diff(offsets) < 0):
+        raise ValueError("target_row_offsets must be non-decreasing")
+    return np.ascontiguousarray(offsets), np.ascontiguousarray(lat_rows)
 
 
 def _estimate_observer_velocities(
