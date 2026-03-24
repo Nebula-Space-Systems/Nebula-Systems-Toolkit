@@ -11,6 +11,7 @@ import astropy.units as u
 import numpy as np
 from astropy.time import Time
 from cartopy.mpl.geoaxes import GeoAxes
+from matplotlib.colors import to_rgba
 from matplotlib.figure import Figure
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
@@ -19,9 +20,10 @@ import nstk
 import nstk.plotting as plotting
 import nstk.propagation as propagation
 import nstk.propagation.orbit as orbit_module
-from nstk.plotting import plot_orbits
+from nstk.plotting import MapView, get_map_style, plot_orbits
 from nstk.plotting.orbits import (
     _points_visible_from_view,
+    _set_3d_globe_interaction,
     _surface_points_visible_from_view,
     _update_3d_scene,
     _view_direction_from_angles,
@@ -333,6 +335,112 @@ def test_plot_orbits_multi_orbit_2d_legend() -> None:
     assert "Initial Keplerian Elements" not in text_blob
     assert "Keplerian period" in text_blob
 
+    plt.close(fig)
+
+
+def test_plot_orbits_2d_accepts_custom_map_style() -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+    orbit = _make_orbit(epoch=epoch, raan_deg=18.0, anomaly_deg=35.0)
+    paper = (
+        get_map_style("light_detailed")
+        .with_borders(enabled=False)
+        .with_grid(alpha=0.12, draw_labels=False)
+    )
+
+    fig, ax = plot_orbits(
+        orbit,
+        view="2d",
+        map_style=paper,
+        samples=96,
+        show=False,
+    )
+
+    assert isinstance(ax, GeoAxes)
+    assert len(ax.lines) >= 1
+    plt.close(fig)
+
+
+def test_plot_orbits_3d_accepts_custom_map_style() -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+    orbit = _make_orbit(epoch=epoch, raan_deg=18.0, anomaly_deg=35.0)
+    paper = get_map_style("light_detailed")
+
+    fig, ax = plot_orbits(
+        orbit,
+        view="3d",
+        map_style=paper,
+        samples=96,
+        show=False,
+    )
+
+    coast = _collection_by_gid(ax, "nstk-earth-coast")
+    country = _collection_by_gid(ax, "nstk-earth-country")
+    info_text = next(text for text in fig.texts if "Marker shows the evaluated spacecraft state" in text.get_text())
+
+    assert np.allclose(fig.get_facecolor(), to_rgba(paper.theme.figure_face))
+    assert np.allclose(ax.get_facecolor(), to_rgba(paper.theme.axes_face))
+    assert np.allclose(np.atleast_2d(coast.get_colors())[0], to_rgba(paper.coastlines.color, paper.coastlines.alpha))
+    assert np.isclose(float(np.ravel(coast.get_linewidths())[0]), paper.coastlines.linewidth)
+    assert np.allclose(np.atleast_2d(country.get_colors())[0], to_rgba(paper.borders.color, paper.borders.alpha))
+    assert np.allclose(to_rgba(info_text.get_color()), to_rgba(paper.theme.grid_label_color, 0.82))
+
+    plt.close(fig)
+
+
+def test_plot_orbits_3d_uses_idle_and_drag_globe_surfaces() -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+    orbit = _make_orbit(epoch=epoch, raan_deg=18.0, anomaly_deg=35.0)
+
+    fig, ax = plot_orbits(
+        orbit,
+        view="3d",
+        samples=96,
+        show=False,
+    )
+
+    globe_surface = _collection_by_gid(ax, "nstk-earth-globe")
+    globe_drag_surface = _collection_by_gid(ax, "nstk-earth-globe-interactive")
+    scene_state = ax._nstk_3d_scene_state
+
+    assert globe_surface.get_facecolors().shape[0] >= 28_000
+    assert globe_drag_surface.get_facecolors().shape[0] <= 15_000
+    assert globe_surface.get_visible() is True
+    assert globe_drag_surface.get_visible() is False
+
+    assert _set_3d_globe_interaction(scene_state, True) is True
+    assert globe_surface.get_visible() is False
+    assert globe_drag_surface.get_visible() is True
+
+    assert _set_3d_globe_interaction(scene_state, False) is True
+    assert globe_surface.get_visible() is True
+    assert globe_drag_surface.get_visible() is False
+
+    plt.close(fig)
+
+
+def test_plot_orbits_2d_accepts_custom_map_view() -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+    orbit = _make_orbit(epoch=epoch, raan_deg=18.0, anomaly_deg=35.0)
+    atlantic = (
+        MapView()
+        .with_projection(name="Mercator")
+        .with_extent((-100.0, 30.0, -10.0, 65.0), global_map=False)
+    )
+
+    fig, ax = plot_orbits(
+        orbit,
+        view="2d",
+        map_view=atlantic,
+        samples=96,
+        show=False,
+    )
+
+    west, east, south, north = ax.get_extent(crs=ccrs.PlateCarree())
+    assert isinstance(ax, GeoAxes)
+    assert west <= -100.0 + 1e-6
+    assert east >= 30.0 - 1e-6
+    assert south <= -10.0 + 1e-6
+    assert north >= 65.0 - 1e-6
     plt.close(fig)
 
 

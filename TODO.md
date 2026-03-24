@@ -1,12 +1,7 @@
 # Todo list:
 
 
-## Update coverage
+## progress bars for coverage interval calcualtion
+## coverage interval calculation in c++
 
-* improve config definition and usage
-- add classmethod constructors for help
-- add better documentation, full example of config utilization 
-
-* improve access interval results
-- add figures of merit that directly take coverage result
-- each figure of merit has its own plot method
+## target access calcualtions (target can move, many constraints available, interval output)

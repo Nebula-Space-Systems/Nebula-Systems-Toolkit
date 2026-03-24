@@ -22,6 +22,8 @@ from mpl_toolkits.mplot3d.art3d import Line3DCollection
 
 from nstk.time_utils import normalize_time_to_epoch_seconds
 
+from .geo import GeoMap
+from .map import MapStyle, get_map_style
 from ._cartopy_data import (
     configure_cartopy_data_dir,
     get_natural_earth_shapefile,
@@ -29,6 +31,7 @@ from ._cartopy_data import (
 
 if TYPE_CHECKING:
     from matplotlib.figure import Figure
+    from nstk.plotting.map import MapView
     from nstk.propagation.orbit import Orbit
     from mpl_toolkits.mplot3d.axes3d import Axes3D
     from org.orekit.time import AbsoluteDate  # type: ignore
@@ -59,6 +62,10 @@ _VISIBLE_3D_OCCLUSION_RADIUS_KM = _EARTH_RADIUS_KM * 1.0005
 _HIDDEN_3D_MARKER_ALPHA = 0.78
 _HIDDEN_3D_CONNECTOR_ALPHA = 0.24
 _VIEW_KEY_ROUND_DIGITS = 3
+_EARTH_GLOBE_IDLE_LON_SAMPLES = 240
+_EARTH_GLOBE_IDLE_LAT_SAMPLES = 121
+_EARTH_GLOBE_DRAG_LON_SAMPLES = 160
+_EARTH_GLOBE_DRAG_LAT_SAMPLES = 81
 
 
 @dataclass
@@ -72,11 +79,14 @@ class _Orbit3DArtistSet:
     marker_xyz: np.ndarray
     color: str
     opacity: float
+    marker_edge_color: tuple[float, float, float, float]
 
 
 @dataclass
 class _Orbit3DSceneState:
     ax: Any
+    globe_artist: Any
+    globe_drag_artist: Any | None
     coast_artist: Line3DCollection | None
     country_artist: Line3DCollection | None
     coast_segments: tuple[np.ndarray, ...]
@@ -84,6 +94,87 @@ class _Orbit3DSceneState:
     orbit_artists: list[_Orbit3DArtistSet]
     redraw_pending: bool = False
     last_view_key: tuple[float, float] | None = None
+    interacting: bool = False
+
+
+@dataclass(frozen=True)
+class _OrbitPlotStyle:
+    map_style: MapStyle
+    figure_face: tuple[float, float, float, float]
+    axes_face: tuple[float, float, float, float]
+    panel_face: tuple[float, float, float, float]
+    panel_edge: tuple[float, float, float, float]
+    primary_text: tuple[float, float, float, float]
+    secondary_text: tuple[float, float, float, float]
+    axis_line: tuple[float, float, float, float]
+    grid_line: tuple[float, float, float, float]
+    coast_color: tuple[float, float, float, float]
+    coast_linewidth: float
+    country_color: tuple[float, float, float, float]
+    country_linewidth: float
+    ocean_rgb: np.ndarray
+    land_rgb: np.ndarray
+
+
+def _mix_rgba(base: Any, other: Any, amount: float) -> tuple[float, float, float, float]:
+    base_rgba = np.asarray(to_rgba(base), dtype=np.float64)
+    other_rgba = np.asarray(to_rgba(other), dtype=np.float64)
+    weight = float(np.clip(amount, 0.0, 1.0))
+    mixed = (1.0 - weight) * base_rgba + weight * other_rgba
+    return tuple(float(value) for value in mixed)
+
+
+def _with_alpha(color: Any, alpha: float) -> tuple[float, float, float, float]:
+    rgba = np.asarray(to_rgba(color), dtype=np.float64)
+    rgba[3] = float(np.clip(alpha, 0.0, 1.0))
+    return tuple(float(value) for value in rgba)
+
+
+def _relative_luminance(color: Any) -> float:
+    rgb = np.asarray(to_rgba(color)[:3], dtype=np.float64)
+    return float(0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2])
+
+
+def _resolve_orbit_plot_style(map_style: str | MapStyle | None) -> _OrbitPlotStyle:
+    style = get_map_style("dark_detailed" if map_style is None else map_style)
+    dark_background = _relative_luminance(style.theme.figure_face) < 0.45
+    contrast = "white" if dark_background else "black"
+    panel_blend = 0.08 if dark_background else 0.06
+    panel_face = _mix_rgba(style.theme.axes_face, contrast, panel_blend)
+    panel_edge_base = style.outline.color or style.theme.outline_edge
+    grid_color = style.gridlines.color or style.theme.grid_color
+    coast_color = style.coastlines.color or panel_edge_base
+    country_color = style.borders.color or panel_edge_base
+    grid_alpha = style.gridlines.alpha if style.gridlines.enabled else 0.0
+    axis_line_alpha = 0.22 if dark_background else 0.18
+    grid_line_alpha = 0.0 if grid_alpha <= 0.0 else min(0.32, 0.12 + 0.45 * float(grid_alpha))
+
+    ocean_face = style.ocean.facecolor if style.ocean.enabled else style.theme.axes_face
+    land_face = style.land.facecolor if style.land.enabled else ocean_face
+
+    return _OrbitPlotStyle(
+        map_style=style,
+        figure_face=tuple(float(value) for value in to_rgba(style.theme.figure_face)),
+        axes_face=tuple(float(value) for value in to_rgba(style.theme.axes_face)),
+        panel_face=panel_face,
+        panel_edge=_with_alpha(panel_edge_base, 0.9),
+        primary_text=_with_alpha(style.theme.grid_label_color, 1.0),
+        secondary_text=_with_alpha(style.theme.grid_label_color, 0.82),
+        axis_line=_with_alpha(panel_edge_base, axis_line_alpha),
+        grid_line=_with_alpha(grid_color, grid_line_alpha),
+        coast_color=_with_alpha(
+            coast_color,
+            float(style.coastlines.alpha if style.coastlines.enabled else 0.0),
+        ),
+        coast_linewidth=float(style.coastlines.linewidth),
+        country_color=_with_alpha(
+            country_color,
+            float(style.borders.alpha if style.borders.enabled else 0.0),
+        ),
+        country_linewidth=float(style.borders.linewidth),
+        ocean_rgb=np.asarray(to_rgba(ocean_face)[:3], dtype=np.float64),
+        land_rgb=np.asarray(to_rgba(land_face)[:3], dtype=np.float64),
+    )
 
 
 def _format_time_label(time_like: Any) -> str:
@@ -95,11 +186,11 @@ def _format_angle_deg(angle_rad: float) -> str:
     return f"{angle_deg:8.3f} deg"
 
 
-def _annotation_box_style() -> dict[str, Any]:
+def _annotation_box_style(plot_style: _OrbitPlotStyle) -> dict[str, Any]:
     return {
         "boxstyle": "round,pad=0.55",
-        "facecolor": "#081722",
-        "edgecolor": "#2E6178",
+        "facecolor": plot_style.panel_face,
+        "edgecolor": plot_style.panel_edge,
         "linewidth": 1.0,
         "alpha": 0.95,
     }
@@ -302,7 +393,68 @@ def _split_dateline_segments(lon_deg: np.ndarray, lat_deg: np.ndarray) -> list[t
     ]
 
 
-def _make_earth_facecolors(uu: np.ndarray, vv: np.ndarray) -> np.ndarray:
+@lru_cache(maxsize=None)
+def _land_geometry_union(resolution: str = "110m") -> Any:
+    from shapely.ops import unary_union
+
+    geometries = [
+        geom
+        for geom in _natural_earth_geometries(resolution, "physical", "land")
+        if geom is not None and not geom.is_empty
+    ]
+    if not geometries:
+        return None
+    return unary_union(geometries)
+
+
+def _earth_land_mask(uu: np.ndarray, vv: np.ndarray, *, resolution: str = "110m") -> np.ndarray:
+    try:
+        from shapely import contains_xy
+    except Exception:
+        return np.zeros(uu.shape, dtype=bool)
+
+    land_geometry = _land_geometry_union(resolution)
+    if land_geometry is None or getattr(land_geometry, "is_empty", False):
+        return np.zeros(uu.shape, dtype=bool)
+
+    lon_deg = ((np.degrees(uu) + 180.0) % 360.0) - 180.0
+    lat_deg = 90.0 - np.degrees(vv)
+    return np.asarray(contains_xy(land_geometry, lon_deg, lat_deg), dtype=bool)
+
+
+@lru_cache(maxsize=None)
+def _earth_globe_surface_mesh(
+    lon_samples: int,
+    lat_samples: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    u_grid = np.linspace(0.0, 2.0 * np.pi, int(lon_samples), dtype=np.float64)
+    v_grid = np.linspace(0.0, np.pi, int(lat_samples), dtype=np.float64)
+    uu, vv = np.meshgrid(u_grid, v_grid, indexing="xy")
+
+    x = _EARTH_RADIUS_KM * np.cos(uu) * np.sin(vv)
+    y = _EARTH_RADIUS_KM * np.sin(uu) * np.sin(vv)
+    z = _EARTH_RADIUS_KM * np.cos(vv)
+    return uu, vv, x, y, z
+
+
+@lru_cache(maxsize=None)
+def _earth_land_mask_for_surface(
+    lon_samples: int,
+    lat_samples: int,
+    *,
+    resolution: str = "110m",
+) -> np.ndarray:
+    uu, vv, _, _, _ = _earth_globe_surface_mesh(lon_samples, lat_samples)
+    return _earth_land_mask(uu, vv, resolution=resolution)
+
+
+def _make_earth_facecolors(
+    uu: np.ndarray,
+    vv: np.ndarray,
+    *,
+    land_mask: np.ndarray,
+    plot_style: _OrbitPlotStyle,
+) -> np.ndarray:
     nx = np.cos(uu) * np.sin(vv)
     ny = np.sin(uu) * np.sin(vv)
     nz = np.cos(vv)
@@ -311,23 +463,53 @@ def _make_earth_facecolors(uu: np.ndarray, vv: np.ndarray) -> np.ndarray:
     light /= np.linalg.norm(light)
     diffuse = np.clip(nx * light[0] + ny * light[1] + nz * light[2], 0.0, 1.0)
 
-    # Smooth ocean palette that avoids texture banding in mplot3d.
-    equator = 1.0 - np.abs(nz)
-    swirl = 0.5 + 0.5 * np.sin(2.8 * uu + 0.85 * np.cos(2.0 * vv))
-    variation = np.clip(0.74 + 0.26 * swirl, 0.66, 1.02)
+    swirl = 0.5 + 0.5 * np.sin(2.6 * uu + 0.9 * np.cos(1.7 * vv))
+    variation = np.clip(0.93 + 0.10 * swirl, 0.88, 1.04)
+    ocean = np.asarray(plot_style.ocean_rgb, dtype=np.float64)
+    land = np.asarray(plot_style.land_rgb, dtype=np.float64)
+    mask = np.asarray(land_mask, dtype=bool)
+    base = np.where(mask[..., None], land, ocean)
+    base = np.clip(base * variation[..., None], 0.0, 1.0)
 
-    deep = np.array([0.03, 0.15, 0.29], dtype=np.float64)
-    shallow = np.array([0.10, 0.35, 0.56], dtype=np.float64)
-    base = deep + (shallow - deep) * (0.22 + 0.78 * equator)[..., None]
-    base *= variation[..., None]
-
-    brightness = 0.34 + 0.66 * diffuse
-    specular = np.power(diffuse, 18.0) * 0.08
+    brightness = 0.42 + 0.58 * diffuse
+    ocean_specular = np.power(diffuse, 18.0) * 0.06
 
     facecolors = np.empty((*uu.shape, 4), dtype=np.float64)
-    facecolors[..., :3] = np.clip(base * brightness[..., None] + specular[..., None], 0.0, 1.0)
+    facecolors[..., :3] = np.clip(
+        base * brightness[..., None] + (~mask)[..., None] * ocean_specular[..., None],
+        0.0,
+        1.0,
+    )
     facecolors[..., 3] = 1.0
     return facecolors
+
+
+def _add_earth_surface(
+    ax: Any,
+    *,
+    plot_style: _OrbitPlotStyle,
+    lon_samples: int,
+    lat_samples: int,
+    visible: bool,
+    gid: str,
+) -> Any:
+    uu, vv, x, y, z = _earth_globe_surface_mesh(lon_samples, lat_samples)
+    land_mask = _earth_land_mask_for_surface(lon_samples, lat_samples, resolution="110m")
+    surface = ax.plot_surface(
+        x,
+        y,
+        z,
+        rstride=1,
+        cstride=1,
+        facecolors=_make_earth_facecolors(uu, vv, land_mask=land_mask, plot_style=plot_style),
+        linewidth=0.0,
+        antialiased=False,
+        shade=False,
+        zorder=0,
+    )
+    surface.set_gid(gid)
+    surface.set_visible(visible)
+    return surface
 
 
 def _lonlat_segments_to_xyz(
@@ -426,17 +608,24 @@ def _update_surface_outline_artist(
     artist.set_segments(_visible_surface_3d_segments(segments, view_dir))
 
 
-def _set_marker_artist_style(marker: Any, color: str, opacity: float, *, visible: bool) -> None:
+def _set_marker_artist_style(
+    marker: Any,
+    color: str,
+    opacity: float,
+    *,
+    visible: bool,
+    marker_edge_color: tuple[float, float, float, float],
+) -> None:
     if visible:
         marker.set_alpha(opacity)
         marker.set_facecolors([to_rgba(color, 1.0)])
-        marker.set_edgecolors([to_rgba("white", 0.98)])
+        marker.set_edgecolors([marker_edge_color])
         marker.set_linewidths([0.9])
         return
 
     marker.set_alpha(_HIDDEN_3D_MARKER_ALPHA * opacity)
     marker.set_facecolors([(0.0, 0.0, 0.0, 0.0)])
-    marker.set_edgecolors([to_rgba("#EAF8FF", 0.98)])
+    marker.set_edgecolors([marker_edge_color])
     marker.set_linewidths([1.35])
 
 
@@ -457,6 +646,7 @@ def _update_3d_orbit_artists(artist_set: _Orbit3DArtistSet, view_dir: np.ndarray
         artist_set.color,
         artist_set.opacity,
         visible=marker_visible,
+        marker_edge_color=artist_set.marker_edge_color,
     )
 
     if artist_set.connector is not None:
@@ -481,6 +671,16 @@ def _update_3d_scene(state: _Orbit3DSceneState) -> bool:
     return True
 
 
+def _set_3d_globe_interaction(state: _Orbit3DSceneState, interacting: bool) -> bool:
+    if state.interacting == interacting:
+        return False
+    state.interacting = interacting
+    state.globe_artist.set_visible(not interacting)
+    if state.globe_drag_artist is not None:
+        state.globe_drag_artist.set_visible(interacting)
+    return True
+
+
 def _install_3d_scene_sync(fig: Any, state: _Orbit3DSceneState) -> None:
     canvas = fig.canvas
 
@@ -497,9 +697,27 @@ def _install_3d_scene_sync(fig: Any, state: _Orbit3DSceneState) -> None:
         state.redraw_pending = False
         _sync()
 
+    def _request_draw() -> None:
+        if not state.redraw_pending:
+            state.redraw_pending = True
+            canvas.draw_idle()
+
+    def _on_press(event: Any) -> None:
+        if getattr(event, "inaxes", None) is not state.ax:
+            return
+        if _set_3d_globe_interaction(state, True):
+            _request_draw()
+
+    def _on_release(event: Any) -> None:
+        toggled = _set_3d_globe_interaction(state, False)
+        if toggled:
+            _request_draw()
+        _sync(None)
+
     canvas.mpl_connect("draw_event", _on_draw)
+    canvas.mpl_connect("button_press_event", _on_press)
     canvas.mpl_connect("motion_notify_event", _sync)
-    canvas.mpl_connect("button_release_event", _sync)
+    canvas.mpl_connect("button_release_event", _on_release)
     canvas.mpl_connect("scroll_event", _sync)
     _sync()
 
@@ -507,28 +725,30 @@ def _install_3d_scene_sync(fig: Any, state: _Orbit3DSceneState) -> None:
 def _draw_earth_globe(
     ax: Any,
     view_dir: np.ndarray,
-    resolution: int = 112,
-) -> tuple[Line3DCollection | None, Line3DCollection | None]:
-    u_grid = np.linspace(0.0, 2.0 * np.pi, int(resolution), dtype=np.float64)
-    v_grid = np.linspace(0.0, np.pi, int(max(24, resolution // 2)), dtype=np.float64)
-    uu, vv = np.meshgrid(u_grid, v_grid, indexing="xy")
-
-    x = _EARTH_RADIUS_KM * np.cos(uu) * np.sin(vv)
-    y = _EARTH_RADIUS_KM * np.sin(uu) * np.sin(vv)
-    z = _EARTH_RADIUS_KM * np.cos(vv)
-
-    ax.plot_surface(
-        x,
-        y,
-        z,
-        rstride=1,
-        cstride=1,
-        facecolors=_make_earth_facecolors(uu, vv),
-        linewidth=0.0,
-        antialiased=True,
-        shade=False,
-        zorder=0,
+    plot_style: _OrbitPlotStyle,
+    idle_lon_samples: int = _EARTH_GLOBE_IDLE_LON_SAMPLES,
+    idle_lat_samples: int = _EARTH_GLOBE_IDLE_LAT_SAMPLES,
+    drag_lon_samples: int = _EARTH_GLOBE_DRAG_LON_SAMPLES,
+    drag_lat_samples: int = _EARTH_GLOBE_DRAG_LAT_SAMPLES,
+) -> tuple[Any, Any | None, Line3DCollection | None, Line3DCollection | None]:
+    globe_artist = _add_earth_surface(
+        ax,
+        plot_style=plot_style,
+        lon_samples=idle_lon_samples,
+        lat_samples=idle_lat_samples,
+        visible=True,
+        gid="nstk-earth-globe",
     )
+    globe_drag_artist: Any | None = None
+    if (drag_lon_samples, drag_lat_samples) != (idle_lon_samples, idle_lat_samples):
+        globe_drag_artist = _add_earth_surface(
+            ax,
+            plot_style=plot_style,
+            lon_samples=drag_lon_samples,
+            lat_samples=drag_lat_samples,
+            visible=False,
+            gid="nstk-earth-globe-interactive",
+        )
 
     coast_segments = _earth_outline_xyz_segments(
         "110m",
@@ -537,12 +757,12 @@ def _draw_earth_globe(
         max_points_per_segment=260,
     )
     coast_artist: Line3DCollection | None = None
-    if coast_segments:
+    if coast_segments and plot_style.map_style.coastlines.enabled:
         coast_artist = _make_3d_line_collection(
             gid="nstk-earth-coast",
-            color=(0.94, 0.985, 1.0),
-            linewidth=0.55,
-            alpha=0.55,
+            color=plot_style.coast_color[:3],
+            linewidth=max(0.2, plot_style.coast_linewidth),
+            alpha=plot_style.coast_color[3],
             zorder=2,
         )
         ax.add_collection3d(coast_artist, autolim=False)
@@ -555,17 +775,17 @@ def _draw_earth_globe(
         max_points_per_segment=200,
     )
     country_artist: Line3DCollection | None = None
-    if country_segments:
+    if country_segments and plot_style.map_style.borders.enabled:
         country_artist = _make_3d_line_collection(
             gid="nstk-earth-country",
-            color=(0.76, 0.93, 1.0),
-            linewidth=0.32,
-            alpha=0.3,
+            color=plot_style.country_color[:3],
+            linewidth=max(0.2, plot_style.country_linewidth),
+            alpha=plot_style.country_color[3],
             zorder=2,
         )
         ax.add_collection3d(country_artist, autolim=False)
         _update_surface_outline_artist(country_artist, country_segments, view_dir)
-    return coast_artist, country_artist
+    return globe_artist, globe_drag_artist, coast_artist, country_artist
 
 
 def _create_3d_orbit_artists(
@@ -580,6 +800,7 @@ def _create_3d_orbit_artists(
     marker_area: float,
     halo_size: float,
     show_connector: bool,
+    marker_edge_color: tuple[float, float, float, float],
 ) -> _Orbit3DArtistSet:
     glow = _make_3d_line_collection(
         gid=f"nstk-orbit-trail-glow-{index}",
@@ -630,7 +851,7 @@ def _create_3d_orbit_artists(
         s=marker_area,
         c=[color],
         alpha=opacity,
-        edgecolors="white",
+        edgecolors=[marker_edge_color],
         linewidths=0.9,
         depthshade=False,
         clip_on=False,
@@ -651,6 +872,7 @@ def _create_3d_orbit_artists(
         marker_xyz=np.asarray(marker_xyz, dtype=np.float64),
         color=color,
         opacity=float(opacity),
+        marker_edge_color=marker_edge_color,
     )
 
 
@@ -719,27 +941,23 @@ def _split_visible_3d_segments(points_km: np.ndarray, visible: np.ndarray) -> li
     return segments
 
 
-def _style_3d_axes(ax: Any, span_km: float) -> None:
-    bg = "#07111D"
-    axis_line = (0.75, 0.9, 1.0, 0.08)
-    grid_line = (0.75, 0.9, 1.0, 0.05)
-
+def _style_3d_axes(ax: Any, span_km: float, plot_style: _OrbitPlotStyle) -> None:
     if hasattr(ax, "computed_zorder"):
         ax.computed_zorder = False
 
-    ax.set_facecolor(bg)
-    ax.figure.set_facecolor(bg)
+    ax.set_facecolor(plot_style.axes_face)
+    ax.figure.set_facecolor(plot_style.figure_face)
     ax.set_box_aspect((1.0, 1.0, 1.0))
     ax.set_xlim(-span_km, span_km)
     ax.set_ylim(-span_km, span_km)
     ax.set_zlim(-span_km, span_km)
 
     for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
-        axis.line.set_color(axis_line)
+        axis.line.set_color(plot_style.axis_line)
         axis.line.set_linewidth(0.55)
         axis.pane.fill = False
         axis.pane.set_edgecolor((1.0, 1.0, 1.0, 0.0))
-        axis._axinfo["grid"]["color"] = grid_line
+        axis._axinfo["grid"]["color"] = plot_style.grid_line
         axis._axinfo["grid"]["linewidth"] = 0.45
         axis._axinfo["tick"]["inward_factor"] = 0.0
         axis._axinfo["tick"]["outward_factor"] = 0.0
@@ -750,7 +968,7 @@ def _style_3d_axes(ax: Any, span_km: float) -> None:
     ax.set_xlabel("")
     ax.set_ylabel("")
     ax.set_zlabel("")
-    ax.tick_params(colors="#CFEAF7")
+    ax.tick_params(colors=plot_style.primary_text)
 
 
 def _style_2d_axes(ax: GeoAxes) -> None:
@@ -809,15 +1027,15 @@ def _style_2d_axes(ax: GeoAxes) -> None:
     gl.ylocator = mticker.FixedLocator(np.arange(-90, 91, 30))
 
 
-def _style_legend(legend: Any) -> None:
-    legend.get_frame().set_facecolor("#091724")
-    legend.get_frame().set_edgecolor("#30596E")
+def _style_legend(legend: Any, plot_style: _OrbitPlotStyle) -> None:
+    legend.get_frame().set_facecolor(plot_style.panel_face)
+    legend.get_frame().set_edgecolor(plot_style.panel_edge)
     legend.get_frame().set_alpha(0.9)
     for text in legend.get_texts():
-        text.set_color("#E8F6FF")
+        text.set_color(plot_style.primary_text)
 
 
-def _add_bottom_legend(fig: Any, ax: Any, handles: Sequence[Line2D]) -> None:
+def _add_bottom_legend(fig: Any, ax: Any, handles: Sequence[Line2D], plot_style: _OrbitPlotStyle) -> None:
     if len(handles) > _MAX_LEGEND_ITEMS:
         return
 
@@ -854,7 +1072,7 @@ def _add_bottom_legend(fig: Any, ax: Any, handles: Sequence[Line2D]) -> None:
         labelspacing=0.7,
     )
     legend.set_in_layout(False)
-    _style_legend(legend)
+    _style_legend(legend, plot_style)
 
 
 def _make_info_text(
@@ -883,6 +1101,7 @@ def _add_single_orbit_3d_annotations(
     orbit: Any,
     start_s: float,
     duration_s: float,
+    plot_style: _OrbitPlotStyle,
 ) -> None:
     eval_time = orbit.epoch + (start_s + duration_s) * u.s
     summary = _extract_keplerian_summary(orbit)
@@ -901,14 +1120,14 @@ def _add_single_orbit_3d_annotations(
             f"Frame  {summary['frame']}",
         ],
     )
-    box_style = _annotation_box_style()
+    box_style = _annotation_box_style(plot_style)
     fig.text(
         0.03,
         0.92,
         left_text,
         ha="left",
         va="top",
-        color="#EAF8FF",
+        color=plot_style.primary_text,
         fontsize=10.5,
         family="monospace",
         bbox=box_style,
@@ -919,7 +1138,7 @@ def _add_single_orbit_3d_annotations(
         right_text,
         ha="left",
         va="top",
-        color="#EAF8FF",
+        color=plot_style.primary_text,
         fontsize=10.0,
         family="monospace",
         bbox=box_style,
@@ -931,6 +1150,7 @@ def _add_single_orbit_2d_annotations(
     orbit: Any,
     start_s: float,
     duration_s: float,
+    plot_style: _OrbitPlotStyle,
 ) -> None:
     eval_time = orbit.epoch + (start_s + duration_s) * u.s
     left_text, right_text = _make_info_text(
@@ -946,14 +1166,14 @@ def _add_single_orbit_2d_annotations(
             "Coords  WGS84 geodetic",
         ],
     )
-    box_style = _annotation_box_style()
+    box_style = _annotation_box_style(plot_style)
     fig.text(
         0.03,
         0.92,
         left_text,
         ha="left",
         va="top",
-        color="#EAF8FF",
+        color=plot_style.primary_text,
         fontsize=10.0,
         family="monospace",
         bbox=box_style,
@@ -964,7 +1184,7 @@ def _add_single_orbit_2d_annotations(
         right_text,
         ha="left",
         va="top",
-        color="#EAF8FF",
+        color=plot_style.primary_text,
         fontsize=9.8,
         family="monospace",
         bbox=box_style,
@@ -1025,6 +1245,7 @@ def _render_3d(
     ax: Any | None,
     figsize: tuple[float, float],
     title: str | None,
+    map_style: MapStyle,
     elev: float,
     azim: float,
     start_time: Any,
@@ -1034,8 +1255,9 @@ def _render_3d(
     marker_size: float | None,
     show: bool,
 ) -> tuple["Figure", "Axes3D"]:
+    plot_style = _resolve_orbit_plot_style(map_style)
     if ax is None:
-        fig = plt.figure(figsize=figsize, facecolor="#07111D")
+        fig = plt.figure(figsize=figsize, facecolor=plot_style.figure_face)
         ax = fig.add_subplot(111, projection="3d")
     else:
         fig = ax.figure
@@ -1043,7 +1265,7 @@ def _render_3d(
             raise TypeError("view='3d' requires a Matplotlib 3D axis")
 
     view_dir = _view_direction_from_angles(elev, azim)
-    coast_artist, country_artist = _draw_earth_globe(ax, view_dir)
+    globe_artist, globe_drag_artist, coast_artist, country_artist = _draw_earth_globe(ax, view_dir, plot_style)
 
     trail_width = _default_trail_width("3d", len(windows)) if line_width is None else line_width
     marker_diameter = _default_marker_diameter("3d") if marker_size is None else marker_size
@@ -1067,6 +1289,7 @@ def _render_3d(
                 marker_area=marker_area,
                 halo_size=halo_size,
                 show_connector=(len(windows) == 1),
+                marker_edge_color=plot_style.primary_text,
             )
         )
         handles.append(
@@ -1085,10 +1308,12 @@ def _render_3d(
         )
 
     span_km = float(max(_EARTH_RADIUS_KM * 1.18, np.max(np.abs(np.concatenate(all_points, axis=0))) * 1.08))
-    _style_3d_axes(ax, span_km)
+    _style_3d_axes(ax, span_km, plot_style)
     ax.view_init(elev=float(elev), azim=float(azim))
     scene_state = _Orbit3DSceneState(
         ax=ax,
+        globe_artist=globe_artist,
+        globe_drag_artist=globe_drag_artist,
         coast_artist=coast_artist,
         country_artist=country_artist,
         coast_segments=_earth_outline_xyz_segments(
@@ -1111,7 +1336,7 @@ def _render_3d(
     if title is not None:
         ax.set_title(
             title,
-            color="#E8F6FF",
+            color=plot_style.primary_text,
             fontsize=16,
             pad=16.0,
         )
@@ -1123,6 +1348,7 @@ def _render_3d(
             window["orbit"],
             window["start_s"],
             window["duration_s"],
+            plot_style,
         )
         info_line = (
             "Marker shows the evaluated spacecraft state at the end of the plotted trail; "
@@ -1135,10 +1361,10 @@ def _render_3d(
             else "Markers show the end of each plotted trail; hollow rings mark far-side states"
         )
 
-    fig.text(0.5, 0.03, info_line, color="#9DC7DA", fontsize=10, ha="center", va="center")
+    fig.text(0.5, 0.03, info_line, color=plot_style.secondary_text, fontsize=10, ha="center", va="center")
 
     if len(windows) > 1:
-        _add_bottom_legend(fig, ax, handles)
+        _add_bottom_legend(fig, ax, handles, plot_style)
 
     if show:
         plt.show()
@@ -1151,6 +1377,8 @@ def _render_2d(
     ax: Any | None,
     figsize: tuple[float, float],
     title: str | None,
+    map_style: MapStyle,
+    map_view: "MapView | None",
     start_time: Any,
     duration: Any,
     opacity: float,
@@ -1158,55 +1386,43 @@ def _render_2d(
     marker_size: float | None,
     show: bool,
 ) -> tuple["Figure", GeoAxes]:
+    plot_style = _resolve_orbit_plot_style(map_style)
+    effective_extent = None if map_view is not None else "global"
     if ax is None:
-        fig = plt.figure(figsize=figsize, facecolor="#07111D")
-        ax = fig.add_subplot(111, projection=ccrs.PlateCarree())
+        geo_map = GeoMap(
+            style=plot_style.map_style,
+            view=map_view,
+            extent=effective_extent,
+            figsize=figsize,
+        )
+        fig = geo_map.fig
+        ax = geo_map.ax
     else:
         fig = ax.figure
         if hasattr(ax, "zaxis") or not isinstance(ax, GeoAxes):
             raise TypeError("view='2d' requires a Cartopy GeoAxes or no axis")
+        geo_map = GeoMap(
+            style=plot_style.map_style,
+            view=map_view,
+            extent=effective_extent,
+            ax=ax,
+        )
+        ax = geo_map.ax
 
-    _style_2d_axes(ax)
     trail_width = _default_trail_width("2d", len(windows)) if line_width is None else line_width
     marker_diameter = _default_marker_diameter("2d") if marker_size is None else marker_size
-    halo_size = (marker_diameter * _MARKER_HALO_SCALE) ** 2
-    marker_area = marker_diameter**2
     legend_marker_size = _default_legend_marker_size("2d") if marker_size is None else marker_diameter
     handles: list[Line2D] = []
     for window in windows:
         color = window["color"]
-        for lon_seg, lat_seg in _split_dateline_segments(window["lon_deg"], window["lat_deg"]):
-            ax.plot(
-                lon_seg,
-                lat_seg,
-                transform=ccrs.PlateCarree(),
-                color=color,
-                linewidth=trail_width,
-                alpha=0.9 * opacity,
-                zorder=3,
-            )
-
-        marker_lat, marker_lon = window["marker_latlon"]
-        ax.scatter(
-            [marker_lon],
-            [marker_lat],
-            transform=ccrs.PlateCarree(),
-            s=halo_size,
-            c=[color],
-            alpha=0.15 * opacity,
-            linewidths=0.0,
-            zorder=4,
-        )
-        ax.scatter(
-            [marker_lon],
-            [marker_lat],
-            transform=ccrs.PlateCarree(),
-            s=marker_area,
-            c=[color],
-            alpha=opacity,
-            edgecolors="white",
-            linewidths=0.9,
-            zorder=5,
+        geo_map.add_ground_track(
+            window["lon_deg"],
+            window["lat_deg"],
+            color=color,
+            opacity=opacity,
+            line_width=trail_width,
+            marker_latlon=window["marker_latlon"],
+            marker_size=marker_diameter,
         )
         handles.append(
             Line2D(
@@ -1226,14 +1442,20 @@ def _render_2d(
     if title is not None:
         ax.set_title(
             title,
-            color="#E8F6FF",
+            color=plot_style.primary_text,
             fontsize=16,
             pad=14.0,
         )
 
     if len(windows) == 1:
         window = windows[0]
-        _add_single_orbit_2d_annotations(fig, window["orbit"], window["start_s"], window["duration_s"])
+        _add_single_orbit_2d_annotations(
+            fig,
+            window["orbit"],
+            window["start_s"],
+            window["duration_s"],
+            plot_style,
+        )
         info_line = "Marker shows the evaluated spacecraft ground-track position at the end of the plotted trail"
     else:
         info_line = (
@@ -1241,9 +1463,9 @@ def _render_2d(
             if start_time is None and duration is None
             else "Markers show the end of each plotted ground track"
         )
-        _add_bottom_legend(fig, ax, handles)
+        _add_bottom_legend(fig, ax, handles, plot_style)
 
-    fig.text(0.5, 0.03, info_line, color="#9DC7DA", fontsize=10, ha="center", va="center")
+    fig.text(0.5, 0.03, info_line, color=plot_style.secondary_text, fontsize=10, ha="center", va="center")
 
     if show:
         plt.show()
@@ -1262,7 +1484,9 @@ def plot_orbits(
     ax: GeoAxes | None = None,
     figsize: tuple[float, float] = (9.5, 8.8),
     title: str | None = None,
-    view: Literal["2d"],
+    map_style: str | "MapStyle" | None = None,
+    map_view: "MapView | None" = None,
+    view: Literal["2d", "3d"] = "2d",
     elev: float = 24.0,
     azim: float = 42.0,
     opacity: float = 1.0,
@@ -1284,7 +1508,9 @@ def plot_orbits(
     ax: Axes3D | None = None,
     figsize: tuple[float, float] = (9.5, 8.8),
     title: str | None = None,
-    view: Literal["3d"] = "3d",
+    map_style: str | "MapStyle" | None = None,
+    map_view: "MapView | None" = None,
+    view: Literal["2d", "3d"] = "2d",
     elev: float = 24.0,
     azim: float = 42.0,
     opacity: float = 1.0,
@@ -1306,7 +1532,9 @@ def plot_orbits(
     ax: GeoAxes | Axes3D | None = None,
     figsize: tuple[float, float] = (9.5, 8.8),
     title: str | None = None,
-    view: Literal["2d", "3d"] = "3d",
+    map_style: str | "MapStyle" | None = None,
+    map_view: "MapView | None" = None,
+    view: Literal["2d", "3d"] = "2d",
     elev: float = 24.0,
     azim: float = 42.0,
     opacity: float = 1.0,
@@ -1327,7 +1555,9 @@ def plot_orbits(
     ax: GeoAxes | Axes3D | None = None,
     figsize: tuple[float, float] = (9.5, 8.8),
     title: str | None = None,
-    view: Literal["2d", "3d"] = "3d",
+    map_style: str | "MapStyle" | None = None,
+    map_view: "MapView | None" = None,
+    view: Literal["2d", "3d"] = "2d",
     elev: float = 24.0,
     azim: float = 42.0,
     opacity: float = 1.0,
@@ -1356,6 +1586,13 @@ def plot_orbits(
         Figure size used when ``ax`` is not provided.
     title
         Optional plot title.
+    map_style
+        Optional shared NSTK style preset or custom `MapStyle`. In 2D it drives
+        the basemap directly; in 3D it drives the globe, plot chrome, legends,
+        and annotation colors.
+    map_view
+        Optional reusable 2D `MapView` controlling projection, extent, and
+        layout. Ignored for the 3D globe view.
     view
         ``"3d"`` for an Earth globe view rendered in ITRF or ``"2d"`` for a
         ground-track map.
@@ -1378,6 +1615,7 @@ def plot_orbits(
     label_list = _coerce_labels(labels, len(orbit_list))
     color_list = _coerce_colors(colors, len(orbit_list))
     view_key = _coerce_view(view)
+    resolved_map_style = get_map_style("dark_detailed" if map_style is None else map_style)
     sample_count = int(samples)
     alpha = _coerce_opacity(opacity)
     trail_width = _coerce_positive_style_value("line_width", line_width)
@@ -1401,6 +1639,7 @@ def plot_orbits(
             ax=ax,
             figsize=figsize,
             title=title,
+            map_style=resolved_map_style,
             elev=elev,
             azim=azim,
             start_time=start_time,
@@ -1415,6 +1654,8 @@ def plot_orbits(
         ax=ax,
         figsize=figsize,
         title=title,
+        map_style=resolved_map_style,
+        map_view=map_view,
         start_time=start_time,
         duration=duration,
         opacity=alpha,

@@ -27,6 +27,7 @@ from nstk.coverage import (
     Observer,
 )
 from nstk.plotting import (
+    GeoMap,
     LIGHT_DETAILED,
     plot_coverage_ecdf,
     plot_coverage_histogram,
@@ -121,7 +122,9 @@ def test_generic_coverage_plotting_helpers_return_figures_and_axes() -> None:
     stack = coverage.access_duration(min_assets=[1, 2], unit="minutes")
     timeline = coverage.target(index=0).timeline()
 
-    fig_map, ax_map, artist, cbar = plot_coverage_map(field, map_cfg=LIGHT_DETAILED, title="Coverage")
+    map_view = plot_coverage_map(field, map_cfg=LIGHT_DETAILED, title="Coverage")
+    assert isinstance(map_view, GeoMap)
+    fig_map, ax_map, artist, cbar = map_view
     assert isinstance(fig_map, Figure)
     assert isinstance(ax_map, cartopy_geoaxes.GeoAxes)
     assert ax_map.get_title() == "Coverage"
@@ -156,7 +159,9 @@ def test_result_object_plot_methods_delegate_to_generic_plotting() -> None:
     stack = coverage.access_duration(min_assets=[1, 2], unit="minutes")
     timeline = coverage.target(index=0).timeline()
 
-    fig_field, _, _, _ = field.plot(map_cfg=LIGHT_DETAILED)
+    map_view = field.plot(map_cfg=LIGHT_DETAILED)
+    assert isinstance(map_view, GeoMap)
+    fig_field, _, _, _ = map_view
     assert isinstance(fig_field, Figure)
     plt.close(fig_field)
 
@@ -249,6 +254,26 @@ def test_plot_coverage_map_handles_land_boundary_geometry() -> None:
     plt.close(fig)
 
 
+def test_plot_coverage_map_auto_zooms_local_targets_by_default() -> None:
+    field = _coverage().access_duration(unit="minutes")
+
+    map_view = plot_coverage_map(field, title="Auto Zoom")
+    assert isinstance(map_view, GeoMap)
+    fig, ax, artist, cbar = map_view
+    assert artist is not None
+    assert cbar is not None
+
+    west, east, south, north = ax.get_extent(crs=ccrs.PlateCarree())
+    assert west <= -20.0
+    assert east >= 20.0
+    assert south <= -10.0
+    assert north >= 10.0
+    assert (east - west) < 180.0
+    assert (north - south) < 120.0
+
+    plt.close(fig)
+
+
 def test_plot_coverage_map_clips_structured_grid_to_bbox_bounds() -> None:
     targets = CoverageTargets.region_bbox(
         west_deg=-20.0,
@@ -275,7 +300,7 @@ def test_plot_coverage_map_clips_structured_grid_to_bbox_bounds() -> None:
         alpha=1.0,
         vmin=0.0,
         vmax=1.0,
-        boundary=False,
+        outline=False,
     )
     assert _patch_saturation(fig, ax, lon_deg=19.9, lat_deg=0.0) > 100.0
     assert _patch_saturation(fig, ax, lon_deg=20.3, lat_deg=0.0) < 10.0

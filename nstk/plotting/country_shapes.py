@@ -241,3 +241,29 @@ def fuzzy_find_country_record(
             f"No country matches found for {query!r} (min_score={min_score})"
         )
     return matches[0].record, matches
+
+
+def country_geometry(
+    query: str,
+    resolution: Literal["10m", "50m", "110m"] = "110m",
+):
+    """Return the best-matching Natural Earth country geometry for a query."""
+    record, _ = fuzzy_find_country_record(query, resolution=resolution)
+    return record.geometry
+
+
+def country_geometries(
+    queries: Sequence[str],
+    resolution: Literal["10m", "50m", "110m"] = "110m",
+) -> list[object]:
+    """Return best-matching country geometries for multiple queries."""
+    return [country_geometry(query, resolution=resolution) for query in queries]
+
+
+__all__ = [
+    "CountryMatch",
+    "fuzzy_find_countries",
+    "fuzzy_find_country_record",
+    "country_geometry",
+    "country_geometries",
+]

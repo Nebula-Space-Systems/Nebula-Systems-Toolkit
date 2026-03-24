@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
 from .domains import TargetDomain, coerce_domain
 from .targets import CoverageTargets
+
+if TYPE_CHECKING:
+    from nstk.plotting.geo import GeoMap
+    from nstk.plotting.map import CFeatureScale, MapConfig, MapStyle, MapView, ProjectionConfig
 
 
 def _weighted_reduce(values: np.ndarray, op: str, weights: np.ndarray | None = None) -> float:
@@ -174,13 +178,130 @@ class CoverageField(CoverageArray):
         if not self.coords:
             object.__setattr__(self, "coords", {"target": np.arange(self.targets.n_targets, dtype=np.int64)})
 
-    def plot_map(self, **kwargs: Any) -> tuple[Any, Any, Any, Any]:
+    def plot_map(
+        self,
+        *,
+        style: str | "MapStyle" | None = None,
+        theme: str | "MapConfig" | "MapStyle" | None = "light_detailed",
+        view: "MapView" | None = None,
+        projection: str | "ProjectionConfig" | None = None,
+        extent: Any = None,
+        pad_deg: float = 0.0,
+        figsize: tuple[float, float] | None = None,
+        grid: bool | None = None,
+        coastlines: bool | None = None,
+        borders: bool | None = None,
+        frame: bool | None = None,
+        cfeature_scale: "CFeatureScale" | None = None,
+        map_cfg: "MapConfig" | None = None,
+        ax: Any = None,
+        title: str | None = None,
+        cmap: str = "viridis",
+        vmin: float | None = None,
+        vmax: float | None = None,
+        colorbar: bool = True,
+        colorbar_label: str | None = None,
+        alpha: float = 0.82,
+        outline: bool = True,
+        outline_color: str = "#111111",
+        outline_width: float = 0.6,
+        outline_alpha: float = 0.95,
+        point_size: float = 16.0,
+        render: str = "auto",
+    ) -> "GeoMap":
         from .plotting import plot_coverage_map
 
-        return plot_coverage_map(self, **kwargs)
+        return plot_coverage_map(
+            self,
+            style=style,
+            theme=theme,
+            view=view,
+            projection=projection,
+            extent=extent,
+            pad_deg=pad_deg,
+            figsize=figsize,
+            grid=grid,
+            coastlines=coastlines,
+            borders=borders,
+            frame=frame,
+            cfeature_scale=cfeature_scale,
+            map_cfg=map_cfg,
+            ax=ax,
+            title=title,
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            colorbar=colorbar,
+            colorbar_label=colorbar_label,
+            alpha=alpha,
+            outline=outline,
+            outline_color=outline_color,
+            outline_width=outline_width,
+            outline_alpha=outline_alpha,
+            point_size=point_size,
+            render=render,
+        )
 
-    def plot(self, **kwargs: Any) -> tuple[Any, Any, Any, Any]:
-        return self.plot_map(**kwargs)
+    def plot(
+        self,
+        *,
+        style: str | "MapStyle" | None = None,
+        theme: str | "MapConfig" | "MapStyle" | None = "light_detailed",
+        view: "MapView" | None = None,
+        projection: str | "ProjectionConfig" | None = None,
+        extent: Any = None,
+        pad_deg: float = 0.0,
+        figsize: tuple[float, float] | None = None,
+        grid: bool | None = None,
+        coastlines: bool | None = None,
+        borders: bool | None = None,
+        frame: bool | None = None,
+        cfeature_scale: "CFeatureScale" | None = None,
+        map_cfg: "MapConfig" | None = None,
+        ax: Any = None,
+        title: str | None = None,
+        cmap: str = "viridis",
+        vmin: float | None = None,
+        vmax: float | None = None,
+        colorbar: bool = True,
+        colorbar_label: str | None = None,
+        alpha: float = 0.82,
+        outline: bool = True,
+        outline_color: str = "#111111",
+        outline_width: float = 0.6,
+        outline_alpha: float = 0.95,
+        point_size: float = 16.0,
+        render: str = "auto",
+    ) -> "GeoMap":
+        return self.plot_map(
+            style=style,
+            theme=theme,
+            view=view,
+            projection=projection,
+            extent=extent,
+            pad_deg=pad_deg,
+            figsize=figsize,
+            grid=grid,
+            coastlines=coastlines,
+            borders=borders,
+            frame=frame,
+            cfeature_scale=cfeature_scale,
+            map_cfg=map_cfg,
+            ax=ax,
+            title=title,
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            colorbar=colorbar,
+            colorbar_label=colorbar_label,
+            alpha=alpha,
+            outline=outline,
+            outline_color=outline_color,
+            outline_width=outline_width,
+            outline_alpha=outline_alpha,
+            point_size=point_size,
+            render=render,
+        )
 
     def to_records(self) -> list[dict[str, Any]]:
         assert self.targets is not None
@@ -284,10 +405,67 @@ class CoverageStack(CoverageArray):
         if "target" not in self.dims:
             raise ValueError("CoverageStack must include a 'target' dimension")
 
-    def plot_small_multiples(self, *, dim: str, **kwargs: Any) -> tuple[Any, Any]:
+    def plot_small_multiples(
+        self,
+        *,
+        dim: str,
+        style: str | "MapStyle" | None = None,
+        theme: str | "MapConfig" | "MapStyle" | None = "light_detailed",
+        view: "MapView" | None = None,
+        projection: str | "ProjectionConfig" | None = None,
+        extent: Any = None,
+        pad_deg: float = 0.0,
+        grid: bool | None = None,
+        coastlines: bool | None = None,
+        borders: bool | None = None,
+        frame: bool | None = None,
+        cfeature_scale: "CFeatureScale" | None = None,
+        map_cfg: "MapConfig" | None = None,
+        ncols: int = 2,
+        cmap: str = "viridis",
+        vmin: float | None = None,
+        vmax: float | None = None,
+        colorbar: bool = True,
+        colorbar_label: str | None = None,
+        alpha: float = 0.82,
+        outline: bool = True,
+        outline_color: str = "#111111",
+        outline_width: float = 0.8,
+        outline_alpha: float = 0.95,
+        point_size: float = 16.0,
+        render: str = "auto",
+    ) -> tuple[Any, Any]:
         from .plotting import plot_coverage_small_multiples
 
-        return plot_coverage_small_multiples(self, dim=dim, **kwargs)
+        return plot_coverage_small_multiples(
+            self,
+            dim=dim,
+            style=style,
+            theme=theme,
+            view=view,
+            projection=projection,
+            extent=extent,
+            pad_deg=pad_deg,
+            grid=grid,
+            coastlines=coastlines,
+            borders=borders,
+            frame=frame,
+            cfeature_scale=cfeature_scale,
+            map_cfg=map_cfg,
+            ncols=ncols,
+            cmap=cmap,
+            vmin=vmin,
+            vmax=vmax,
+            colorbar=colorbar,
+            colorbar_label=colorbar_label,
+            alpha=alpha,
+            outline=outline,
+            outline_color=outline_color,
+            outline_width=outline_width,
+            outline_alpha=outline_alpha,
+            point_size=point_size,
+            render=render,
+        )
 
 
 @dataclass(frozen=True)

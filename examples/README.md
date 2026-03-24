@@ -48,4 +48,10 @@ Use these notebooks in order:
    - Apply constraints, observer subsets, and custom metrics
    - Make map plots, histograms, ECDFs, and target timelines
 
+6. `06_plotting.ipynb`
+   - Use `GeoMap` for direct map composition
+   - Reuse `MapStyle` and `MapView` across plots
+   - Mix geographic layers, coverage plots, and orbit plots
+   - Drop to `MapConfig` only when you need exact renderer-level control
+
 Legacy script examples are still available in this folder for direct `python` execution.

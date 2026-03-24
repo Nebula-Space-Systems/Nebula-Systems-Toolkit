@@ -1,3 +1,5 @@
+"""Shared basemap, style, and view primitives for NSTK geographic plotting."""
+
 import os
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal, Mapping, Optional, Sequence, Tuple
@@ -306,8 +308,298 @@ class MapConfig:
 
 
 # -----------------------------------------------------------------------------
-# Presets
+# User-Facing Styles
 # -----------------------------------------------------------------------------
+
+def _replace_section(current: Any, value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return replace(current, **dict(value))
+    return value
+
+
+@dataclass(frozen=True)
+class MapView:
+    """Reusable view/layout controls kept separate from visual style.
+
+    `MapView` collects the non-visual map decisions that users often want to
+    reuse across figures: projection, extent, figure size, Cartopy feature
+    scale, title, and local Matplotlib defaults.
+
+    Typical usage:
+
+    ```python
+    from nstk.plotting import GeoMap, MapView
+
+    conus = (
+        MapView()
+        .with_projection(name="Mercator")
+        .with_extent((-125.0, -66.0, 24.0, 50.0), global_map=False)
+    )
+    m = GeoMap(style="light_detailed", view=conus)
+    ```
+    """
+
+    projection: ProjectionConfig = field(default_factory=ProjectionConfig)
+    extent: ExtentConfig = field(default_factory=ExtentConfig)
+    figsize: Tuple[float, float] = (12.0, 6.0)
+    cfeature_scale: Optional[CFeatureScale] = None
+    mpl: MatplotlibConfig = field(default_factory=MatplotlibConfig)
+    title: TitleConfig = field(default_factory=TitleConfig)
+
+    def update(self, **changes: Any) -> "MapView":
+        aliases = {"size": "figsize"}
+        nested = {"projection", "extent", "mpl", "title"}
+        resolved: dict[str, Any] = {}
+        for key, value in changes.items():
+            name = aliases.get(key, key)
+            if not hasattr(self, name):
+                raise KeyError(f"Unknown MapView section {key!r}")
+            current = getattr(self, name)
+            resolved[name] = _replace_section(current, value) if name in nested else value
+        return replace(self, **resolved)
+
+    def with_projection(self, **changes: Any) -> "MapView":
+        return self.update(projection=changes)
+
+    def with_extent(
+        self,
+        extent: Tuple[float, float, float, float] | None = None,
+        *,
+        global_map: bool | None = None,
+        crs: Any | None = None,
+    ) -> "MapView":
+        updates: dict[str, Any] = {}
+        if extent is not None:
+            updates["extent"] = tuple(float(v) for v in extent)
+        if global_map is not None:
+            updates["global_map"] = bool(global_map)
+        if crs is not None:
+            updates["crs"] = crs
+        return self.update(extent=updates)
+
+    def with_title(self, text: str, **changes: Any) -> "MapView":
+        return self.update(title={"enabled": True, "text": text, **changes})
+
+    def to_map_config(self, *, style: "MapStyle | str | None" = None) -> "MapConfig":
+        return compile_map_config(style=style, view=self)
+
+
+@dataclass(frozen=True)
+class MapStyle:
+    """User-facing visual style definition for 2D maps.
+
+    `MapStyle` is the main customization surface for NSTK basemaps. It keeps
+    the exact visual presets used internally, but exposes them in a form that
+    is much easier to inspect, copy, and modify than hand-editing `MapConfig`.
+
+    Start from a preset with `get_map_style(...)`, then tweak only the pieces
+    you care about:
+
+    ```python
+    from nstk.plotting import GeoMap, get_map_style
+
+    paper = (
+        get_map_style("light_detailed")
+        .with_land(facecolor="#d8d0c4")
+        .with_grid(alpha=0.12, draw_labels=False)
+        .with_borders(enabled=False)
+    )
+    m = GeoMap(style=paper, extent="auto")
+    ```
+    """
+
+    name: str | None = None
+    theme: ThemeConfig = field(default_factory=ThemeConfig)
+    raster_background: RasterBackgroundConfig = field(default_factory=RasterBackgroundConfig)
+    ocean: FillRenderConfig = field(
+        default_factory=lambda: FillRenderConfig(enabled=True, facecolor="#FFFFFF", zorder=0.0)
+    )
+    land: FillRenderConfig = field(
+        default_factory=lambda: FillRenderConfig(enabled=True, facecolor="#E6E6E6", zorder=1.0)
+    )
+    land_shadow: ShadowConfig = field(default_factory=ShadowConfig)
+    bump_texture: BumpTextureConfig = field(default_factory=BumpTextureConfig)
+    coastlines: CoastlinesConfig = field(default_factory=CoastlinesConfig)
+    borders: BordersConfig = field(default_factory=BordersConfig)
+    outline: OutlineConfig = field(default_factory=OutlineConfig)
+    gridlines: GridlinesConfig = field(default_factory=GridlinesConfig)
+
+    def update(self, **sections: Any) -> "MapStyle":
+        aliases = {
+            "palette": "theme",
+            "background": "raster_background",
+            "grid": "gridlines",
+            "frame": "outline",
+            "shadow": "land_shadow",
+            "bump": "bump_texture",
+        }
+        nested = {
+            "theme",
+            "raster_background",
+            "ocean",
+            "land",
+            "land_shadow",
+            "bump_texture",
+            "coastlines",
+            "borders",
+            "outline",
+            "gridlines",
+        }
+        resolved: dict[str, Any] = {}
+        for key, value in sections.items():
+            name = aliases.get(key, key)
+            if not hasattr(self, name):
+                raise KeyError(f"Unknown MapStyle section {key!r}")
+            current = getattr(self, name)
+            resolved[name] = _replace_section(current, value) if name in nested else value
+        return replace(self, **resolved)
+
+    def with_palette(self, **changes: Any) -> "MapStyle":
+        return self.update(theme=changes)
+
+    def with_background(self, **changes: Any) -> "MapStyle":
+        return self.update(raster_background=changes)
+
+    def with_ocean(self, **changes: Any) -> "MapStyle":
+        return self.update(ocean=changes)
+
+    def with_land(self, **changes: Any) -> "MapStyle":
+        return self.update(land=changes)
+
+    def with_surfaces(
+        self,
+        *,
+        land: Mapping[str, Any] | FillRenderConfig | None = None,
+        ocean: Mapping[str, Any] | FillRenderConfig | None = None,
+        background: Mapping[str, Any] | RasterBackgroundConfig | None = None,
+    ) -> "MapStyle":
+        updates: dict[str, Any] = {}
+        if land is not None:
+            updates["land"] = land
+        if ocean is not None:
+            updates["ocean"] = ocean
+        if background is not None:
+            updates["raster_background"] = background
+        return self.update(**updates)
+
+    def with_coastlines(self, **changes: Any) -> "MapStyle":
+        return self.update(coastlines=changes)
+
+    def with_borders(self, **changes: Any) -> "MapStyle":
+        return self.update(borders=changes)
+
+    def with_frame(self, **changes: Any) -> "MapStyle":
+        return self.update(outline=changes)
+
+    def with_grid(self, **changes: Any) -> "MapStyle":
+        return self.update(gridlines=changes)
+
+    def with_lines(
+        self,
+        *,
+        coastlines: Mapping[str, Any] | CoastlinesConfig | None = None,
+        borders: Mapping[str, Any] | BordersConfig | None = None,
+        frame: Mapping[str, Any] | OutlineConfig | None = None,
+    ) -> "MapStyle":
+        updates: dict[str, Any] = {}
+        if coastlines is not None:
+            updates["coastlines"] = coastlines
+        if borders is not None:
+            updates["borders"] = borders
+        if frame is not None:
+            updates["outline"] = frame
+        return self.update(**updates)
+
+    def with_effects(
+        self,
+        *,
+        land_shadow: Mapping[str, Any] | ShadowConfig | None = None,
+        bump_texture: Mapping[str, Any] | BumpTextureConfig | None = None,
+    ) -> "MapStyle":
+        updates: dict[str, Any] = {}
+        if land_shadow is not None:
+            updates["land_shadow"] = land_shadow
+        if bump_texture is not None:
+            updates["bump_texture"] = bump_texture
+        return self.update(**updates)
+
+    def renamed(self, name: str | None) -> "MapStyle":
+        """Return a copy with a new display/registry name."""
+        return replace(self, name=None if name is None else str(name))
+
+    def register(self, name: str | None = None, *, overwrite: bool = False) -> "MapStyle":
+        """Register this style under `name` and return the registered copy."""
+        style_name = self.name if name is None else name
+        if style_name is None:
+            raise ValueError("A style name is required before registering a MapStyle")
+        return register_map_style(str(style_name), self, overwrite=overwrite)
+
+    def to_map_config(self, *, view: MapView | None = None) -> "MapConfig":
+        return compile_map_config(style=self, view=view)
+
+
+def _normalize_style_key(name: str) -> str:
+    return str(name).strip().lower().replace("_", "").replace("-", "").replace(" ", "")
+
+
+_STYLE_PRESETS: dict[str, MapStyle] = {}
+
+
+def register_map_style(name: str, style: MapStyle, *, overwrite: bool = False) -> MapStyle:
+    """Register a named style preset for later use by string name."""
+    key = _normalize_style_key(name)
+    if not overwrite and key in _STYLE_PRESETS:
+        raise ValueError(f"Map style {name!r} is already registered")
+    style_obj = style if style.name == name else replace(style, name=str(name))
+    _STYLE_PRESETS[key] = style_obj
+    return style_obj
+
+
+def get_map_style(style: str | MapStyle | None = None) -> MapStyle:
+    """Return a registered `MapStyle` or pass through an existing style object."""
+    if isinstance(style, MapStyle):
+        return style
+    if style is None:
+        style = "light_detailed"
+    key = _normalize_style_key(style)
+    if key not in _STYLE_PRESETS:
+        available = ", ".join(sorted(_STYLE_PRESETS))
+        raise ValueError(f"Unknown map style {style!r}. Available: {available}")
+    return _STYLE_PRESETS[key]
+
+
+def available_map_styles() -> tuple[str, ...]:
+    """List the currently registered public style names."""
+    return tuple(sorted(style.name or key for key, style in _STYLE_PRESETS.items()))
+
+
+def compile_map_config(
+    *,
+    style: str | MapStyle | None = None,
+    view: MapView | None = None,
+) -> MapConfig:
+    """Compile a user-facing `MapStyle` and `MapView` into a renderer config."""
+    style_obj = get_map_style(style)
+    view_obj = MapView() if view is None else view
+    return MapConfig(
+        projection=view_obj.projection,
+        extent=view_obj.extent,
+        figsize=view_obj.figsize,
+        cfeature_scale=view_obj.cfeature_scale,
+        mpl=view_obj.mpl,
+        theme=style_obj.theme,
+        raster_background=style_obj.raster_background,
+        ocean=style_obj.ocean,
+        land=style_obj.land,
+        land_shadow=style_obj.land_shadow,
+        bump_texture=style_obj.bump_texture,
+        coastlines=style_obj.coastlines,
+        borders=style_obj.borders,
+        outline=style_obj.outline,
+        gridlines=style_obj.gridlines,
+        title=view_obj.title,
+    )
+
 
 _DARK_THEME = ThemeConfig(
     figure_face="#171717",
@@ -327,7 +619,8 @@ _LIGHT_THEME = ThemeConfig(
     trace_default="C0",
 )
 
-DARK_DETAILED = MapConfig(
+DARK_DETAILED_STYLE = MapStyle(
+    name="dark_detailed",
     theme=_DARK_THEME,
     ocean=FillRenderConfig(
         enabled=True,
@@ -345,31 +638,24 @@ DARK_DETAILED = MapConfig(
         antialiased=True,
         rasterized=True,
     ),
-    coastlines=CoastlinesConfig(
-        enabled=True, color="#0F0F0F", linewidth=0.4, zorder=3.0
-    ),
+    coastlines=CoastlinesConfig(enabled=True, color="#0F0F0F", linewidth=0.4, zorder=3.0),
     borders=BordersConfig(enabled=True, color="#0F0F0F", linewidth=0.4, zorder=3.0),
     gridlines=GridlinesConfig(alpha=0.35),
     bump_texture=BumpTextureConfig(opacity=0.32),
 )
-DARK_DETAILED_NO_GRID = replace(
-    DARK_DETAILED,
-    gridlines=replace(DARK_DETAILED.gridlines, alpha=0.0),
+DARK_DETAILED_NO_GRID_STYLE = DARK_DETAILED_STYLE.with_grid(alpha=0.0).update(name="dark_detailed_no_grid")
+DARK_STYLE = (
+    DARK_DETAILED_STYLE.with_borders(enabled=False)
+    .with_effects(
+        bump_texture={"enabled": False},
+        land_shadow={"enabled": False},
+    )
+    .update(name="dark")
 )
+DARK_NO_GRID_STYLE = DARK_STYLE.with_grid(alpha=0.0).update(name="dark_no_grid")
 
-DARK = replace(
-    DARK_DETAILED,
-    borders=replace(DARK_DETAILED.borders, enabled=False),
-    bump_texture=replace(DARK_DETAILED.bump_texture, enabled=False),
-    land_shadow=replace(DARK_DETAILED.land_shadow, enabled=False),
-)
-
-DARK_NO_GRID = replace(
-    DARK,
-    gridlines=replace(DARK_DETAILED.gridlines, alpha=0.0),
-)
-
-LIGHT_DETAILED = MapConfig(
+LIGHT_DETAILED_STYLE = MapStyle(
+    name="light_detailed",
     theme=_LIGHT_THEME,
     ocean=FillRenderConfig(
         enabled=True,
@@ -387,66 +673,72 @@ LIGHT_DETAILED = MapConfig(
         antialiased=True,
         rasterized=True,
     ),
-    coastlines=CoastlinesConfig(
-        enabled=True, color="#B5B5B5", linewidth=0.2, zorder=3.0, alpha=0.3
-    ),
+    coastlines=CoastlinesConfig(enabled=True, color="#B5B5B5", linewidth=0.2, zorder=3.0, alpha=0.3),
     borders=BordersConfig(enabled=True, color="#FFFFFF", linewidth=0.4, zorder=3.0),
     gridlines=GridlinesConfig(color="#222222", alpha=0.5),
     bump_texture=BumpTextureConfig(opacity=0.15),
-    land_shadow=ShadowConfig(
-        enabled=True, offset=(-0.8, -0.8), color="black", alpha=0.22
-    ),
+    land_shadow=ShadowConfig(enabled=True, offset=(-0.8, -0.8), color="black", alpha=0.22),
+)
+LIGHT_DETAILED_NO_GRID_STYLE = LIGHT_DETAILED_STYLE.with_grid(alpha=0.0).update(name="light_detailed_no_grid")
+LIGHT_STYLE = (
+    LIGHT_DETAILED_STYLE.with_borders(enabled=False)
+    .with_effects(bump_texture={"enabled": False}, land_shadow={"enabled": True})
+    .update(name="light")
+)
+LIGHT_NO_GRID_STYLE = (
+    LIGHT_STYLE.with_grid(alpha=0.0)
+    .with_borders(enabled=False)
+    .update(name="light_no_grid")
 )
 
-LIGHT_DETAILED_NO_GRID = replace(
-    LIGHT_DETAILED,
-    gridlines=replace(LIGHT_DETAILED.gridlines, alpha=0.0),
+DARK_RASTER_STYLE = (
+    DARK_DETAILED_STYLE.with_background(enabled=True)
+    .with_effects(bump_texture={"enabled": False})
+    .with_coastlines(enabled=False)
+    .with_grid(color="#424242", alpha=0.7, linewidth=0.5)
+    .with_borders(enabled=False)
+    .update(name="dark_raster")
 )
+DARK_RASTER_NO_GRID_STYLE = DARK_RASTER_STYLE.with_grid(alpha=0.0).update(name="dark_raster_no_grid")
 
-LIGHT = replace(
-    LIGHT_DETAILED,
-    borders=replace(LIGHT_DETAILED.borders, enabled=False),
-    bump_texture=replace(LIGHT_DETAILED.bump_texture, enabled=False),
-    land_shadow=replace(LIGHT_DETAILED.land_shadow, enabled=True),
+LIGHT_RASTER_STYLE = (
+    LIGHT_DETAILED_STYLE.with_background(enabled=True)
+    .with_effects(bump_texture={"enabled": False})
+    .with_coastlines(enabled=False)
+    .with_grid(color="#EEEEEE", alpha=0.85, linewidth=0.5)
+    .with_borders(enabled=False)
+    .update(name="light_raster")
 )
+LIGHT_RASTER_NO_GRID_STYLE = LIGHT_RASTER_STYLE.with_grid(alpha=0.0).update(name="light_raster_no_grid")
 
-LIGHT_NO_GRID = replace(
-    LIGHT,
-    gridlines=replace(LIGHT_DETAILED.gridlines, alpha=0.0),
-    borders=replace(LIGHT_DETAILED.borders, enabled=False),
-)
+for _style in (
+    DARK_DETAILED_STYLE,
+    DARK_DETAILED_NO_GRID_STYLE,
+    DARK_STYLE,
+    DARK_NO_GRID_STYLE,
+    LIGHT_DETAILED_STYLE,
+    LIGHT_DETAILED_NO_GRID_STYLE,
+    LIGHT_STYLE,
+    LIGHT_NO_GRID_STYLE,
+    DARK_RASTER_STYLE,
+    DARK_RASTER_NO_GRID_STYLE,
+    LIGHT_RASTER_STYLE,
+    LIGHT_RASTER_NO_GRID_STYLE,
+):
+    register_map_style(_style.name or "default", _style, overwrite=True)
 
-DARK_RASTER = replace(
-    DARK_DETAILED,
-    raster_background=replace(DARK_DETAILED.raster_background, enabled=True),
-    bump_texture=replace(DARK_DETAILED.bump_texture, enabled=False),
-    coastlines=replace(DARK_DETAILED.coastlines, enabled=False),
-    gridlines=replace(
-        DARK_DETAILED.gridlines, color="#424242", alpha=0.7, linewidth=0.5
-    ),
-    borders=replace(DARK_DETAILED.borders, enabled=False),
-)
-
-DARK_RASTER_NO_GRID = replace(
-    DARK_RASTER,
-    gridlines=replace(DARK_RASTER.gridlines, alpha=0.0),
-)
-
-LIGHT_RASTER = replace(
-    LIGHT_DETAILED,
-    raster_background=replace(LIGHT_DETAILED.raster_background, enabled=True),
-    bump_texture=replace(LIGHT_DETAILED.bump_texture, enabled=False),
-    coastlines=replace(LIGHT_DETAILED.coastlines, enabled=False),
-    gridlines=replace(
-        LIGHT_DETAILED.gridlines, color="#EEEEEE", alpha=0.85, linewidth=0.5
-    ),
-    borders=replace(LIGHT_DETAILED.borders, enabled=False),
-)
-
-LIGHT_RASTER_NO_GRID = replace(
-    LIGHT_RASTER,
-    gridlines=replace(LIGHT_RASTER.gridlines, alpha=0.0),
-)
+DARK_DETAILED = compile_map_config(style=DARK_DETAILED_STYLE)
+DARK_DETAILED_NO_GRID = compile_map_config(style=DARK_DETAILED_NO_GRID_STYLE)
+DARK = compile_map_config(style=DARK_STYLE)
+DARK_NO_GRID = compile_map_config(style=DARK_NO_GRID_STYLE)
+LIGHT_DETAILED = compile_map_config(style=LIGHT_DETAILED_STYLE)
+LIGHT_DETAILED_NO_GRID = compile_map_config(style=LIGHT_DETAILED_NO_GRID_STYLE)
+LIGHT = compile_map_config(style=LIGHT_STYLE)
+LIGHT_NO_GRID = compile_map_config(style=LIGHT_NO_GRID_STYLE)
+DARK_RASTER = compile_map_config(style=DARK_RASTER_STYLE)
+DARK_RASTER_NO_GRID = compile_map_config(style=DARK_RASTER_NO_GRID_STYLE)
+LIGHT_RASTER = compile_map_config(style=LIGHT_RASTER_STYLE)
+LIGHT_RASTER_NO_GRID = compile_map_config(style=LIGHT_RASTER_NO_GRID_STYLE)
 
 
 # -----------------------------------------------------------------------------
@@ -536,8 +828,14 @@ def _add_bump_shading(
         interpolation=interpolation,
         zorder=zorder,
     )
-    ax.imshow(img_hi, **common)
-    ax.imshow(img_lo, **common)
+    try:
+        ax.imshow(img_hi, **common)
+        ax.imshow(img_lo, **common)
+    except ImportError:
+        # Cartopy image reprojection for non-native projections depends on
+        # optional spatial-index packages (SciPy or pykdtree). If they are not
+        # available, keep the map usable and just skip the bump texture layer.
+        return
 
 
 def _apply_fill_rendering(artist, cfg: FillRenderConfig) -> None:
@@ -652,14 +950,11 @@ def _generate_parallels(cfg: GridlinesConfig) -> np.ndarray:
 # -----------------------------------------------------------------------------
 
 
-def make_basemap(cfg: MapConfig = DARK) -> tuple:
+def _configure_basemap_axes(fig: Any, ax: Any, cfg: MapConfig) -> tuple[Any, Any]:
     """
-    Create a Cartopy basemap (figure + GeoAxes) driven entirely by MapConfig.
+    Apply MapConfig-driven basemap styling and features onto an existing GeoAxes.
 
-    Guarantees:
-    - LAND and OCEAN fills are always alpha=1.0 (solid).
-    - Shadow (if enabled) is applied as a path-effect to the LAND artist, not as a second polygon.
-    - Seam fix is handled via rendering controls (no visible strokes).
+    Returns the axes projection and the gridliner artist (if any).
     """
     t = cfg.theme
 
@@ -679,10 +974,11 @@ def make_basemap(cfg: MapConfig = DARK) -> tuple:
         }
     )
 
-    crs = _projection_from_config(cfg.projection)
+    crs = getattr(ax, "projection", None)
+    if crs is None:
+        crs = _projection_from_config(cfg.projection)
 
-    fig = plt.figure(figsize=cfg.figsize, facecolor=t.figure_face)
-    ax = plt.axes(projection=crs)
+    fig.set_facecolor(t.figure_face)
     ax.set_facecolor(t.axes_face)
 
     # Extent/global (extent takes precedence if provided)
@@ -714,15 +1010,18 @@ def make_basemap(cfg: MapConfig = DARK) -> tuple:
                 f"Raster background not found: {path!r}. Set MapConfig.raster_background.path."
             )
         img = mpimg.imread(path)
-        ax.imshow(
-            img,
-            extent=[-180.0, 180.0, -90.0, 90.0],  # type: ignore
-            transform=ccrs.PlateCarree(),
-            origin=cfg.raster_background.origin,  # type: ignore
-            interpolation=cfg.raster_background.interpolation,
-            zorder=cfg.raster_background.zorder,
-            alpha=cfg.raster_background.alpha,
-        )
+        try:
+            ax.imshow(
+                img,
+                extent=[-180.0, 180.0, -90.0, 90.0],  # type: ignore
+                transform=ccrs.PlateCarree(),
+                origin=cfg.raster_background.origin,  # type: ignore
+                interpolation=cfg.raster_background.interpolation,
+                zorder=cfg.raster_background.zorder,
+                alpha=cfg.raster_background.alpha,
+            )
+        except ImportError:
+            pass
     else:
         # OCEAN (solid, alpha=1.0)
         if cfg.ocean.enabled:
@@ -928,6 +1227,23 @@ def make_basemap(cfg: MapConfig = DARK) -> tuple:
     if cfg.mpl.tight_layout:
         plt.tight_layout(pad=cfg.mpl.tight_layout_pad)
 
+    return crs, gl
+
+
+def make_basemap(cfg: MapConfig = DARK) -> tuple:
+    """
+    Create a Cartopy basemap (figure + GeoAxes) driven entirely by MapConfig.
+
+    Guarantees:
+    - LAND and OCEAN fills are always alpha=1.0 (solid).
+    - Shadow (if enabled) is applied as a path-effect to the LAND artist, not as a second polygon.
+    - Seam fix is handled via rendering controls (no visible strokes).
+    """
+    crs = _projection_from_config(cfg.projection)
+
+    fig = plt.figure(figsize=cfg.figsize, facecolor=cfg.theme.figure_face)
+    ax = plt.axes(projection=crs)
+    crs, gl = _configure_basemap_axes(fig, ax, cfg)
     return fig, ax, crs, gl
 
 
