@@ -1412,8 +1412,14 @@ def add_polygon(
             polys = []
             for p in obj.geoms:
                 pu = _unwrap_polygon(p)
-                if pu is not None and (not pu.is_empty):
+                if pu is None or pu.is_empty:
+                    continue
+                if getattr(pu, "geom_type", None) == "Polygon":
                     polys.append(pu)
+                elif getattr(pu, "geom_type", None) == "MultiPolygon":
+                    polys.extend(pp for pp in pu.geoms if not pp.is_empty)
+                else:
+                    raise TypeError(f"Unsupported geometry returned from unwrap: {type(pu)!r}")
             if not polys:
                 return None
             out = MultiPolygon(polys)

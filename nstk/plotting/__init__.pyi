@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 from .coverage import (
-    plot_interval_access_duration as plot_interval_access_duration,
-    plot_interval_gap_duration as plot_interval_gap_duration,
-    plot_interval_max_asset as plot_interval_max_asset,
-    plot_interval_metric as plot_interval_metric,
-    plot_interval_mtta as plot_interval_mtta,
-    plot_interval_revisit_time as plot_interval_revisit_time,
-    plot_interval_target_timeline as plot_interval_target_timeline,
+    plot_coverage_ecdf as plot_coverage_ecdf,
+    plot_coverage_histogram as plot_coverage_histogram,
+    plot_coverage_map as plot_coverage_map,
+    plot_coverage_small_multiples as plot_coverage_small_multiples,
+    plot_target_timeline as plot_target_timeline,
 )
 from .map import (
     DARK as DARK,
@@ -42,12 +40,10 @@ __all__ = [
     "LIGHT_RASTER_NO_GRID",
     "add_geodesic_trace",
     "make_basemap",
-    "plot_interval_access_duration",
-    "plot_interval_gap_duration",
-    "plot_interval_max_asset",
-    "plot_interval_metric",
-    "plot_interval_mtta",
-    "plot_interval_revisit_time",
-    "plot_interval_target_timeline",
+    "plot_coverage_ecdf",
+    "plot_coverage_histogram",
+    "plot_coverage_map",
+    "plot_coverage_small_multiples",
     "plot_orbits",
+    "plot_target_timeline",
 ]

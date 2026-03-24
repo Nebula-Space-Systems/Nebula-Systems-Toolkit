@@ -21,13 +21,11 @@ _MAP_EXPORTS = {
 }
 _ORBIT_EXPORTS = {"plot_orbits"}
 _COVERAGE_EXPORTS = {
-    "plot_interval_metric",
-    "plot_interval_access_duration",
-    "plot_interval_max_asset",
-    "plot_interval_mtta",
-    "plot_interval_gap_duration",
-    "plot_interval_revisit_time",
-    "plot_interval_target_timeline",
+    "plot_coverage_ecdf",
+    "plot_coverage_histogram",
+    "plot_coverage_map",
+    "plot_coverage_small_multiples",
+    "plot_target_timeline",
 }
 
 __all__ = sorted(_MAP_EXPORTS | _ORBIT_EXPORTS | _COVERAGE_EXPORTS)

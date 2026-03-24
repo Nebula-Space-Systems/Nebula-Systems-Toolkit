@@ -1,189 +1,206 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
+from numba import njit
 
-from nstk.coverage.intervals._exact_intervals import AccessIntervalStore
-from nstk.coverage.intervals.metrics import (
-    calculate_access_duration,
-    calculate_access_separation,
-    calculate_gap_duration,
-    calculate_max_asset,
-    calculate_min_asset,
-    calculate_mtta,
-    calculate_revisit_time,
+astropy_time = pytest.importorskip("astropy.time")
+astropy_units = pytest.importorskip("astropy.units")
+
+from nstk.coverage import (
+    AzimuthConstraint,
+    BBoxDomain,
+    CompiledMetric,
+    CoverageTargets,
+    CoverageTimeline,
+    IntervalCoverage,
+    LatitudeLongitudeSampler,
+    MinAccessDurationConstraint,
+    Observer,
+    RangeConstraint,
+    TargetLocalTimeConstraint,
+    TargetSunElevationConstraint,
 )
 
+Time = astropy_time.Time
+u = astropy_units
 
-def _build_store() -> AccessIntervalStore:
-    # n_obs=2, n_targets=3, window=[0,10]
-    #
-    # target 0:
-    #   obs0: [1,4], [7,9]
-    #   obs1: [3,5], [8,10]
-    # target 1:
-    #   obs0: none
-    #   obs1: [2,6]
-    # target 2:
-    #   obs0/obs1: none
-    pair_offsets = np.array([0, 2, 2, 2, 4, 5, 5], dtype=np.int64)
-    start_times = np.array([1.0, 7.0, 3.0, 8.0, 2.0], dtype=np.float64)
-    stop_times = np.array([4.0, 9.0, 5.0, 10.0, 6.0], dtype=np.float64)
-    return AccessIntervalStore(
-        time_start=0.0,
-        time_stop=10.0,
-        n_observers=2,
-        n_targets=3,
-        pair_offsets=pair_offsets,
-        start_times=start_times,
-        stop_times=stop_times,
-        min_elevation_rad=0.0,
-        max_elevation_rad=0.5 * np.pi,
+
+def _targets() -> CoverageTargets:
+    return CoverageTargets.from_domain(
+        BBoxDomain(west_deg=-20.0, east_deg=20.0, south_deg=-10.0, north_deg=10.0),
+        sampler=LatitudeLongitudeSampler(nlats=7, nlons=9),
+    )
+
+
+def _positions(time_s: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    obs0 = np.tile(np.array([[7_000_000.0, 0.0, 0.0]], dtype=np.float64), (time_s.size, 1))
+    obs1 = np.tile(np.array([[0.0, 7_000_000.0, 0.0]], dtype=np.float64), (time_s.size, 1))
+    return obs0, obs1
+
+
+def _coverage() -> IntervalCoverage:
+    timeline = CoverageTimeline.relative(np.linspace(0.0, 1200.0, 13))
+    obs0, obs1 = _positions(timeline.seconds)
+    return IntervalCoverage.compute(
+        timeline=timeline,
+        observers=[
+            Observer.from_samples(obs0, name="A", tags=("alpha",)),
+            Observer.from_samples(obs1, name="B", tags=("beta",)),
+        ],
+        targets=_targets(),
         interpolation="linear",
-        root_tolerance_s=1e-3,
-        target_shape=(1, 3),
     )
 
 
-def test_interval_metrics_duration_and_asset_counts() -> None:
-    store = _build_store()
+def test_metric_methods_return_inspectable_result_objects() -> None:
+    coverage = _coverage()
 
-    dur = calculate_access_duration(store, N=[1, 2], reshape=False)
-    np.testing.assert_allclose(dur[1], np.array([7.0, 4.0, 0.0]), atol=1e-12)
-    np.testing.assert_allclose(dur[2], np.array([2.0, 0.0, 0.0]), atol=1e-12)
+    duration = coverage.access_duration(min_assets=1, unit="minutes")
+    stack = coverage.access_duration(min_assets=[1, 2], unit="minutes")
+    max_asset = coverage.max_asset()
+    min_asset = coverage.min_asset()
+    mtta = coverage.mtta(unit="minutes")
+    revisit = coverage.revisit_time(unit="minutes")
+    gap = coverage.gap_duration(unit="minutes")
+    separation = coverage.access_separation(max_separation_s=2000.0)
 
-    mx = calculate_max_asset(store, reshape=False)
-    mn = calculate_min_asset(store, reshape=False)
-    np.testing.assert_array_equal(mx, np.array([2, 1, 0], dtype=np.int32))
-    np.testing.assert_array_equal(mn, np.array([0, 0, 0], dtype=np.int32))
+    assert duration.values.shape == (coverage.target_set.n_targets,)
+    assert stack.values.shape == (2, coverage.target_set.n_targets)
+    assert stack.dims == ("min_assets", "target")
+    assert max_asset.metric_name == "max_asset"
+    assert min_asset.values.shape == duration.values.shape
+    assert mtta.unit == "minutes"
+    assert revisit.unit == "minutes"
+    assert gap.unit == "minutes"
+    assert separation.values.shape == duration.values.shape
+    assert len(duration.to_records()) == coverage.target_set.n_targets
+    assert np.isfinite(duration.reduce_targets("mean"))
 
 
-def test_interval_metrics_duration_normalization() -> None:
-    store = _build_store()
+def test_observer_subset_rescoring_matches_fresh_recompute() -> None:
+    timeline = CoverageTimeline.relative(np.linspace(0.0, 1200.0, 13))
+    obs0, obs1 = _positions(timeline.seconds)
+    targets = _targets()
 
-    # Window is 10 s, so per-day factor = 86400 / 10 = 8640.
-    dur_seconds_per_day = calculate_access_duration(
-        store,
-        N=1,
-        reshape=False,
-        normalize_to_day=True,
-    )[1]
+    full = IntervalCoverage.compute(
+        timeline=timeline,
+        observers=[
+            Observer.from_samples(obs0, name="A"),
+            Observer.from_samples(obs1, name="B"),
+        ],
+        targets=targets,
+        interpolation="linear",
+    )
+    reduced_view = full.observers.only(["A"])
+    reduced_fresh = IntervalCoverage.compute(
+        timeline=timeline,
+        observers=[Observer.from_samples(obs0, name="A")],
+        targets=targets,
+        interpolation="linear",
+    )
+
     np.testing.assert_allclose(
-        dur_seconds_per_day,
-        np.array([7.0, 4.0, 0.0]) * 86400.0 / 10.0,
-        atol=1e-12,
+        reduced_view.access_duration(unit="seconds").values,
+        reduced_fresh.access_duration(unit="seconds").values,
+        atol=1e-9,
     )
-
-    dur_seconds_window = calculate_access_duration(
-        store,
-        N=2,
-        reshape=False,
-        normalize_to_day=False,
-    )[2]
     np.testing.assert_allclose(
-        dur_seconds_window, np.array([2.0, 0.0, 0.0]), atol=1e-12
+        reduced_view.max_asset().values,
+        reduced_fresh.max_asset().values,
+        atol=1e-9,
     )
 
 
-def test_interval_metrics_mtta() -> None:
-    store = _build_store()
+def test_post_hoc_constraints_can_be_applied_without_recomputing_base_intervals() -> None:
+    coverage = _coverage()
 
-    mtta_no_wrap = calculate_mtta(store, N=1, wrap=False, reshape=False)
-    np.testing.assert_allclose(mtta_no_wrap[:2], np.array([0.25, 1.0]), atol=1e-12)
-    assert np.isnan(mtta_no_wrap[2])
+    zero_range = coverage.with_constraints(RangeConstraint(max_m=1.0))
+    zero_duration = zero_range.access_duration(unit="seconds")
+    assert np.all(zero_duration.values == 0.0)
 
-    mtta_wrap = calculate_mtta(store, N=1, wrap=True, reshape=False)
-    np.testing.assert_allclose(mtta_wrap[:2], np.array([0.25, 1.8]), atol=1e-12)
-    assert np.isnan(mtta_wrap[2])
-
-
-def test_interval_metrics_gap_duration_stats() -> None:
-    store = _build_store()
-
-    g_mean = calculate_gap_duration(
-        store, min_assets=1, stat="mean", include_end_gaps=True, reshape=False
+    az_limited = coverage.with_constraints(AzimuthConstraint(min_deg=0.0, max_deg=45.0))
+    assert np.all(
+        az_limited.access_duration(unit="seconds").values
+        <= coverage.access_duration(unit="seconds").values + 1e-9
     )
-    np.testing.assert_allclose(g_mean, np.array([1.5, 3.0, 10.0]), atol=1e-12)
 
-    g_count = calculate_gap_duration(
-        store, min_assets=1, stat="count", include_end_gaps=True, reshape=False
+    long_only = coverage.with_constraints(MinAccessDurationConstraint(min_seconds=1.0e9))
+    assert np.all(long_only.access_duration(unit="seconds").values == 0.0)
+
+
+def test_absolute_time_constraints_and_channels_are_available() -> None:
+    epoch = Time("2025-01-01T00:00:00", scale="utc")
+    timeline = CoverageTimeline.absolute(epoch + np.arange(0, 3600 + 1, 600) * u.s)
+    obs0, _ = _positions(timeline.seconds)
+
+    coverage = IntervalCoverage.compute(
+        timeline=timeline,
+        observers=[Observer.from_samples(obs0, name="A")],
+        targets=_targets(),
+        constraints=[
+            TargetLocalTimeConstraint(start_hour=0.0, stop_hour=12.0),
+            TargetSunElevationConstraint(min_deg=-90.0, max_deg=90.0),
+        ],
+        interpolation="linear",
     )
-    np.testing.assert_array_equal(g_count, np.array([2, 2, 1], dtype=np.int32))
 
-    g_std = calculate_gap_duration(
-        store, min_assets=1, stat="std", include_end_gaps=True, reshape=False
+    assert "target_local_time" in coverage.channels
+    assert "target_sun_elevation" in coverage.channels
+    assert coverage.channels["target_local_time"].values.shape[1] == coverage.target_set.n_targets
+    assert coverage.channels["target_sun_elevation"].values.shape[1] == coverage.target_set.n_targets
+
+
+@njit(cache=True)
+def _interval_count_kernel(
+    pair_offsets: np.ndarray,
+    start_times: np.ndarray,
+    stop_times: np.ndarray,
+    n_observers: int,
+    n_targets: int,
+    time_start: float,
+    time_stop: float,
+) -> np.ndarray:
+    out = np.zeros(n_targets, dtype=np.float64)
+    for obs_idx in range(n_observers):
+        for target_idx in range(n_targets):
+            pair_idx = obs_idx * n_targets + target_idx
+            out[target_idx] += pair_offsets[pair_idx + 1] - pair_offsets[pair_idx]
+    return out
+
+
+def test_compiled_metric_and_python_side_analysis_hooks_work() -> None:
+    coverage = _coverage()
+
+    metric = CompiledMetric(
+        name="interval_count",
+        kernel=_interval_count_kernel,
+        unit="count",
+        label="Interval Count",
     )
-    np.testing.assert_allclose(g_std, np.array([0.5, 1.0, 0.0]), atol=1e-12)
+    field = coverage.evaluate(metric)
 
-    g_ignore = calculate_gap_duration(
-        store, min_assets=1, stat="mean", include_end_gaps=False, reshape=False
+    assert field.metric_name == "interval_count"
+    assert field.values.shape == (coverage.target_set.n_targets,)
+    assert np.all(field.values >= 0.0)
+
+    max_concurrency = coverage.analyze(lambda cov: cov.max_asset().reduce_targets("max", weights=None))
+    assert max_concurrency >= 1.0
+
+
+def test_result_objects_support_regional_reductions_and_target_timeline_analysis() -> None:
+    coverage = _coverage()
+    field = coverage.access_duration(unit="seconds")
+    region_mean = field.reduce_region(
+        BBoxDomain(west_deg=-5.0, east_deg=5.0, south_deg=-5.0, north_deg=5.0),
+        op="mean",
     )
-    np.testing.assert_allclose(g_ignore[0], 2.0, atol=1e-12)
-    assert np.isnan(g_ignore[1])
-    assert np.isnan(g_ignore[2])
 
-    g_nan_no_access = calculate_gap_duration(
-        store,
-        min_assets=1,
-        stat="mean",
-        include_end_gaps=True,
-        nan_if_never_access=True,
-        reshape=False,
-    )
-    np.testing.assert_allclose(g_nan_no_access[:2], np.array([1.5, 3.0]), atol=1e-12)
-    assert np.isnan(g_nan_no_access[2])
+    assert np.isfinite(region_mean)
+    assert 0.0 <= field.covered_fraction() <= 1.0
 
-
-def test_interval_metrics_revisit_time() -> None:
-    store = _build_store()
-
-    rv_inc = calculate_revisit_time(
-        store, N=1, option="average", end_gaps="include", reshape=False
-    )
-    np.testing.assert_allclose(rv_inc, np.array([1.5, 3.0, 10.0]), atol=1e-12)
-
-    rv_ign = calculate_revisit_time(
-        store, N=1, option="average", end_gaps="ignore", reshape=False
-    )
-    np.testing.assert_allclose(rv_ign, np.array([2.0, 0.0, 10.0]), atol=1e-12)
-
-
-def test_interval_metrics_access_separation() -> None:
-    store = _build_store()
-
-    sep = calculate_access_separation(
-        store,
-        min_assets=1,
-        min_separation_s=1.0,
-        max_separation_s=3.0,
-        no_access_value=np.nan,
-        reshape=False,
-    )
-    np.testing.assert_allclose(sep[:2], np.array([1.0, 0.0]), atol=1e-12)
-    assert np.isnan(sep[2])
-
-    sep_u8 = calculate_access_separation(
-        store,
-        min_assets=1,
-        min_separation_s=1.0,
-        max_separation_s=3.0,
-        no_access_value=None,
-        reshape=False,
-    )
-    np.testing.assert_array_equal(sep_u8, np.array([1, 0, 0], dtype=np.uint8))
-
-    sep_n2 = calculate_access_separation(
-        store,
-        min_assets=2,
-        min_separation_s=1.0,
-        max_separation_s=3.0,
-        no_access_value=None,
-        reshape=False,
-    )
-    np.testing.assert_array_equal(sep_n2, np.array([0, 0, 0], dtype=np.uint8))
-
-
-def test_interval_metrics_reshape_behavior() -> None:
-    store = _build_store()
-    mx = calculate_max_asset(store, reshape=True)
-    assert mx.shape == (1, 3)
-    np.testing.assert_array_equal(mx[0], np.array([2, 1, 0], dtype=np.int32))
+    timeline = coverage.target(index=0).timeline()
+    t, n = timeline.concurrency_profile()
+    assert t.ndim == 1
+    assert n.ndim == 1
+    assert t.size == n.size

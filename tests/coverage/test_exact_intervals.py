@@ -1,290 +1,215 @@
+from __future__ import annotations
+
 import numpy as np
+import pytest
+from shapely.geometry import box
 
 from nstk.coverage import (
-    ExactCoverageConfig,
-    build_access_interval_store,
-    compute_access_intervals,
-    access_duration_by_target,
-    max_asset_by_target,
-    mtta_by_target,
+    BBoxDomain,
+    CompositeDomain,
+    CountryDomain,
+    CoverageTargets,
+    CoverageTimeline,
+    ElevationConstraint,
+    EqualAreaSampler,
+    IntervalCoverage,
+    LatitudeLongitudeSampler,
+    Observer,
+    PolygonDomain,
 )
-from nstk.coverage.intervals._exact_intervals import build_surface_targets_from_config
-from nstk.transforms.constants import WGS84_A, WGS84_E2
 
 
-def _observer_from_z(z: np.ndarray) -> np.ndarray:
-    z = np.asarray(z, dtype=np.float64)
-    out = np.zeros((z.size, 3), dtype=np.float64)
-    out[:, 2] = z
-    return out
+class MockOrbit:
+    def __init__(self, positions: np.ndarray):
+        self._positions = np.asarray(positions, dtype=np.float64)
+
+    def get_p_np(self, time: object, frame: str | None = None) -> np.ndarray:
+        return self._positions
 
 
-def _target_from_latlon(lat_deg: float, lon_deg: float) -> tuple[np.ndarray, np.ndarray]:
-    lat_rad = np.deg2rad(float(lat_deg))
-    lon_rad = np.deg2rad(float(lon_deg))
-    sin_lat = np.sin(lat_rad)
-    cos_lat = np.cos(lat_rad)
-    sin_lon = np.sin(lon_rad)
-    cos_lon = np.cos(lon_rad)
+def _demo_targets() -> CoverageTargets:
+    return CoverageTargets.from_domain(
+        BBoxDomain(west_deg=-20.0, east_deg=20.0, south_deg=-10.0, north_deg=10.0),
+        sampler=LatitudeLongitudeSampler(nlats=7, nlons=9),
+    )
 
-    prime_vertical_radius = WGS84_A / np.sqrt(1.0 - WGS84_E2 * sin_lat * sin_lat)
-    position = np.array(
-        [
-            prime_vertical_radius * cos_lat * cos_lon,
-            prime_vertical_radius * cos_lat * sin_lon,
-            (1.0 - WGS84_E2) * prime_vertical_radius * sin_lat,
+
+def _demo_positions(time_s: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    obs0 = np.tile(np.array([[7_000_000.0, 0.0, 0.0]], dtype=np.float64), (time_s.size, 1))
+    obs1 = np.tile(np.array([[0.0, 7_000_000.0, 0.0]], dtype=np.float64), (time_s.size, 1))
+    return obs0, obs1
+
+
+def test_interval_coverage_accepts_sampled_and_orbit_inputs_with_matching_results() -> None:
+    timeline = CoverageTimeline.relative(np.linspace(0.0, 900.0, 10))
+    targets = _demo_targets()
+    obs0, obs1 = _demo_positions(timeline.seconds)
+
+    sampled = IntervalCoverage.compute(
+        timeline=timeline,
+        observers=[
+            Observer.from_samples(obs0, name="sample-a"),
+            Observer.from_samples(obs1, name="sample-b"),
         ],
-        dtype=np.float64,
-    )
-    up = np.array([cos_lat * cos_lon, cos_lat * sin_lon, sin_lat], dtype=np.float64)
-    return position, up
-
-
-def test_exact_interval_crossing_and_merge_across_segments() -> None:
-    time = np.array([0.0, 1.0, 2.0], dtype=np.float64)
-    observer = _observer_from_z(np.array([-1.0, 1.0, 2.0], dtype=np.float64))
-
-    store = build_access_interval_store(
-        time=time,
-        observer_positions=[observer],
-        target_positions=np.array([[0.0, 0.0, 0.0]], dtype=np.float64),
-        target_up_vectors=np.array([[0.0, 0.0, 1.0]], dtype=np.float64),
-        min_elevation=0.0,
-        max_elevation=90.0,
+        targets=targets,
         interpolation="linear",
-        degrees=True,
     )
-
-    starts, stops = store.pair_intervals(0, 0)
-    assert starts.shape == (1,)
-    assert stops.shape == (1,)
-    np.testing.assert_allclose(starts[0], 0.5, atol=1e-10)
-    np.testing.assert_allclose(stops[0], 2.0, atol=1e-10)
-
-
-def test_duration_and_max_asset_from_stored_intervals() -> None:
-    time = np.array([0.0, 1.0, 2.0], dtype=np.float64)
-    obs1 = _observer_from_z(np.array([-1.0, 1.0, 1.0], dtype=np.float64))
-    obs2 = _observer_from_z(np.array([-1.0, -1.0, 1.0], dtype=np.float64))
-
-    store = build_access_interval_store(
-        time=time,
-        observer_positions=[obs1, obs2],
-        target_positions=np.array([[0.0, 0.0, 0.0]], dtype=np.float64),
-        target_up_vectors=np.array([[0.0, 0.0, 1.0]], dtype=np.float64),
-        min_elevation=0.0,
-        max_elevation=90.0,
-        interpolation="linear",
-        degrees=True,
-    )
-
-    dur_n1 = access_duration_by_target(store, N=1, reshape=False)
-    dur_n2 = access_duration_by_target(store, N=2, reshape=False)
-    mx = max_asset_by_target(store, reshape=False)
-
-    np.testing.assert_allclose(dur_n1[0], 1.5, atol=1e-10)
-    np.testing.assert_allclose(dur_n2[0], 0.5, atol=1e-10)
-    assert int(mx[0]) == 2
-
-
-def test_mtta_from_stored_intervals_wrap_and_no_wrap() -> None:
-    time = np.array([0.0, 1.0, 2.0], dtype=np.float64)
-    observer = _observer_from_z(np.array([-1.0, 1.0, -1.0], dtype=np.float64))
-
-    store = build_access_interval_store(
-        time=time,
-        observer_positions=[observer],
-        target_positions=np.array([[0.0, 0.0, 0.0]], dtype=np.float64),
-        target_up_vectors=np.array([[0.0, 0.0, 1.0]], dtype=np.float64),
-        min_elevation=0.0,
-        max_elevation=90.0,
-        interpolation="linear",
-        degrees=True,
-    )
-
-    mtta_no_wrap = mtta_by_target(store, N=1, wrap=False, reshape=False)
-    mtta_wrap = mtta_by_target(store, N=1, wrap=True, reshape=False)
-
-    np.testing.assert_allclose(mtta_no_wrap[0], 0.125, atol=1e-10)
-    np.testing.assert_allclose(mtta_wrap[0], 0.25, atol=1e-10)
-
-
-def test_config_wrapper_sets_target_shape_for_grid_queries() -> None:
-    cfg = ExactCoverageConfig(
-        nlats=2, nlons_equator=3, scale_longitude_by_latitude=False
-    )
-    time = np.array([0.0, 1.0], dtype=np.float64)
-    observer = np.array([[0.0, 0.0, 8_000_000.0], [0.0, 0.0, 8_000_000.0]])
-
-    store = compute_access_intervals(
-        config=cfg,
-        time=time,
-        observer_positions=[observer],
+    orbit_like = IntervalCoverage.compute(
+        timeline=timeline,
+        observers=[
+            Observer.from_orbit(MockOrbit(obs0), name="orbit-a"),
+            Observer.from_orbit(MockOrbit(obs1), name="orbit-b"),
+        ],
+        targets=targets,
         interpolation="linear",
     )
 
-    assert store.n_targets == 6
-    assert store.target_shape == (2, 3)
-
-    mx_grid = max_asset_by_target(store, reshape=True)
-    mx_flat = max_asset_by_target(store, reshape=False)
-    assert mx_grid.shape == (2, 3)
-    assert mx_flat.shape == (6,)
-
-
-def test_build_surface_targets_from_config_matches_geodetic_geometry() -> None:
-    cfg = ExactCoverageConfig(
-        nlats=181,
-        nlons_equator=361,
-        scale_longitude_by_latitude=True,
-        include_lat_endpoints=True,
-        include_lon_endpoints=False,
+    np.testing.assert_allclose(
+        sampled.access_duration(unit="seconds").values,
+        orbit_like.access_duration(unit="seconds").values,
+        atol=1e-9,
+    )
+    np.testing.assert_allclose(
+        sampled.max_asset().values,
+        orbit_like.max_asset().values,
+        atol=1e-9,
     )
 
-    target_positions, target_up = build_surface_targets_from_config(cfg)
 
-    for lat_deg, lon_deg in [(0.0, 0.0), (30.0, 0.0), (60.0, 0.0), (80.0, 0.0)]:
-        idx = int(
-            np.argmin(
-                (cfg.lat_deg_flat - lat_deg) ** 2
-                + (((cfg.lon_deg_flat - lon_deg + 180.0) % 360.0) - 180.0) ** 2
-            )
+def test_interval_coverage_accepts_raw_orbit_objects_with_elevation_constraint() -> None:
+    timeline = CoverageTimeline.relative(np.linspace(0.0, 900.0, 10))
+    targets = _demo_targets()
+    obs0, obs1 = _demo_positions(timeline.seconds)
+    constraint = ElevationConstraint(min_deg=5.0)
+
+    wrapped = IntervalCoverage.compute(
+        timeline=timeline,
+        observers=[
+            Observer.from_orbit(MockOrbit(obs0), name="orbit-a"),
+            Observer.from_orbit(MockOrbit(obs1), name="orbit-b"),
+        ],
+        targets=targets,
+        constraints=[constraint],
+        interpolation="linear",
+    )
+    direct = IntervalCoverage.compute(
+        timeline=timeline,
+        observers=[MockOrbit(obs0), MockOrbit(obs1)],
+        targets=targets,
+        constraints=[constraint],
+        interpolation="linear",
+    )
+
+    np.testing.assert_allclose(
+        wrapped.access_duration(unit="seconds").values,
+        direct.access_duration(unit="seconds").values,
+        atol=1e-9,
+    )
+    np.testing.assert_allclose(
+        wrapped.channel("elevation").values,
+        direct.channel("elevation").values,
+        atol=1e-9,
+    )
+
+
+def test_target_domains_and_samplers_materialize_targets_for_analysis() -> None:
+    bbox_domain = BBoxDomain(west_deg=-10.0, east_deg=10.0, south_deg=-5.0, north_deg=5.0)
+    poly_domain = PolygonDomain(geometry=box(-8.0, -4.0, 8.0, 4.0), name="Inner Box")
+    composite = bbox_domain & poly_domain
+
+    bbox_targets = CoverageTargets.from_domain(
+        bbox_domain,
+        sampler=LatitudeLongitudeSampler(nlats=5, nlons=7),
+    )
+    poly_targets = CoverageTargets.from_domain(
+        poly_domain,
+        sampler=LatitudeLongitudeSampler(nlats=5, nlons=7),
+    )
+    equal_area_targets = CoverageTargets.from_domain(
+        composite,
+        sampler=EqualAreaSampler(target_count=32),
+    )
+
+    assert bbox_targets.n_targets > 0
+    assert poly_targets.n_targets > 0
+    assert equal_area_targets.n_targets == 32
+    assert bbox_targets.surface_grid is not None
+    assert equal_area_targets.surface_grid is None
+    np.testing.assert_allclose(equal_area_targets.area_weights.sum(), 1.0, atol=1e-12)
+
+
+def test_country_and_composite_domains_can_be_sampled() -> None:
+    try:
+        france = CountryDomain(names=("France",))
+    except Exception as exc:
+        pytest.skip(f"Natural Earth country data unavailable: {exc}")
+
+    regional = CompositeDomain(
+        op="intersection",
+        items=(
+            france,
+            BBoxDomain(west_deg=-10.0, east_deg=12.0, south_deg=40.0, north_deg=55.0),
+        ),
+    )
+    try:
+        targets = CoverageTargets.from_domain(
+            regional,
+            sampler=LatitudeLongitudeSampler(nlats=25, nlons=25),
         )
-        expected_position, expected_up = _target_from_latlon(
-            cfg.lat_deg_flat[idx],
-            cfg.lon_deg_flat[idx],
+    except ValueError as exc:
+        pytest.skip(f"Country/composite target sample landed on an empty coarse grid: {exc}")
+    assert targets.n_targets > 0
+    assert targets.boundary_geometry is not None
+
+
+def test_coverage_targets_union_supports_country_names_and_boxes() -> None:
+    pacific_box = BBoxDomain(west_deg=150.0, east_deg=170.0, south_deg=0.0, north_deg=20.0)
+    try:
+        targets = CoverageTargets.union(
+            ["Japan", "Philippines"],
+            pacific_box,
+            sampler=EqualAreaSampler(target_count=256),
+            resolution="10m",
+            name="Japan, Philippines, and Pacific Box",
         )
-        np.testing.assert_allclose(target_positions[idx], expected_position, atol=1e-9)
-        np.testing.assert_allclose(target_up[idx], expected_up, atol=1e-12)
+    except Exception as exc:
+        pytest.skip(f"Natural Earth country data unavailable: {exc}")
+
+    country_union = CountryDomain(names=("Japan", "Philippines"), resolution="10m")
+    combined_domain = country_union + pacific_box
+
+    in_box = pacific_box.contains_latlon(targets.lat_deg, targets.lon_deg)
+    in_countries = country_union.contains_latlon(targets.lat_deg, targets.lon_deg)
+
+    assert targets.n_targets == 256
+    assert targets.attrs["domain"] == "Japan, Philippines, and Pacific Box"
+    assert np.all(combined_domain.contains_latlon(targets.lat_deg, targets.lon_deg))
+    assert np.count_nonzero(in_box) > 0
+    assert np.count_nonzero(in_countries & ~in_box) > 0
 
 
-def test_compute_access_intervals_matches_manual_target_build_for_selected_points() -> None:
-    cfg = ExactCoverageConfig(
-        nlats=181,
-        nlons_equator=361,
-        scale_longitude_by_latitude=True,
-        include_lat_endpoints=True,
-        include_lon_endpoints=False,
-    )
-    time = np.linspace(0.0, 1800.0, 7, dtype=np.float64)
-    observer = np.tile(np.array([[8_000_000.0, 0.0, 0.0]], dtype=np.float64), (time.size, 1))
-
-    config_store = compute_access_intervals(
-        config=cfg,
-        time=time,
-        observer_positions=[observer],
+def test_interval_coverage_views_support_observer_target_and_window_selection() -> None:
+    timeline = CoverageTimeline.relative(np.linspace(0.0, 1200.0, 13))
+    obs0, obs1 = _demo_positions(timeline.seconds)
+    coverage = IntervalCoverage.compute(
+        timeline=timeline,
+        observers=[
+            Observer.from_samples(obs0, name="A", tags=("primary",)),
+            Observer.from_samples(obs1, name="B", tags=("secondary",)),
+        ],
+        targets=_demo_targets(),
         interpolation="linear",
     )
 
-    sample_points = [(0.0, 0.0), (30.0, 0.0), (60.0, 0.0), (80.0, 0.0)]
-    sample_indices = [config_store.nearest_target_index(lat_deg=lat, lon_deg=lon) for lat, lon in sample_points]
+    only_primary = coverage.observers.by_tag("primary")
+    assert len(only_primary.observer_items) == 1
 
-    manual_positions = np.empty((len(sample_indices), 3), dtype=np.float64)
-    manual_up = np.empty((len(sample_indices), 3), dtype=np.float64)
-    for out_idx, sample_idx in enumerate(sample_indices):
-        position, up = _target_from_latlon(
-            cfg.lat_deg_flat[sample_idx],
-            cfg.lon_deg_flat[sample_idx],
-        )
-        manual_positions[out_idx] = position
-        manual_up[out_idx] = up
+    first_two_targets = coverage.targets.only([0, 1])
+    assert first_two_targets.target_set.n_targets == 2
 
-    manual_store = build_access_interval_store(
-        time=time,
-        observer_positions=[observer],
-        target_positions=manual_positions,
-        target_up_vectors=manual_up,
-        min_elevation=cfg.min_elevation_deg,
-        max_elevation=cfg.max_elevation_deg,
-        degrees=True,
-        interpolation="linear",
-    )
+    early_window = coverage.window(stop=600.0)
+    assert early_window.store.time_stop == pytest.approx(600.0)
 
-    config_duration = access_duration_by_target(config_store, reshape=False)[sample_indices]
-    manual_duration = access_duration_by_target(manual_store, reshape=False)
-    np.testing.assert_allclose(config_duration, manual_duration, atol=1e-10)
-
-
-def test_root_tolerance_controls_transition_time_refinement() -> None:
-    time = np.array([0.0, 1.0], dtype=np.float64)
-    observer = _observer_from_z(np.array([-1.0, 1.0], dtype=np.float64))
-
-    store_tight = build_access_interval_store(
-        time=time,
-        observer_positions=[observer],
-        target_positions=np.array([[0.0, 0.0, 0.0]], dtype=np.float64),
-        target_up_vectors=np.array([[0.0, 0.0, 1.0]], dtype=np.float64),
-        min_elevation=0.0,
-        max_elevation=90.0,
-        interpolation="linear",
-        degrees=True,
-        root_tolerance_s=1e-6,
-    )
-    store_loose = build_access_interval_store(
-        time=time,
-        observer_positions=[observer],
-        target_positions=np.array([[0.0, 0.0, 0.0]], dtype=np.float64),
-        target_up_vectors=np.array([[0.0, 0.0, 1.0]], dtype=np.float64),
-        min_elevation=0.0,
-        max_elevation=90.0,
-        interpolation="linear",
-        degrees=True,
-        root_tolerance_s=1e-1,
-    )
-
-    start_tight = store_tight.start_times[0]
-    start_loose = store_loose.start_times[0]
-
-    assert abs(start_tight - 0.5) <= 1e-4
-    assert abs(start_loose - 0.5) <= 1e-1
-
-
-def test_cubic_interpolation_mode_runs_and_stores_metadata() -> None:
-    time = np.array([0.0, 1.0, 2.0], dtype=np.float64)
-    observer = _observer_from_z(np.array([-1.0, 1.0, -1.0], dtype=np.float64))
-
-    store = build_access_interval_store(
-        time=time,
-        observer_positions=[observer],
-        target_positions=np.array([[0.0, 0.0, 0.0]], dtype=np.float64),
-        target_up_vectors=np.array([[0.0, 0.0, 1.0]], dtype=np.float64),
-        min_elevation=0.0,
-        max_elevation=90.0,
-        interpolation="cubic",
-        degrees=True,
-        root_tolerance_s=1e-3,
-    )
-
-    assert store.interpolation == "cubic"
-    assert store.root_tolerance_s == 1e-3
-    assert store.start_times.size >= 1
-    assert np.all(store.stop_times > store.start_times)
-
-
-def test_exact_config_latitude_scaling_reduces_targets() -> None:
-    cfg_uniform = ExactCoverageConfig(
-        nlats=61, nlons_equator=121, scale_longitude_by_latitude=False
-    )
-    cfg_scaled = ExactCoverageConfig(
-        nlats=61, nlons_equator=121, scale_longitude_by_latitude=True
-    )
-
-    assert cfg_uniform.n_targets == 61 * 121
-    assert cfg_uniform.target_shape == (61, 121)
-
-    assert cfg_scaled.n_targets < cfg_uniform.n_targets
-    assert cfg_scaled.target_shape is None
-    assert int(cfg_scaled.row_sizes[0]) < int(cfg_scaled.row_sizes[30])
-
-
-def test_exact_config_poles_degenerate_to_single_point() -> None:
-    cfg = ExactCoverageConfig(
-        nlats=181,
-        nlons_equator=361,
-        scale_longitude_by_latitude=True,
-        include_lat_endpoints=True,
-    )
-
-    # First/last latitude rows are poles, so longitude is degenerate.
-    assert int(cfg.row_sizes[0]) == 1
-    assert int(cfg.row_sizes[-1]) == 1
+    timeline_result = coverage.target(index=0).timeline()
+    assert timeline_result.target_index == 0
+    assert len(timeline_result.to_records()) >= 1

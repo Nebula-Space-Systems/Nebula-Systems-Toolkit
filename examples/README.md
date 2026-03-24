@@ -39,8 +39,13 @@ Use these notebooks in order:
    - Use two-body and numerical member construction
 
 4. `04_interval_coverage.ipynb`
-   - Build interval coverage target grids
-   - Compute exact access intervals
-   - Compute N-of-M access duration metrics
+   - Short migration note pointing to the redesigned coverage workflow
+
+5. `05_coverage.ipynb`
+   - Use the new `IntervalCoverage` object API
+   - Mix orbit-backed and sampled observers
+   - Build regional targets from domains and samplers
+   - Apply constraints, observer subsets, and custom metrics
+   - Make map plots, histograms, ECDFs, and target timelines
 
 Legacy script examples are still available in this folder for direct `python` execution.
