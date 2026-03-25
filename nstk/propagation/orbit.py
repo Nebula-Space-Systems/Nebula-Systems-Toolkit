@@ -1331,7 +1331,7 @@ class Orbit(OrbitCreationMixin):
         **kwargs
             Forwarded to :func:`nstk.plotting.orbits.plot_orbits`,
             including ``view="3d"``, ``view="2d"``, ``opacity``,
-            ``line_width``, and ``marker_size``.
+            ``line_width``, ``marker_size``, and ``show_info``.
 
         Returns
         -------

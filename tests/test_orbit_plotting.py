@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import warnings
 
 import cartopy.crs as ccrs
@@ -22,6 +23,7 @@ import nstk.propagation as propagation
 import nstk.propagation.orbit as orbit_module
 from nstk.plotting import MapView, get_map_style, plot_orbits
 from nstk.plotting.orbits import (
+    _make_info_text,
     _points_visible_from_view,
     _set_3d_globe_interaction,
     _surface_points_visible_from_view,
@@ -51,10 +53,52 @@ def _collection_by_gid(ax, gid: str):
     raise AssertionError(f"missing collection with gid={gid!r}")
 
 
+def _text_by_substring(fig: Figure, needle: str):
+    for text in fig.texts:
+        if needle in text.get_text():
+            return text
+    raise AssertionError(f"missing text containing {needle!r}")
+
+
 def test_plot_orbits_reexport_matches_orbits_module() -> None:
     assert nstk.plotting is plotting
     assert propagation.orbit is orbit_module
     assert plotting.plot_orbits is plot_orbits_impl
+
+
+def test_plot_orbits_uses_view_specific_default_figsizes() -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+    orbit = _make_orbit(epoch=epoch, raan_deg=18.0, anomaly_deg=35.0)
+
+    fig_3d, _ = plot_orbits(orbit, view="3d", show=False)
+    fig_2d, _ = plot_orbits(orbit, view="2d", duration=35.0 * u.min, show=False)
+
+    assert np.allclose(fig_3d.get_size_inches(), (10.5, 7.0))
+    assert np.allclose(fig_2d.get_size_inches(), (10.5, 6.2))
+
+    plt.close(fig_3d)
+    plt.close(fig_2d)
+
+
+def test_plot_orbits_single_orbit_defaults_to_no_info_text() -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+    orbit = _make_orbit(epoch=epoch, raan_deg=18.0, anomaly_deg=35.0)
+
+    fig_3d, _ = plot_orbits(orbit, view="3d", show=False)
+    fig_2d, _ = plot_orbits(orbit, view="2d", duration=35.0 * u.min, show=False)
+
+    text_blob_3d = "\n".join(text.get_text() for text in fig_3d.texts)
+    text_blob_2d = "\n".join(text.get_text() for text in fig_2d.texts)
+
+    assert "Initial Keplerian Elements" not in text_blob_3d
+    assert "Time Context" not in text_blob_3d
+    assert "Marker shows the evaluated spacecraft state" not in text_blob_3d
+    assert "Initial Keplerian Elements" not in text_blob_2d
+    assert "Time Context" not in text_blob_2d
+    assert "Marker shows the evaluated spacecraft ground-track position" not in text_blob_2d
+
+    plt.close(fig_3d)
+    plt.close(fig_2d)
 
 
 def test_plot_orbits_multi_orbit_3d_defaults() -> None:
@@ -83,9 +127,52 @@ def test_plot_orbits_multi_orbit_3d_defaults() -> None:
     axes_bbox = ax.get_position()
     assert legend_bbox.y1 <= axes_bbox.y0
     assert len(ax.collections) >= 5
-    assert any("Keplerian period" in text.get_text() for text in fig.texts)
+    assert all("Keplerian period" not in text.get_text() for text in fig.texts)
 
     plt.close(fig)
+
+
+def test_make_info_text_aligns_annotation_value_columns() -> None:
+    info_text = _make_info_text(
+        {
+            "a": "7,000.0 km",
+            "e": "0.001000",
+            "i": "  53.000 deg",
+            "raan": "  18.000 deg",
+            "argp": "  20.000 deg",
+            "nu": "  35.066 deg",
+        },
+        [
+            ("Evaluation", "2026-01-01 01:37:08.539 UTC"),
+            ("Start offset", "12.00 min"),
+            ("Trail window", "97.14 min"),
+            ("Marker", "filled=near side, hollow=far side"),
+        ],
+        left_rows=[
+            ("Epoch", "2026-01-01 00:00:00.000 UTC"),
+            ("Frame", "gcrf"),
+        ],
+    )
+
+    lines = info_text.splitlines()
+    time_context_idx = lines.index("Time Context")
+    left_lines = lines[1 : time_context_idx - 1]
+    left_value_columns = {
+        len(match.group(1)) + len(match.group(2))
+        for line in left_lines
+        for match in [re.match(r"^(.*?)(\s{2,})\S", line)]
+        if match is not None
+    }
+    right_lines = lines[time_context_idx + 1 :]
+    right_value_columns = {
+        len(match.group(1)) + len(match.group(2))
+        for line in right_lines
+        for match in [re.match(r"^(.*?)(\s{2,})\S", line)]
+        if match is not None
+    }
+
+    assert left_value_columns == {7}
+    assert right_value_columns == {14}
 
 
 def test_points_visible_from_view_occludes_backside_points() -> None:
@@ -129,6 +216,7 @@ def test_orbit_plot_supports_explicit_time_window_in_3d() -> None:
         view="3d",
         samples=72,
         title="Single Orbit Plot",
+        show_info=True,
         show=False,
     )
 
@@ -147,6 +235,12 @@ def test_orbit_plot_supports_explicit_time_window_in_3d() -> None:
     assert "RAAN" in text_blob
     assert "Marker shows the evaluated spacecraft state" in text_blob
 
+    info_box = _text_by_substring(fig, "Initial Keplerian Elements")
+    axes_bbox = ax.get_position()
+    assert "Time Context" in info_box.get_text()
+    assert info_box.get_position()[1] < axes_bbox.y0
+    assert np.isclose(info_box.get_position()[0], 0.5 * (axes_bbox.x0 + axes_bbox.x1))
+
     plt.close(fig)
 
 
@@ -164,7 +258,7 @@ def test_plot_orbits_single_orbit_3d_reports_keplerian_reference_frame() -> None
         inertial_frame="eme2000",
     )
 
-    fig, _ = plot_orbits(orbit, view="3d", show=False)
+    fig, _ = plot_orbits(orbit, view="3d", show_info=True, show=False)
 
     text_blob = "\n".join(text.get_text() for text in fig.texts)
     assert "Frame  eme2000" in text_blob
@@ -261,6 +355,7 @@ def test_plot_orbits_single_orbit_2d_ground_track() -> None:
         duration=35.0 * u.min,
         samples=120,
         title="Ground Track View",
+        show_info=True,
         show=False,
     )
 
@@ -278,6 +373,12 @@ def test_plot_orbits_single_orbit_2d_ground_track() -> None:
     assert "WGS84 geodetic" in text_blob
     assert "Evaluation" in text_blob
     assert "Marker shows the evaluated spacecraft ground-track position" in text_blob
+
+    info_box = _text_by_substring(fig, "Initial Keplerian Elements")
+    axes_bbox = ax.get_position()
+    assert "Time Context" in info_box.get_text()
+    assert info_box.get_position()[1] < axes_bbox.y0
+    assert np.isclose(info_box.get_position()[0], 0.5 * (axes_bbox.x0 + axes_bbox.x1))
 
     plt.close(fig)
 
@@ -333,7 +434,7 @@ def test_plot_orbits_multi_orbit_2d_legend() -> None:
 
     text_blob = "\n".join(text.get_text() for text in fig.texts)
     assert "Initial Keplerian Elements" not in text_blob
-    assert "Keplerian period" in text_blob
+    assert "Keplerian period" not in text_blob
 
     plt.close(fig)
 
@@ -369,6 +470,7 @@ def test_plot_orbits_3d_accepts_custom_map_style() -> None:
         orbit,
         view="3d",
         map_style=paper,
+        show_info=True,
         samples=96,
         show=False,
     )

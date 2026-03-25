@@ -56,6 +56,8 @@ _DEFAULT_2D_MARKER_SIZE = math.sqrt(42.0)
 _DEFAULT_3D_MARKER_SIZE = math.sqrt(62.0)
 _DEFAULT_2D_LEGEND_MARKER_SIZE = 6.0
 _DEFAULT_3D_LEGEND_MARKER_SIZE = 6.5
+_DEFAULT_2D_FIGSIZE = (10.5, 6.2)
+_DEFAULT_3D_FIGSIZE = (10.5, 7.0)
 _MARKER_HALO_SCALE = 2.05
 _PLOT_3D_FRAME = "itrf"
 _VISIBLE_3D_OCCLUSION_RADIUS_KM = _EARTH_RADIUS_KM * 1.0005
@@ -66,6 +68,10 @@ _EARTH_GLOBE_IDLE_LON_SAMPLES = 240
 _EARTH_GLOBE_IDLE_LAT_SAMPLES = 121
 _EARTH_GLOBE_DRAG_LON_SAMPLES = 160
 _EARTH_GLOBE_DRAG_LAT_SAMPLES = 81
+_ANNOTATION_FONT_FAMILY = "DejaVu Sans Mono"
+_ANNOTATION_LINE_SPACING = 1.18
+_ANNOTATION_BAND_BOTTOM = 0.07
+_ANNOTATION_AXES_GAP = 0.018
 
 
 @dataclass
@@ -183,7 +189,7 @@ def _format_time_label(time_like: Any) -> str:
 
 def _format_angle_deg(angle_rad: float) -> str:
     angle_deg = (np.degrees(float(angle_rad)) + 360.0) % 360.0
-    return f"{angle_deg:8.3f} deg"
+    return f"{angle_deg:.3f} deg"
 
 
 def _annotation_box_style(plot_style: _OrbitPlotStyle) -> dict[str, Any]:
@@ -203,6 +209,15 @@ def _format_frame_label(frame: Any) -> str:
         if name:
             return name.lower()
     return str(frame).strip().lower()
+
+
+def _format_labeled_rows(rows: Sequence[tuple[str, str]]) -> list[str]:
+    normalized_rows = [(str(label).strip(), str(value).strip()) for label, value in rows]
+    if not normalized_rows:
+        return []
+
+    label_width = max(len(label) for label, _ in normalized_rows)
+    return [f"{label:<{label_width}}  {value}" for label, value in normalized_rows]
 
 
 def _extract_keplerian_summary(orbit: Any) -> dict[str, str]:
@@ -303,6 +318,16 @@ def _default_marker_diameter(view: str) -> float:
 
 def _default_legend_marker_size(view: str) -> float:
     return _DEFAULT_3D_LEGEND_MARKER_SIZE if view == "3d" else _DEFAULT_2D_LEGEND_MARKER_SIZE
+
+
+def _resolve_plot_figsize(view: str, figsize: tuple[float, float] | None) -> tuple[float, float]:
+    if figsize is None:
+        return _DEFAULT_3D_FIGSIZE if view == "3d" else _DEFAULT_2D_FIGSIZE
+
+    width, height = float(figsize[0]), float(figsize[1])
+    if not np.isfinite(width) or not np.isfinite(height) or width <= 0.0 or height <= 0.0:
+        raise ValueError("figsize must contain positive finite width and height")
+    return width, height
 
 
 def _coerce_duration_seconds(duration: Any, orbit: Any) -> float:
@@ -1075,29 +1100,91 @@ def _add_bottom_legend(fig: Any, ax: Any, handles: Sequence[Line2D], plot_style:
     _style_legend(legend, plot_style)
 
 
-def _make_info_text(
-    summary: dict[str, str],
-    right_lines: list[str],
-    *,
-    left_lines: Sequence[str] | None = None,
-) -> tuple[str, str]:
-    left_text = "\n".join(
+def _reserve_bottom_band(ax: Any, *, band_top: float) -> None:
+    ax_position = ax.get_position()
+    required_axes_bottom = band_top + _ANNOTATION_AXES_GAP
+    if ax_position.y0 >= required_axes_bottom:
+        return
+
+    shift = required_axes_bottom - ax_position.y0
+    ax.set_position(
         [
-            "Initial Keplerian Elements",
-            f"a     {summary['a']}",
-            f"e     {summary['e']}",
-            f"i     {summary['i']}",
-            f"RAAN  {summary['raan']}",
-            f"argp  {summary['argp']}",
-            f"nu    {summary['nu']}",
-            *([] if left_lines is None else list(left_lines)),
+            ax_position.x0,
+            ax_position.y0 + shift,
+            ax_position.width,
+            ax_position.height - shift,
         ]
     )
-    return left_text, "\n".join(right_lines)
+
+
+def _add_bottom_annotation_box(
+    fig: Any,
+    ax: Any,
+    *,
+    info_text: str,
+    plot_style: _OrbitPlotStyle,
+    fontsize: float,
+) -> None:
+    box_style = _annotation_box_style(plot_style)
+    info_artist = fig.text(
+        0.5,
+        _ANNOTATION_BAND_BOTTOM,
+        info_text,
+        ha="center",
+        va="bottom",
+        multialignment="left",
+        color=plot_style.primary_text,
+        fontsize=fontsize,
+        fontfamily=_ANNOTATION_FONT_FAMILY,
+        linespacing=_ANNOTATION_LINE_SPACING,
+        bbox=box_style,
+    )
+
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    info_bbox = info_artist.get_window_extent(renderer=renderer).transformed(fig.transFigure.inverted())
+
+    ax_position = ax.get_position()
+    tight_bbox = ax.get_tightbbox(renderer=renderer).transformed(fig.transFigure.inverted())
+    label_overhang = max(0.0, ax_position.y0 - tight_bbox.y0)
+    band_top = _ANNOTATION_BAND_BOTTOM + info_bbox.height
+    _reserve_bottom_band(ax, band_top=band_top + label_overhang)
+    ax_position = ax.get_position()
+    info_artist.set_position((0.5 * (ax_position.x0 + ax_position.x1), _ANNOTATION_BAND_BOTTOM))
+
+
+def _make_info_text(
+    summary: dict[str, str],
+    right_rows: Sequence[tuple[str, str]],
+    *,
+    left_rows: Sequence[tuple[str, str]] | None = None,
+) -> str:
+    left_body = _format_labeled_rows(
+        [
+            ("a", summary["a"]),
+            ("e", summary["e"]),
+            ("i", summary["i"]),
+            ("RAAN", summary["raan"]),
+            ("argp", summary["argp"]),
+            ("nu", summary["nu"]),
+            *(tuple(row) for row in ([] if left_rows is None else list(left_rows))),
+        ]
+    )
+    right_body = _format_labeled_rows(right_rows)
+    return "\n".join(
+        [
+            "Initial Keplerian Elements",
+            *left_body,
+            "",
+            "Time Context",
+            *right_body,
+        ]
+    )
 
 
 def _add_single_orbit_3d_annotations(
     fig: Any,
+    ax: Any,
     orbit: Any,
     start_s: float,
     duration_s: float,
@@ -1106,88 +1193,55 @@ def _add_single_orbit_3d_annotations(
     eval_time = orbit.epoch + (start_s + duration_s) * u.s
     summary = _extract_keplerian_summary(orbit)
 
-    left_text, right_text = _make_info_text(
+    info_text = _make_info_text(
         summary,
         [
-            "Time Context",
-            f"Evaluation   {_format_time_label(eval_time)} UTC",
-            f"Start offset {start_s / 60.0:,.2f} min",
-            f"Trail window {duration_s / 60.0:,.2f} min",
-            "Marker       filled=near side, hollow=far side",
+            ("Evaluation", f"{_format_time_label(eval_time)} UTC"),
+            ("Start offset", f"{start_s / 60.0:,.2f} min"),
+            ("Trail window", f"{duration_s / 60.0:,.2f} min"),
+            ("Marker", "filled=near side, hollow=far side"),
         ],
-        left_lines=[
-            f"Epoch  {_format_time_label(orbit.epoch)} UTC",
-            f"Frame  {summary['frame']}",
+        left_rows=[
+            ("Epoch", f"{_format_time_label(orbit.epoch)} UTC"),
+            ("Frame", summary["frame"]),
         ],
     )
-    box_style = _annotation_box_style(plot_style)
-    fig.text(
-        0.03,
-        0.92,
-        left_text,
-        ha="left",
-        va="top",
-        color=plot_style.primary_text,
-        fontsize=10.5,
-        family="monospace",
-        bbox=box_style,
-    )
-    fig.text(
-        0.70,
-        0.92,
-        right_text,
-        ha="left",
-        va="top",
-        color=plot_style.primary_text,
-        fontsize=10.0,
-        family="monospace",
-        bbox=box_style,
+    _add_bottom_annotation_box(
+        fig,
+        ax,
+        info_text=info_text,
+        plot_style=plot_style,
+        fontsize=10.15,
     )
 
 
 def _add_single_orbit_2d_annotations(
     fig: Any,
+    ax: Any,
     orbit: Any,
     start_s: float,
     duration_s: float,
     plot_style: _OrbitPlotStyle,
 ) -> None:
     eval_time = orbit.epoch + (start_s + duration_s) * u.s
-    left_text, right_text = _make_info_text(
+    info_text = _make_info_text(
         _extract_keplerian_summary(orbit),
         [
-            "Time Context",
-            f"Evaluation   {_format_time_label(eval_time)} UTC",
-            f"Start offset {start_s / 60.0:,.2f} min",
-            f"Trail window {duration_s / 60.0:,.2f} min",
+            ("Evaluation", f"{_format_time_label(eval_time)} UTC"),
+            ("Start offset", f"{start_s / 60.0:,.2f} min"),
+            ("Trail window", f"{duration_s / 60.0:,.2f} min"),
         ],
-        left_lines=[
-            f"Epoch   {_format_time_label(orbit.epoch)} UTC",
-            "Coords  WGS84 geodetic",
+        left_rows=[
+            ("Epoch", f"{_format_time_label(orbit.epoch)} UTC"),
+            ("Coords", "WGS84 geodetic"),
         ],
     )
-    box_style = _annotation_box_style(plot_style)
-    fig.text(
-        0.03,
-        0.92,
-        left_text,
-        ha="left",
-        va="top",
-        color=plot_style.primary_text,
-        fontsize=10.0,
-        family="monospace",
-        bbox=box_style,
-    )
-    fig.text(
-        0.70,
-        0.92,
-        right_text,
-        ha="left",
-        va="top",
-        color=plot_style.primary_text,
-        fontsize=9.8,
-        family="monospace",
-        bbox=box_style,
+    _add_bottom_annotation_box(
+        fig,
+        ax,
+        info_text=info_text,
+        plot_style=plot_style,
+        fontsize=9.95,
     )
 
 
@@ -1253,6 +1307,7 @@ def _render_3d(
     opacity: float,
     line_width: float | None,
     marker_size: float | None,
+    show_info: bool,
     show: bool,
 ) -> tuple["Figure", "Axes3D"]:
     plot_style = _resolve_orbit_plot_style(map_style)
@@ -1341,10 +1396,11 @@ def _render_3d(
             pad=16.0,
         )
 
-    if len(windows) == 1:
+    if show_info and len(windows) == 1:
         window = windows[0]
         _add_single_orbit_3d_annotations(
             fig,
+            ax,
             window["orbit"],
             window["start_s"],
             window["duration_s"],
@@ -1354,14 +1410,17 @@ def _render_3d(
             "Marker shows the evaluated spacecraft state at the end of the plotted trail; "
             "a hollow ring means the state is on the far side of the Earth"
         )
-    else:
+    elif show_info:
         info_line = (
             "Per-orbit default window: epoch through one Keplerian period"
             if start_time is None and duration is None
             else "Markers show the end of each plotted trail; hollow rings mark far-side states"
         )
+    else:
+        info_line = None
 
-    fig.text(0.5, 0.03, info_line, color=plot_style.secondary_text, fontsize=10, ha="center", va="center")
+    if info_line is not None:
+        fig.text(0.5, 0.03, info_line, color=plot_style.secondary_text, fontsize=10, ha="center", va="center")
 
     if len(windows) > 1:
         _add_bottom_legend(fig, ax, handles, plot_style)
@@ -1384,6 +1443,7 @@ def _render_2d(
     opacity: float,
     line_width: float | None,
     marker_size: float | None,
+    show_info: bool,
     show: bool,
 ) -> tuple["Figure", GeoAxes]:
     plot_style = _resolve_orbit_plot_style(map_style)
@@ -1447,25 +1507,31 @@ def _render_2d(
             pad=14.0,
         )
 
-    if len(windows) == 1:
+    if show_info and len(windows) == 1:
         window = windows[0]
         _add_single_orbit_2d_annotations(
             fig,
+            ax,
             window["orbit"],
             window["start_s"],
             window["duration_s"],
             plot_style,
         )
         info_line = "Marker shows the evaluated spacecraft ground-track position at the end of the plotted trail"
-    else:
+    elif show_info:
         info_line = (
             "Per-orbit default window: epoch through one Keplerian period"
             if start_time is None and duration is None
             else "Markers show the end of each plotted ground track"
         )
+    else:
+        info_line = None
+
+    if len(windows) > 1:
         _add_bottom_legend(fig, ax, handles, plot_style)
 
-    fig.text(0.5, 0.03, info_line, color=plot_style.secondary_text, fontsize=10, ha="center", va="center")
+    if info_line is not None:
+        fig.text(0.5, 0.03, info_line, color=plot_style.secondary_text, fontsize=10, ha="center", va="center")
 
     if show:
         plt.show()
@@ -1482,7 +1548,7 @@ def plot_orbits(
     colors: Sequence[str] | None = None,
     samples: int = 360,
     ax: GeoAxes | None = None,
-    figsize: tuple[float, float] = (9.5, 8.8),
+    figsize: tuple[float, float] | None = None,
     title: str | None = None,
     map_style: str | "MapStyle" | None = None,
     map_view: "MapView | None" = None,
@@ -1492,6 +1558,7 @@ def plot_orbits(
     opacity: float = 1.0,
     line_width: float | None = None,
     marker_size: float | None = None,
+    show_info: bool = False,
     show: bool = True,
 ) -> tuple[Figure, GeoAxes]: ...
 
@@ -1506,7 +1573,7 @@ def plot_orbits(
     colors: Sequence[str] | None = None,
     samples: int = 360,
     ax: Axes3D | None = None,
-    figsize: tuple[float, float] = (9.5, 8.8),
+    figsize: tuple[float, float] | None = None,
     title: str | None = None,
     map_style: str | "MapStyle" | None = None,
     map_view: "MapView | None" = None,
@@ -1516,6 +1583,7 @@ def plot_orbits(
     opacity: float = 1.0,
     line_width: float | None = None,
     marker_size: float | None = None,
+    show_info: bool = False,
     show: bool = True,
 ) -> tuple[Figure, Axes3D]: ...
 
@@ -1530,7 +1598,7 @@ def plot_orbits(
     colors: Sequence[str] | None = None,
     samples: int = 360,
     ax: GeoAxes | Axes3D | None = None,
-    figsize: tuple[float, float] = (9.5, 8.8),
+    figsize: tuple[float, float] | None = None,
     title: str | None = None,
     map_style: str | "MapStyle" | None = None,
     map_view: "MapView | None" = None,
@@ -1540,6 +1608,7 @@ def plot_orbits(
     opacity: float = 1.0,
     line_width: float | None = None,
     marker_size: float | None = None,
+    show_info: bool = False,
     show: bool = True,
 ) -> tuple[Figure, GeoAxes | Axes3D]: ...
 
@@ -1553,7 +1622,7 @@ def plot_orbits(
     colors: Sequence[str] | None = None,
     samples: int = 360,
     ax: GeoAxes | Axes3D | None = None,
-    figsize: tuple[float, float] = (9.5, 8.8),
+    figsize: tuple[float, float] | None = None,
     title: str | None = None,
     map_style: str | "MapStyle" | None = None,
     map_view: "MapView | None" = None,
@@ -1563,6 +1632,7 @@ def plot_orbits(
     opacity: float = 1.0,
     line_width: float | None = None,
     marker_size: float | None = None,
+    show_info: bool = False,
     show: bool = True,
 ) -> tuple[Figure, GeoAxes | Axes3D]:
     """Plot one or more orbits as either a 3D Earth view or a 2D ground track.
@@ -1583,7 +1653,9 @@ def plot_orbits(
     ax
         Existing Matplotlib axis to draw into. Omit to create a new figure.
     figsize
-        Figure size used when ``ax`` is not provided.
+        Optional figure size. When omitted, NSTK uses a view-specific default:
+        a shorter global-map frame for ``view="2d"`` and a slightly taller
+        globe frame for ``view="3d"``.
     title
         Optional plot title.
     map_style
@@ -1607,6 +1679,10 @@ def plot_orbits(
     marker_size
         Optional endpoint marker diameter in points. The outer halo scales with
         this value automatically.
+    show_info
+        If ``True``, draw the single-orbit parameter box or the multi-orbit
+        informational footer text. Defaults to ``False`` so a plain call only
+        renders the orbit plot itself.
     show
         If ``True``, call ``matplotlib.pyplot.show()`` before returning.
     """
@@ -1616,6 +1692,7 @@ def plot_orbits(
     color_list = _coerce_colors(colors, len(orbit_list))
     view_key = _coerce_view(view)
     resolved_map_style = get_map_style("dark_detailed" if map_style is None else map_style)
+    resolved_figsize = _resolve_plot_figsize(view_key, figsize)
     sample_count = int(samples)
     alpha = _coerce_opacity(opacity)
     trail_width = _coerce_positive_style_value("line_width", line_width)
@@ -1637,7 +1714,7 @@ def plot_orbits(
         return _render_3d(
             windows,
             ax=ax,
-            figsize=figsize,
+            figsize=resolved_figsize,
             title=title,
             map_style=resolved_map_style,
             elev=elev,
@@ -1647,12 +1724,13 @@ def plot_orbits(
             opacity=alpha,
             line_width=trail_width,
             marker_size=marker_diameter,
+            show_info=show_info,
             show=show,
         )
     return _render_2d(
         windows,
         ax=ax,
-        figsize=figsize,
+        figsize=resolved_figsize,
         title=title,
         map_style=resolved_map_style,
         map_view=map_view,
@@ -1661,6 +1739,7 @@ def plot_orbits(
         opacity=alpha,
         line_width=trail_width,
         marker_size=marker_diameter,
+        show_info=show_info,
         show=show,
     )
 
