@@ -2,9 +2,19 @@ from importlib import import_module
 from typing import Any
 
 from nstk.propagation.orbit import Orbit
-from nstk.propagation.walker import build_walker_constellation
+from nstk.propagation.walker import (
+    build_walker_constellation,
+    build_walker_initial_states,
+    spacecraft_state_from_kepler,
+)
 
-__all__ = ["Orbit", "build_walker_constellation", "orbit"]
+__all__ = [
+    "Orbit",
+    "spacecraft_state_from_kepler",
+    "build_walker_initial_states",
+    "build_walker_constellation",
+    "orbit",
+]
 
 
 def __getattr__(name: str) -> Any:

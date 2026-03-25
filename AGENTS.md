@@ -4,7 +4,6 @@
 Project-specific instructions for AI coding agents working in this repository.
 
 ## Environment
-- OS and shell: Windows + PowerShell
 - Python interpreter: `.venv\Scripts\python.exe`
 - Prefer `rg` for fast file/text search.
 
@@ -16,7 +15,8 @@ Project-specific instructions for AI coding agents working in this repository.
 - Keep dependencies minimal; avoid adding heavy dependencies unless justified by clear value.
 - Keep changes focused to the user request; avoid unrelated refactors.
 - Use clear, maintainable code over clever shortcuts.
-- For public facing interfaces, always include good documentation for users.
+- For public facing interfaces, always include good documentation/docstrings for users.
+- Prefer type hinting all function arguments.
 
 ## Test Expectations
 - Add or update tests for behavior changes in `tests/`.

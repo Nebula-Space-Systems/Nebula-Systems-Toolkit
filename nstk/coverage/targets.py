@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import numpy as np
 
@@ -126,8 +126,23 @@ def _spread_sample_indices(n_keep: int, n_requested: int) -> np.ndarray:
     return np.floor(positions).astype(np.int64)
 
 
+def _domain_bounds(domain: TargetDomain) -> tuple[float, float, float, float]:
+    bounds = domain.bounds() or (-180.0, 180.0, -90.0, 90.0)
+    west, east, south, north = bounds
+    return float(west), float(east), float(south), float(north)
+
+
+def _require_positive_int(value: int, *, field_name: str) -> int:
+    count = int(value)
+    if count < 1:
+        raise ValueError(f"{field_name} must be >= 1")
+    return count
+
+
 @dataclass(frozen=True)
 class SurfaceGridMetadata:
+    """Structured latitude/longitude grid metadata for gridded target sets."""
+
     lat_deg: np.ndarray
     lon_deg: np.ndarray
     target_index_grid: np.ndarray
@@ -135,11 +150,61 @@ class SurfaceGridMetadata:
 
     @property
     def shape(self) -> tuple[int, int]:
+        """Return the ``(n_lat, n_lon)`` shape of the source surface grid."""
         return tuple(self.target_index_grid.shape)  # type: ignore[return-value]
+
+
+@runtime_checkable
+class TargetSampler(Protocol):
+    """Protocol for objects that can materialize a domain into coverage targets."""
+
+    def materialize(self, domain: TargetDomain) -> "CoverageTargets":
+        """Return a concrete :class:`CoverageTargets` sample for ``domain``."""
+        ...
+
+
+def _coerce_target_sampler(sampler: TargetSampler) -> TargetSampler:
+    if not isinstance(sampler, TargetSampler):
+        raise TypeError("sampler must implement TargetSampler.materialize(domain)")
+    return sampler
+
+
+def _build_materialized_targets(
+    *,
+    domain: TargetDomain,
+    lat_deg: np.ndarray,
+    lon_deg: np.ndarray,
+    area_weights: np.ndarray,
+    sampler_name: str,
+    surface_grid: SurfaceGridMetadata | None = None,
+    extra_attrs: dict[str, Any] | None = None,
+) -> "CoverageTargets":
+    positions, up = _geodetic_to_surface(lat_deg, lon_deg)
+    attrs = {"sampler": sampler_name, "domain": domain.name}
+    if extra_attrs:
+        attrs.update(extra_attrs)
+    return CoverageTargets(
+        positions_ecef_m=positions,
+        up_vectors_ecef=up,
+        lat_deg=np.asarray(lat_deg, dtype=np.float64),
+        lon_deg=np.asarray(lon_deg, dtype=np.float64),
+        area_weights=np.asarray(area_weights, dtype=np.float64),
+        surface_grid=surface_grid,
+        boundary_geometry=domain.boundary_geometry(),
+        outline_geometry=domain.outline_geometry(),
+        attrs=attrs,
+    )
 
 
 @dataclass(frozen=True)
 class CoverageTargets:
+    """Materialized Earth-surface coverage targets in WGS84 Earth-fixed coordinates.
+
+    Instances store one surface sample per target, including geodetic latitude and
+    longitude, Earth-fixed Cartesian position, local surface ``up`` direction, and
+    area weights for aggregation.
+    """
+
     positions_ecef_m: np.ndarray
     up_vectors_ecef: np.ndarray
     lat_deg: np.ndarray
@@ -152,6 +217,7 @@ class CoverageTargets:
     attrs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
+        """Validate shapes and normalize array-backed fields."""
         pos = np.asarray(self.positions_ecef_m, dtype=np.float64)
         up = np.asarray(self.up_vectors_ecef, dtype=np.float64)
         lat = np.asarray(self.lat_deg, dtype=np.float64)
@@ -177,12 +243,15 @@ class CoverageTargets:
 
     @property
     def n_targets(self) -> int:
+        """Return the number of materialized target points."""
         return int(self.positions_ecef_m.shape[0])
 
     def nearest_target_index(self, *, lat_deg: float, lon_deg: float) -> int:
+        """Return the index of the sampled target nearest to ``(lat_deg, lon_deg)``."""
         return int(np.argmin(_haversine_score(lat_deg, lon_deg, self.lat_deg, self.lon_deg)))
 
     def to_grid(self, values: np.ndarray, *, fill_value: float = np.nan) -> np.ndarray:
+        """Project one value per target back onto the original structured surface grid."""
         if self.surface_grid is None:
             raise ValueError("CoverageTargets does not include structured surface grid metadata")
         vals = np.asarray(values)
@@ -221,6 +290,7 @@ class CoverageTargets:
         return (west, east, south, north)
 
     def subset(self, indices: np.ndarray | list[int]) -> "CoverageTargets":
+        """Return a new target set containing only the selected target indices."""
         idx = np.asarray(indices, dtype=np.int64)
         if idx.ndim != 1:
             raise ValueError("indices must be 1D")
@@ -251,6 +321,7 @@ class CoverageTargets:
         )
 
     def select_domain(self, domain: TargetDomain) -> np.ndarray:
+        """Return indices of targets whose sampled lat/lon fall inside ``domain``."""
         mask = domain.contains_latlon(self.lat_deg, self.lon_deg)
         return np.flatnonzero(mask)
 
@@ -259,17 +330,19 @@ class CoverageTargets:
         cls,
         domain: Any,
         *,
-        sampler: Any,
+        sampler: TargetSampler,
     ) -> "CoverageTargets":
+        """Materialize a domain-like object with the provided target sampler."""
         domain_obj = coerce_domain(domain) if not isinstance(domain, TargetDomain) else domain
-        return sampler.materialize(domain_obj)
+        return _coerce_target_sampler(sampler).materialize(domain_obj)
 
     @classmethod
     def global_earth(
         cls,
         *,
-        sampler: Any,
+        sampler: TargetSampler,
     ) -> "CoverageTargets":
+        """Sample the full Earth surface."""
         return cls.from_domain(GlobalEarthDomain(), sampler=sampler)
 
     @classmethod
@@ -277,9 +350,10 @@ class CoverageTargets:
         cls,
         name: str,
         *,
-        sampler: Any,
+        sampler: TargetSampler,
         resolution: str = "110m",
     ) -> "CoverageTargets":
+        """Sample one Natural Earth country polygon by name."""
         return cls.from_domain(CountryDomain(names=(name,), resolution=resolution), sampler=sampler)
 
     @classmethod
@@ -287,9 +361,10 @@ class CoverageTargets:
         cls,
         names: list[str],
         *,
-        sampler: Any,
+        sampler: TargetSampler,
         resolution: str = "110m",
     ) -> "CoverageTargets":
+        """Sample the union of multiple Natural Earth countries."""
         return cls.from_domain(CountryDomain(names=tuple(names), resolution=resolution), sampler=sampler)
 
     @classmethod
@@ -300,38 +375,43 @@ class CoverageTargets:
         south_deg: float,
         north_deg: float,
         *,
-        sampler: Any,
+        sampler: TargetSampler,
     ) -> "CoverageTargets":
+        """Sample a rectangular latitude/longitude region."""
         return cls.from_domain(
             BBoxDomain(west_deg=west_deg, east_deg=east_deg, south_deg=south_deg, north_deg=north_deg),
             sampler=sampler,
         )
 
     @classmethod
-    def from_geojson(cls, path: str, *, sampler: Any) -> "CoverageTargets":
+    def from_geojson(cls, path: str, *, sampler: TargetSampler) -> "CoverageTargets":
+        """Sample a polygonal region loaded from a GeoJSON file."""
         return cls.from_domain(PolygonDomain.from_geojson(path), sampler=sampler)
 
     @classmethod
-    def from_shapefile(cls, path: str, *, sampler: Any) -> "CoverageTargets":
+    def from_shapefile(cls, path: str, *, sampler: TargetSampler) -> "CoverageTargets":
+        """Sample a polygonal region loaded from a shapefile."""
         return cls.from_domain(PolygonDomain.from_shapefile(path), sampler=sampler)
 
     @classmethod
-    def land(cls, *, sampler: Any, resolution: str = "110m") -> "CoverageTargets":
+    def land(cls, *, sampler: TargetSampler, resolution: str = "110m") -> "CoverageTargets":
+        """Sample the Natural Earth land mask."""
         return cls.from_domain(LandDomain(resolution=resolution), sampler=sampler)
 
     @classmethod
-    def ocean(cls, *, sampler: Any, resolution: str = "110m") -> "CoverageTargets":
+    def ocean(cls, *, sampler: TargetSampler, resolution: str = "110m") -> "CoverageTargets":
+        """Sample the Natural Earth ocean mask."""
         return cls.from_domain(OceanDomain(resolution=resolution), sampler=sampler)
 
     @classmethod
     def union(
         cls,
         *parts: Any,
-        sampler: Any,
+        sampler: TargetSampler,
         resolution: str = "110m",
         name: str | None = None,
     ) -> "CoverageTargets":
-        """Materialize one target set from the union of countries, boxes, or other domain-like inputs."""
+        """Materialize one target set from the union of domain-like inputs."""
         return cls.from_domain(
             _combine_target_parts(*parts, resolution=resolution, name=name),
             sampler=sampler,
@@ -368,14 +448,19 @@ def _combine_target_parts(*parts: Any, resolution: str, name: str | None = None)
 
 @dataclass(frozen=True)
 class LatitudeLongitudeSampler:
+    """Sample a domain on a structured latitude/longitude grid."""
+
     nlats: int = 181
     nlons: int = 361
 
     def materialize(self, domain: TargetDomain) -> CoverageTargets:
-        bounds = domain.bounds() or (-180.0, 180.0, -90.0, 90.0)
-        west, east, south, north = bounds
-        lat_axis = np.linspace(float(south), float(north), int(self.nlats), dtype=np.float64)
-        lon_axis = np.linspace(float(west), float(east), int(self.nlons), dtype=np.float64)
+        """Return structured grid targets clipped to ``domain``."""
+        nlats = _require_positive_int(self.nlats, field_name="LatitudeLongitudeSampler.nlats")
+        nlons = _require_positive_int(self.nlons, field_name="LatitudeLongitudeSampler.nlons")
+
+        west, east, south, north = _domain_bounds(domain)
+        lat_axis = np.linspace(south, north, nlats, dtype=np.float64)
+        lon_axis = np.linspace(west, east, nlons, dtype=np.float64)
         lon_grid, lat_grid = np.meshgrid(lon_axis, lat_axis)
         include = domain.contains_latlon(lat_grid, lon_grid)
 
@@ -385,33 +470,31 @@ class LatitudeLongitudeSampler:
 
         lat_flat = lat_grid.ravel()[selected]
         lon_flat = lon_grid.ravel()[selected]
-        positions, up = _geodetic_to_surface(lat_flat, lon_flat)
 
         dlat = abs(lat_axis[1] - lat_axis[0]) if lat_axis.size > 1 else 180.0
         dlon = abs(lon_axis[1] - lon_axis[0]) if lon_axis.size > 1 else 360.0
         weights = np.cos(np.deg2rad(lat_flat)) * np.deg2rad(dlat) * np.deg2rad(dlon)
         weights = np.abs(weights)
 
-        return CoverageTargets(
-            positions_ecef_m=positions,
-            up_vectors_ecef=up,
+        return _build_materialized_targets(
+            domain=domain,
             lat_deg=lat_flat,
             lon_deg=lon_flat,
             area_weights=weights,
+            sampler_name="latitude_longitude",
             surface_grid=SurfaceGridMetadata(
                 lat_deg=lat_axis,
                 lon_deg=lon_axis,
                 target_index_grid=target_index_grid,
                 boundary_geometry=domain.boundary_geometry(),
             ),
-            boundary_geometry=domain.boundary_geometry(),
-            outline_geometry=domain.outline_geometry(),
-            attrs={"sampler": "latitude_longitude", "domain": domain.name},
         )
 
 
 @dataclass(frozen=True)
 class LatitudeAdaptiveSampler:
+    """Sample latitude rows with longitude density that scales by latitude."""
+
     nlats: int = 181
     nlons_equator: int = 361
     min_lon_points_per_row: int = 1
@@ -419,28 +502,31 @@ class LatitudeAdaptiveSampler:
     include_lon_endpoints: bool = False
 
     def materialize(self, domain: TargetDomain) -> CoverageTargets:
-        if int(self.nlats) < 1:
-            raise ValueError("LatitudeAdaptiveSampler.nlats must be >= 1")
-        if int(self.nlons_equator) < 1:
-            raise ValueError("LatitudeAdaptiveSampler.nlons_equator must be >= 1")
-        if int(self.min_lon_points_per_row) < 1:
-            raise ValueError("LatitudeAdaptiveSampler.min_lon_points_per_row must be >= 1")
+        """Return targets from an equal-latitude-row sampler clipped to ``domain``."""
+        nlats = _require_positive_int(self.nlats, field_name="LatitudeAdaptiveSampler.nlats")
+        nlons_equator = _require_positive_int(
+            self.nlons_equator,
+            field_name="LatitudeAdaptiveSampler.nlons_equator",
+        )
+        min_lon_points_per_row = _require_positive_int(
+            self.min_lon_points_per_row,
+            field_name="LatitudeAdaptiveSampler.min_lon_points_per_row",
+        )
 
-        bounds = domain.bounds() or (-180.0, 180.0, -90.0, 90.0)
-        west, east, south, north = [float(v) for v in bounds]
+        west, east, south, north = _domain_bounds(domain)
 
-        if int(self.nlats) == 1:
+        if nlats == 1:
             lat_rows = np.asarray([south], dtype=np.float64)
         elif self.include_lat_endpoints:
-            lat_rows = np.linspace(south, north, int(self.nlats), dtype=np.float64)
+            lat_rows = np.linspace(south, north, nlats, dtype=np.float64)
         else:
-            dlat = (north - south) / float(self.nlats)
-            lat_rows = south + (np.arange(int(self.nlats), dtype=np.float64) + 0.5) * dlat
+            dlat = (north - south) / float(nlats)
+            lat_rows = south + (np.arange(nlats, dtype=np.float64) + 0.5) * dlat
 
         lon_min_cont, lon_max_cont = _continuous_longitude_bounds(west, east)
         lon_span = float(lon_max_cont - lon_min_cont)
-        base_n_lon = max(1, int(np.round(float(self.nlons_equator) * (lon_span / 360.0))))
-        min_per_row = min(int(self.min_lon_points_per_row), base_n_lon)
+        base_n_lon = max(1, int(np.round(float(nlons_equator) * (lon_span / 360.0))))
+        min_per_row = min(min_lon_points_per_row, base_n_lon)
         lat_edges = _axis_edges(lat_rows, clip_min=-90.0, clip_max=90.0)
 
         lat_chunks: list[np.ndarray] = []
@@ -492,19 +578,13 @@ class LatitudeAdaptiveSampler:
         row_offsets = np.empty(len(row_counts) + 1, dtype=np.int64)
         row_offsets[0] = 0
         np.cumsum(np.asarray(row_counts, dtype=np.int64), out=row_offsets[1:])
-        positions, up = _geodetic_to_surface(lat, lon)
-        return CoverageTargets(
-            positions_ecef_m=positions,
-            up_vectors_ecef=up,
+        return _build_materialized_targets(
+            domain=domain,
             lat_deg=lat,
             lon_deg=lon,
             area_weights=weights,
-            surface_grid=None,
-            boundary_geometry=domain.boundary_geometry(),
-            outline_geometry=domain.outline_geometry(),
-            attrs={
-                "sampler": "latitude_adaptive",
-                "domain": domain.name,
+            sampler_name="latitude_adaptive",
+            extra_attrs={
                 "nlats": int(self.nlats),
                 "nlons_equator": int(self.nlons_equator),
                 "lat_rows_deg": np.asarray(lat_rows_used, dtype=np.float64),
@@ -517,14 +597,18 @@ class LatitudeAdaptiveSampler:
 
 @dataclass(frozen=True)
 class EqualAreaSampler:
+    """Sample approximately equal-area target points within a domain."""
+
     target_count: int = 4096
 
     def materialize(self, domain: TargetDomain) -> CoverageTargets:
-        n_requested = int(self.target_count)
-        if n_requested < 1:
-            raise ValueError("EqualAreaSampler.target_count must be >= 1")
+        """Return approximately equal-area targets clipped to ``domain``."""
+        n_requested = _require_positive_int(
+            self.target_count,
+            field_name="EqualAreaSampler.target_count",
+        )
 
-        bounds = domain.bounds() or (-180.0, 180.0, -90.0, 90.0)
+        bounds = _domain_bounds(domain)
         total = max(n_requested * 2, n_requested + 64)
         max_total = max(total, min(4_194_304, n_requested * 16_384))
         lat: np.ndarray | None = None
@@ -554,23 +638,19 @@ class EqualAreaSampler:
                 "Unable to materialize enough equal-area targets for the requested domain"
             )
 
-        positions, up = _geodetic_to_surface(lat, lon)
         weights = np.full(lat.shape, 1.0 / max(1, lat.size), dtype=np.float64)
-        return CoverageTargets(
-            positions_ecef_m=positions,
-            up_vectors_ecef=up,
+        return _build_materialized_targets(
+            domain=domain,
             lat_deg=lat,
             lon_deg=lon,
             area_weights=weights,
-            surface_grid=None,
-            boundary_geometry=domain.boundary_geometry(),
-            outline_geometry=domain.outline_geometry(),
-            attrs={"sampler": "equal_area", "domain": domain.name},
+            sampler_name="equal_area",
         )
 
 
 __all__ = [
     "SurfaceGridMetadata",
+    "TargetSampler",
     "CoverageTargets",
     "LatitudeLongitudeSampler",
     "LatitudeAdaptiveSampler",

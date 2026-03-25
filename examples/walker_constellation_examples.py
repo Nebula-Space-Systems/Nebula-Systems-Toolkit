@@ -101,14 +101,6 @@ def example_numerical_walker() -> None:
         phasing=1,
         pattern="delta",
         include_seed=True,
-        constructor="numerical",
-        constructor_kwargs={
-            "gravity_degree": 8,
-            "gravity_order": 8,
-            "enable_drag": False,
-            "enable_third_body": False,
-            "enable_srp": False,
-        },
     )
     _summarize("Numerical Walker Delta (T=12, P=3, F=1)", walker)
 

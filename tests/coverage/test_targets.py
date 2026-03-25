@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from shapely.geometry import box
 
 from nstk.coverage import (
@@ -10,6 +11,7 @@ from nstk.coverage import (
     LatitudeAdaptiveSampler,
     LatitudeLongitudeSampler,
     PolygonDomain,
+    TargetSampler,
 )
 
 
@@ -32,6 +34,20 @@ def test_equal_area_sampler_materializes_notebook_composite_domain() -> None:
     assert np.count_nonzero((targets.lat_deg >= 38.0) & (targets.lon_deg < -90.0)) > 0
     assert np.count_nonzero((targets.lat_deg >= 38.0) & (targets.lon_deg >= -90.0)) > 0
     np.testing.assert_allclose(targets.area_weights.sum(), 1.0, atol=1e-12)
+
+
+def test_concrete_target_samplers_implement_protocol() -> None:
+    assert isinstance(LatitudeLongitudeSampler(nlats=5, nlons=7), TargetSampler)
+    assert isinstance(LatitudeAdaptiveSampler(nlats=7, nlons_equator=12), TargetSampler)
+    assert isinstance(EqualAreaSampler(target_count=64), TargetSampler)
+
+
+def test_coverage_targets_from_domain_rejects_non_sampler_objects() -> None:
+    with pytest.raises(TypeError, match="TargetSampler"):
+        CoverageTargets.from_domain(
+            BBoxDomain(west_deg=-10.0, east_deg=10.0, south_deg=-5.0, north_deg=5.0),
+            sampler=object(),
+        )
 
 
 def test_equal_area_sampler_spreads_targets_across_small_composite_domain() -> None:

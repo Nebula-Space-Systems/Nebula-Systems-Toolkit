@@ -22,8 +22,10 @@ from nstk.coverage import (
 class MockOrbit:
     def __init__(self, positions: np.ndarray):
         self._positions = np.asarray(positions, dtype=np.float64)
+        self.frames: list[str | None] = []
 
     def get_p_np(self, time: object, frame: str | None = None) -> np.ndarray:
+        self.frames.append(frame)
         return self._positions
 
 
@@ -110,6 +112,38 @@ def test_interval_coverage_accepts_raw_orbit_objects_with_elevation_constraint()
         direct.channel("elevation").values,
         atol=1e-9,
     )
+
+
+def test_interval_coverage_samples_orbit_observers_in_itrf_internally() -> None:
+    timeline = CoverageTimeline.relative(np.linspace(0.0, 900.0, 10))
+    targets = _demo_targets()
+    obs0, _ = _demo_positions(timeline.seconds)
+    orbit = MockOrbit(obs0)
+
+    IntervalCoverage.compute(
+        timeline=timeline,
+        observers=[Observer.from_orbit(orbit, frame="gcrf", name="orbit-a")],
+        targets=targets,
+        interpolation="linear",
+    )
+
+    assert orbit.frames
+    assert set(orbit.frames) == {"itrf"}
+
+
+def test_interval_coverage_compute_rejects_public_frame_argument() -> None:
+    timeline = CoverageTimeline.relative(np.linspace(0.0, 900.0, 10))
+    targets = _demo_targets()
+    obs0, _ = _demo_positions(timeline.seconds)
+
+    with pytest.raises(TypeError, match="frame"):
+        IntervalCoverage.compute(
+            timeline=timeline,
+            observers=[Observer.from_samples(obs0, name="sample-a")],
+            targets=targets,
+            frame="gcrf",
+            interpolation="linear",
+        )
 
 
 def test_target_domains_and_samplers_materialize_targets_for_analysis() -> None:

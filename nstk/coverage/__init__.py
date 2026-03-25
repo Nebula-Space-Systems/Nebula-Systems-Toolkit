@@ -29,6 +29,7 @@ from .targets import (
     LatitudeAdaptiveSampler,
     LatitudeLongitudeSampler,
     SurfaceGridMetadata,
+    TargetSampler,
 )
 from .timeline import CoverageTimeline
 
@@ -63,6 +64,7 @@ __all__ = [
     "PolygonDomain",
     "RangeConstraint",
     "SurfaceGridMetadata",
+    "TargetSampler",
     "TargetDomain",
     "TargetLocalTimeConstraint",
     "TargetSunElevationConstraint",

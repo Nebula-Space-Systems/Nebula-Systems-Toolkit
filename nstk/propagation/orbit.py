@@ -683,6 +683,8 @@ class OrbitCreationMixin:
         """
 
         _bind_java()
+        from org.orekit.orbits import KeplerianOrbit  # type: ignore
+
         iers = _coerce_iers(iers_convention)
         bridge = _JavaOrbitPropagationBridge.fromSpacecraftState(state)
         orbit = cls._from_bridge(
@@ -690,6 +692,23 @@ class OrbitCreationMixin:
             iers,
             bool(simple_eop),
         )
+        kep = KeplerianOrbit(state.getOrbit())
+        base_kwargs = {
+            "epoch": orbit.epoch,
+            "a": float(kep.getA()),
+            "e": float(kep.getE()),
+            "i": float(kep.getI()),
+            "raan": float(kep.getRightAscensionOfAscendingNode()),
+            "argp": float(kep.getPerigeeArgument()),
+            "anomaly": float(kep.getMeanAnomaly()),
+            "anomaly_type": "mean",
+            "mass": float(state.getMass()),
+            "inertial_frame": state.getFrame(),
+            "iers_convention": iers,
+            "simple_eop": bool(simple_eop),
+            "attitude": attitude,
+        }
+        orbit._set_construction_recipe("from_kepler_two_body", base_kwargs)
         orbit.set_attitude_law(attitude)
         return orbit
 
@@ -773,6 +792,24 @@ class OrbitCreationMixin:
             bridge,
             iers,
             bool(simple_eop),
+        )
+        orbit._set_construction_recipe(
+            "from_kepler_two_body",
+            {
+                "epoch": epoch,
+                "a": float(a),
+                "e": float(e),
+                "i": float(i),
+                "raan": float(raan),
+                "argp": float(argp),
+                "anomaly": float(anomaly),
+                "anomaly_type": anomaly_type if anomaly_type is not None else "mean",
+                "mass": float(mass),
+                "inertial_frame": inertial_frame,
+                "iers_convention": iers,
+                "simple_eop": bool(simple_eop),
+                "attitude": attitude,
+            },
         )
         orbit.set_attitude_law(attitude)
         return orbit
@@ -963,6 +1000,51 @@ class OrbitCreationMixin:
             iers=iers,
             simple_eop=bool(simple_eop),
         )
+        orbit._set_construction_recipe(
+            "from_kepler_numerical",
+            {
+                "epoch": epoch,
+                "a": float(a),
+                "e": float(e),
+                "i": float(i),
+                "raan": float(raan),
+                "argp": float(argp),
+                "anomaly": float(anomaly),
+                "anomaly_type": anomaly_type if anomaly_type is not None else "mean",
+                "mass": float(mass),
+                "inertial_frame": inertial_frame,
+                "iers_convention": iers,
+                "simple_eop": bool(simple_eop),
+                "attitude": attitude,
+                "mu": mu_val,
+                "position_tolerance_m": float(position_tolerance_m),
+                "min_step_s": float(min_step_s),
+                "max_step_s": float(max_step_s),
+                "initial_step_s": float(initial_step_s),
+                "gravity_degree": int(gravity_degree),
+                "gravity_order": int(gravity_order),
+                "enable_drag": bool(enable_drag),
+                "drag_area_m2": float(drag_area_m2),
+                "drag_cd": float(drag_cd),
+                "solar_activity_strength": solar_activity_strength,
+                "enable_third_body": bool(enable_third_body),
+                "third_bodies": tuple(third_bodies),
+                "enable_solid_tides": bool(enable_solid_tides),
+                "solid_tides_bodies": tuple(solid_tides_bodies),
+                "enable_ocean_tides": bool(enable_ocean_tides),
+                "ocean_degree": int(ocean_degree),
+                "ocean_order": int(ocean_order),
+                "enable_relativity": bool(enable_relativity),
+                "enable_de_sitter": bool(enable_de_sitter),
+                "enable_lense_thirring": bool(enable_lense_thirring),
+                "enable_srp": bool(enable_srp),
+                "srp_area_m2": float(srp_area_m2),
+                "srp_cr": float(srp_cr),
+                "srp_occult_moon": bool(srp_occult_moon),
+                "enable_erp": bool(enable_erp),
+                "erp_angular_resolution_deg": float(erp_angular_resolution_deg),
+            },
+        )
         orbit.set_attitude_law(attitude)
         return orbit
 
@@ -1012,6 +1094,8 @@ class Orbit(OrbitCreationMixin):
         self._frame_cache: dict[str, Any] = {
             "native": self._native_frame,
         }
+        self._construction_factory_name: str | None = None
+        self._construction_kwargs: dict[str, Any] | None = None
 
     @classmethod
     def _from_bridge(
@@ -1036,7 +1120,40 @@ class Orbit(OrbitCreationMixin):
         obj._frame_cache = {
             "native": obj._native_frame,
         }
+        obj._construction_factory_name = None
+        obj._construction_kwargs = None
         return obj
+
+    def _set_construction_recipe(
+        self,
+        factory_name: str,
+        kwargs: Mapping[str, Any],
+    ) -> None:
+        """Record a reproducible constructor recipe for seed cloning workflows."""
+
+        self._construction_factory_name = str(factory_name)
+        self._construction_kwargs = dict(kwargs)
+
+    def _clone_for_walker(self, *, raan: float, anomaly: float) -> "Orbit":
+        """Clone this orbit for Walker generation using mean-anomaly phasing."""
+
+        if self._construction_factory_name is None or self._construction_kwargs is None:
+            raise ValueError(
+                "Walker constellation generation requires a reproducible seed orbit "
+                "created by Orbit.from_kepler_two_body(...) or Orbit.from_kepler_numerical(...)."
+            )
+
+        factory = getattr(type(self), self._construction_factory_name, None)
+        if factory is None:
+            raise RuntimeError(
+                f"Unknown orbit construction recipe: {self._construction_factory_name!r}"
+            )
+
+        kwargs = dict(self._construction_kwargs)
+        kwargs["raan"] = float(raan)
+        kwargs["anomaly"] = float(anomaly)
+        kwargs["anomaly_type"] = "mean"
+        return factory(**kwargs)
 
     @property
     def epoch(self) -> Time:
@@ -1098,6 +1215,8 @@ class Orbit(OrbitCreationMixin):
             simple_eop=self.simple_eop,
         )
         self._bridge.setAttitudeProvider(provider)
+        if self._construction_kwargs is not None:
+            self._construction_kwargs["attitude"] = attitude
         return self
 
     def _resolve_frame(self, frame: Union[Any, str, None]):

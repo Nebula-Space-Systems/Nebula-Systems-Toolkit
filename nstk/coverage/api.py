@@ -50,18 +50,19 @@ from .store import (
     subset_interval_store,
     to_access_interval_store,
 )
-from .targets import CoverageTargets, LatitudeLongitudeSampler
+from .targets import CoverageTargets, LatitudeLongitudeSampler, TargetSampler
 from .timeline import CoverageTimeline
 
 
 TimeUnit = str
+_COVERAGE_ANALYSIS_FRAME = "itrf"
 
 
 def _coerce_targets(
     targets: CoverageTargets | TargetDomain | Any | None,
     *,
     domain: TargetDomain | Any | None = None,
-    sampler: Any | None = None,
+    sampler: TargetSampler | None = None,
 ) -> CoverageTargets:
     if isinstance(targets, CoverageTargets):
         return targets
@@ -843,7 +844,6 @@ class IntervalCoverage(_CoverageAnalysisMixin):
         store: IntervalStore,
         constraints: ConstraintSet,
         channels: dict[str, PairChannelStore],
-        frame: str,
         interpolation: str,
         root_tolerance_s: float,
         max_root_iterations: int,
@@ -857,7 +857,7 @@ class IntervalCoverage(_CoverageAnalysisMixin):
         self._store = store
         self._constraints = constraints
         self._channels = dict(channels)
-        self.frame = str(frame)
+        self.frame = _COVERAGE_ANALYSIS_FRAME
         self.interpolation = str(interpolation)
         self.root_tolerance_s = float(root_tolerance_s)
         self.max_root_iterations = int(max_root_iterations)
@@ -874,14 +874,18 @@ class IntervalCoverage(_CoverageAnalysisMixin):
         orbits: Sequence[Any] | Any | None = None,
         targets: CoverageTargets | TargetDomain | Any | None = None,
         domain: TargetDomain | Any | None = None,
-        sampler: Any | None = None,
+        sampler: TargetSampler | None = None,
         constraints: ConstraintSet | Sequence[Any] | Any | None = None,
-        frame: str = "itrf",
         interpolation: str = "cubic",
         root_tolerance_s: float = 1e-3,
         max_root_iterations: int = 64,
         channels: Iterable[str] | None = None,
     ) -> "IntervalCoverage":
+        """Compute coverage against Earth-fixed targets.
+
+        Coverage targets are represented in ITRF/ECEF, so orbit-backed observers are
+        always sampled in ITRF internally.
+        """
         timeline_obj = CoverageTimeline.from_any(timeline)
         target_set = _coerce_targets(targets, domain=domain, sampler=sampler)
         observer_input = observers if observers is not None else orbits
@@ -890,7 +894,7 @@ class IntervalCoverage(_CoverageAnalysisMixin):
         observer_positions, observer_velocities, observer_items = resolve_observers(
             observer_input,
             timeline_obj,
-            frame=frame,
+            frame=_COVERAGE_ANALYSIS_FRAME,
         )
 
         constraint_set = ConstraintSet.from_any(constraints)
@@ -925,7 +929,6 @@ class IntervalCoverage(_CoverageAnalysisMixin):
             store=raw_store,
             constraints=constraint_set,
             channels={},
-            frame=frame,
             interpolation=interpolation,
             root_tolerance_s=root_tolerance_s,
             max_root_iterations=max_root_iterations,
@@ -952,14 +955,14 @@ class IntervalCoverage(_CoverageAnalysisMixin):
         timeline: CoverageTimeline | Any,
         targets: CoverageTargets | TargetDomain | Any | None = None,
         domain: TargetDomain | Any | None = None,
-        sampler: Any | None = None,
+        sampler: TargetSampler | None = None,
         constraints: ConstraintSet | Sequence[Any] | Any | None = None,
-        frame: str = "itrf",
         interpolation: str = "cubic",
         root_tolerance_s: float = 1e-3,
         max_root_iterations: int = 64,
         channels: Iterable[str] | None = None,
     ) -> "IntervalCoverage":
+        """Compute coverage for orbit-backed observers sampled in ITRF internally."""
         return cls.compute(
             timeline=timeline,
             orbits=orbits,
@@ -967,7 +970,6 @@ class IntervalCoverage(_CoverageAnalysisMixin):
             domain=domain,
             sampler=sampler,
             constraints=constraints,
-            frame=frame,
             interpolation=interpolation,
             root_tolerance_s=root_tolerance_s,
             max_root_iterations=max_root_iterations,
