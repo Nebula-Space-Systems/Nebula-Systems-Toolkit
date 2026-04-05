@@ -120,17 +120,35 @@ orbit = Orbit.from_kepler_two_body(
     anomaly_type="mean",
 )
 
-position_m = orbit.get_p_np(0.0, frame="gcrf")
+position_m = orbit.get_p(0.0, frame="gcrf", as_quantity=False)
 print(position_m)
 ```
 
 This example requires the `propagation` extra.
+
+## Orbit Attitude Defaults
+
+NSTK orbit propagators default to `attitude="vvlh"`, which is implemented as
+Orekit `LofOffset(native_frame, LOFType.VVLH)`. This is a reasonable default
+for a general Earth-observing satellite because it keeps the spacecraft body in
+a local orbital, nadir-pointing attitude law.
+
+Supported local-orbital attitude names include:
+
+- `vvlh` and `lvlh_ccsds` for the CCSDS-style local orbital frame family
+- `lvlh` and `qsw` for Orekit's STK/Vallado-style LVLH family
+- `tnw`, `ntw`, `vnc`, `eqw`, `enu`, and `ned` for other built-in Orekit
+  local orbital frames
+
+You can also pass an Orekit `LOFType`, a prebuilt Orekit `AttitudeProvider`,
+or a callable accepted by `Orbit.set_attitude_law(...)`.
 
 ## Examples
 
 Additional usage examples are provided in the `examples/` directory, including:
 
 - orbit usage
+- orbit attitude configuration
 - transforms
 - Walker constellations
 - interval coverage

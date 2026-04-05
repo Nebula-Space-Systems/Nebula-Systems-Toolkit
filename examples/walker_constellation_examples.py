@@ -47,7 +47,7 @@ def _summarize(label: str, sats: list[Orbit]) -> None:
         if idx in seen:
             continue
         seen.add(idx)
-        r_m, v_mps = sats[idx].get_pv_np(0.0, frame="native")
+        r_m, v_mps = sats[idx].get_pv(0.0, frame="native", as_quantity=False)
         print(
             f"sat[{idx}] | |r|={np.linalg.norm(r_m):.1f} m, |v|={np.linalg.norm(v_mps):.3f} m/s"
         )

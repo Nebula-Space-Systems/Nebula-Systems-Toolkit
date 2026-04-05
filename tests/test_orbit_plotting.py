@@ -60,6 +60,16 @@ def _text_by_substring(fig: Figure, needle: str):
     raise AssertionError(f"missing text containing {needle!r}")
 
 
+def _visible_x_tick_bboxes(fig: Figure, ax: GeoAxes):
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    return [
+        tick.get_window_extent(renderer=renderer).transformed(fig.transFigure.inverted())
+        for tick in ax.get_xticklabels()
+        if tick.get_visible() and tick.get_text().strip()
+    ]
+
+
 def test_plot_orbits_reexport_matches_orbits_module() -> None:
     assert nstk.plotting is plotting
     assert propagation.orbit is orbit_module
@@ -430,7 +440,10 @@ def test_plot_orbits_multi_orbit_2d_legend() -> None:
     renderer = fig.canvas.get_renderer()
     legend_bbox = legend.get_window_extent(renderer=renderer).transformed(fig.transFigure.inverted())
     axes_bbox = ax.get_position()
+    x_tick_bboxes = _visible_x_tick_bboxes(fig, ax)
     assert legend_bbox.y1 <= axes_bbox.y0
+    assert x_tick_bboxes
+    assert legend_bbox.y1 <= min(bbox.y0 for bbox in x_tick_bboxes)
 
     text_blob = "\n".join(text.get_text() for text in fig.texts)
     assert "Initial Keplerian Elements" not in text_blob
@@ -567,8 +580,11 @@ def test_plot_orbits_multi_orbit_2d_legend_stays_below_map_for_many_entries() ->
     renderer = fig.canvas.get_renderer()
     legend_bbox = legend.get_window_extent(renderer=renderer).transformed(fig.transFigure.inverted())
     axes_bbox = ax.get_position()
+    x_tick_bboxes = _visible_x_tick_bboxes(fig, ax)
     assert legend_bbox.y1 <= axes_bbox.y0
     assert legend_bbox.y0 >= 0.0
+    assert x_tick_bboxes
+    assert legend_bbox.y1 <= min(bbox.y0 for bbox in x_tick_bboxes)
 
     plt.close(fig)
 

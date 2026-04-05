@@ -58,8 +58,14 @@ class OrbitObserverSource(ObserverSource):
         if self.precompute and hasattr(self.orbit, "precompute"):
             self.orbit.precompute(float(timeline.start), float(timeline.stop))
         if timeline.absolute_time is not None:
-            return np.asarray(self.orbit.get_p_np(timeline.absolute_time, frame=requested), dtype=np.float64)
-        return np.asarray(self.orbit.get_p_np(timeline.seconds, frame=requested), dtype=np.float64)
+            return np.asarray(
+                self.orbit.get_p(timeline.absolute_time, frame=requested, as_quantity=False),
+                dtype=np.float64,
+            )
+        return np.asarray(
+            self.orbit.get_p(timeline.seconds, frame=requested, as_quantity=False),
+            dtype=np.float64,
+        )
 
     def sample_velocities(
         self,
@@ -67,12 +73,18 @@ class OrbitObserverSource(ObserverSource):
         *,
         frame: str,
     ) -> np.ndarray | None:
-        if not self.use_velocity or not hasattr(self.orbit, "get_v_np"):
+        if not self.use_velocity or not hasattr(self.orbit, "get_v"):
             return None
         requested = frame or self.frame
         if timeline.absolute_time is not None:
-            return np.asarray(self.orbit.get_v_np(timeline.absolute_time, frame=requested), dtype=np.float64)
-        return np.asarray(self.orbit.get_v_np(timeline.seconds, frame=requested), dtype=np.float64)
+            return np.asarray(
+                self.orbit.get_v(timeline.absolute_time, frame=requested, as_quantity=False),
+                dtype=np.float64,
+            )
+        return np.asarray(
+            self.orbit.get_v(timeline.seconds, frame=requested, as_quantity=False),
+            dtype=np.float64,
+        )
 
 
 @dataclass(frozen=True)
@@ -264,7 +276,7 @@ class Observer:
 def coerce_observer(value: Any) -> Observer:
     if isinstance(value, Observer):
         return value
-    if hasattr(value, "get_p_np"):
+    if hasattr(value, "get_p"):
         return Observer.from_orbit(value, name=getattr(value, "name", None))
     arr = np.asarray(value)
     if arr.ndim == 2 and arr.shape[1] == 3:

@@ -162,18 +162,18 @@ def test_walker_clones_seed_numerical_configuration() -> None:
     assert all(_force_model_names(o) == seed_force_models for o in walker)
 
     np.testing.assert_allclose(
-        walker[0].get_p_np(0.0, frame="native"),
-        seed.get_p_np(0.0, frame="native"),
+        walker[0].get_p(0.0, frame="native", as_quantity=False),
+        seed.get_p(0.0, frame="native", as_quantity=False),
         atol=1e-6,
     )
     np.testing.assert_allclose(
-        walker[0].get_v_np(0.0, frame="native"),
-        seed.get_v_np(0.0, frame="native"),
+        walker[0].get_v(0.0, frame="native", as_quantity=False),
+        seed.get_v(0.0, frame="native", as_quantity=False),
         atol=1e-6,
     )
     np.testing.assert_allclose(
-        walker[0].get_attitude_np(0.0),
-        seed.get_attitude_np(0.0),
+        walker[0].get_attitude(0.0),
+        seed.get_attitude(0.0),
         atol=1e-12,
     )
 

@@ -38,20 +38,22 @@ Use these notebooks in order:
    - Build Walker delta/star constellations
    - Use two-body and numerical member construction
 
-4. `04_interval_coverage.ipynb`
-   - Short migration note pointing to the redesigned coverage workflow
-
-5. `05_coverage.ipynb`
+4. `04_coverage.ipynb`
    - Use the new `IntervalCoverage` object API
    - Mix orbit-backed and sampled observers
    - Build regional targets from domains and samplers
    - Apply constraints, observer subsets, and custom metrics
    - Make map plots, histograms, ECDFs, and target timelines
 
-6. `06_plotting.ipynb`
+5. `05_plotting.ipynb`
    - Use `GeoMap` for direct map composition
    - Reuse `MapStyle` and `MapView` across plots
    - Mix geographic layers, coverage plots, and orbit plots
    - Drop to `MapConfig` only when you need exact renderer-level control
+
+6. `06_attitude.ipynb`
+   - Understand NSTK orbit attitude defaults and naming conventions
+   - Compare `vvlh`, `lvlh_ccsds`, `lvlh`, `qsw`, and other Orekit LOFs
+   - Configure attitudes with strings, `LOFType`, mappings, providers, and callables
 
 Legacy script examples are still available in this folder for direct `python` execution.

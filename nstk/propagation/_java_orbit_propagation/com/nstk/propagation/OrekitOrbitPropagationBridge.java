@@ -403,7 +403,7 @@ public final class OrekitOrbitPropagationBridge {
         if (propagator == null || inertialFrame == null) {
             return;
         }
-        propagator.setAttitudeProvider(new LofOffset(inertialFrame, LOFType.LVLH_CCSDS));
+        propagator.setAttitudeProvider(new LofOffset(inertialFrame, LOFType.VVLH));
     }
 
     private static void copyVector(final Vector3D vec, final double[] out, final int offset) {
@@ -468,7 +468,6 @@ public final class OrekitOrbitPropagationBridge {
         }
     }
 }
-
 
 
 

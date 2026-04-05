@@ -24,7 +24,13 @@ class MockOrbit:
         self._positions = np.asarray(positions, dtype=np.float64)
         self.frames: list[str | None] = []
 
-    def get_p_np(self, time: object, frame: str | None = None) -> np.ndarray:
+    def get_p(
+        self,
+        time: object,
+        frame: str | None = None,
+        as_quantity: bool = True,
+    ) -> np.ndarray:
+        del time, as_quantity
         self.frames.append(frame)
         return self._positions
 

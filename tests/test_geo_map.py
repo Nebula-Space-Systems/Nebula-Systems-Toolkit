@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import cartopy.feature as cfeature
 import cartopy.crs as ccrs
 import matplotlib
@@ -21,8 +23,10 @@ from nstk.plotting import (
     available_map_styles,
     compile_map_config,
     get_map_style,
+    make_basemap,
     register_map_style,
 )
+from nstk.plotting import map as map_module
 
 
 cartopy_geoaxes = pytest.importorskip("cartopy.mpl.geoaxes")
@@ -171,6 +175,46 @@ def test_map_style_presets_preserve_existing_looks_and_support_custom_registrati
     assert m.config.borders.enabled is False
 
     plt.close(m.fig)
+
+
+@pytest.mark.parametrize("style_name", ["light_detailed", "light_raster"])
+def test_make_basemap_draws_lakes_using_ocean_fill(style_name: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = compile_map_config(style=style_name)
+    lake_calls: list[dict[str, object]] = []
+
+    if cfg.raster_background.enabled:
+        dummy_path = "dummy-raster.png"
+        cfg = replace(
+            cfg,
+            raster_background=replace(cfg.raster_background, path=dummy_path),
+        )
+        original_exists = map_module.os.path.exists
+        monkeypatch.setattr(
+            map_module.os.path,
+            "exists",
+            lambda path: True if path == dummy_path else original_exists(path),
+        )
+        monkeypatch.setattr(
+            map_module.mpimg,
+            "imread",
+            lambda path: np.zeros((2, 2, 3), dtype=np.float32),
+        )
+
+    original_add_feature = cartopy_geoaxes.GeoAxes.add_feature
+
+    def record_add_feature(self, feature, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if getattr(feature, "name", None) == "lakes":
+            lake_calls.append(dict(kwargs))
+        return original_add_feature(self, feature, *args, **kwargs)
+
+    monkeypatch.setattr(cartopy_geoaxes.GeoAxes, "add_feature", record_add_feature)
+
+    fig, _, _, _ = make_basemap(cfg)
+    plt.close(fig)
+
+    assert len(lake_calls) == 1
+    assert lake_calls[0]["facecolor"] == cfg.ocean.facecolor
+    assert float(lake_calls[0]["zorder"]) > cfg.land.zorder
 
 
 def test_geomap_accepts_reusable_view_objects() -> None:

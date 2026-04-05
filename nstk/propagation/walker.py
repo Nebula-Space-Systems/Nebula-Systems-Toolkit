@@ -7,6 +7,7 @@ import numpy as np
 from astropy.time import Time
 
 from nstk.propagation.orbit import (
+    DEFAULT_ATTITUDE,
     Orbit,
     _bind_java,
     _coerce_attitude_provider,
@@ -198,7 +199,7 @@ def spacecraft_state_from_kepler(
     inertial_frame: Any = None,
     iers_convention: Any = None,
     simple_eop: bool = True,
-    attitude: Any = None,
+    attitude: Any = DEFAULT_ATTITUDE,
     *,
     mu: float | None = None,
 ):
@@ -221,8 +222,10 @@ def spacecraft_state_from_kepler(
         Earth orientation convention used if frame-name resolution needs it.
     simple_eop : bool, default True
         Whether Earth-fixed frame resolution should use simple EOP mode.
-    attitude : optional
-        Attitude law specification evaluated at ``epoch``. The returned
+    attitude : optional, default ``"vvlh"``
+        Attitude law specification evaluated at ``epoch``. The built-in
+        default is STK-style ``"vvlh"``, which resolves to
+        ``LofOffset(inertial_frame, LOFType.VVLH)``. The returned
         ``SpacecraftState`` stores the resulting attitude snapshot directly.
     mu : float, optional
         Gravitational parameter used to construct the Keplerian orbit. Defaults

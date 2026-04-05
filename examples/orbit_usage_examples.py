@@ -11,7 +11,8 @@ This script demonstrates common workflows with the Java-backed ``Orbit`` API:
 3. Frame queries and geodetic outputs.
 4. Ephemeris precompute/coverage workflow.
 5. High-fidelity numerical propagation setup.
-6. Attitude-law overrides (default, LOF, mapping, callable, provider object).
+6. Brief attitude-law overrides (see ``examples/06_attitude.ipynb`` for the
+   dedicated attitude guide).
 7. ``get_state`` convenience interface.
 8. Constructing from an existing ``SpacecraftState``.
 """
@@ -88,15 +89,15 @@ def example_2_time_input_forms(orbit: Orbit) -> None:
     t0 = astropy_time_to_orekit_date(epoch)
     t_absolutedate = [t0.shiftedBy(0.0), t0.shiftedBy(30.0), t0.shiftedBy(60.0)]
 
-    r_astropy = orbit.get_p_np(t_astropy, frame="gcrf")
-    r_seconds = orbit.get_p_np(t_seconds, frame="gcrf")
-    r_quantity = orbit.get_p_np(t_quantity, frame="gcrf")
-    r_absdate = orbit.get_p_np(t_absolutedate, frame="gcrf")
+    r_astropy = orbit.get_p(t_astropy, frame="gcrf", as_quantity=False)
+    r_seconds = orbit.get_p(t_seconds, frame="gcrf", as_quantity=False)
+    r_quantity = orbit.get_p(t_quantity, frame="gcrf", as_quantity=False)
+    r_absdate = orbit.get_p(t_absolutedate, frame="gcrf", as_quantity=False)
 
     print("allclose(astropy, seconds):", bool(np.allclose(r_astropy, r_seconds)))
     print("allclose(seconds, quantity):", bool(np.allclose(r_seconds, r_quantity)))
     print("allclose(seconds, AbsoluteDate):", bool(np.allclose(r_seconds, r_absdate)))
-    print("scalar query shape:", orbit.get_p_np(0.0, frame="gcrf").shape)
+    print("scalar query shape:", orbit.get_p(0.0, frame="gcrf", as_quantity=False).shape)
 
 
 def example_3_frames_and_geodetic(orbit: Orbit) -> None:
@@ -105,8 +106,8 @@ def example_3_frames_and_geodetic(orbit: Orbit) -> None:
     print("\n=== Example 3: Frames and Geodetic Queries ===")
     dt_s = np.arange(0.0, 301.0, 60.0, dtype=np.float64)
 
-    r_gcrf = orbit.get_p_np(dt_s, frame="gcrf")
-    r_itrf = orbit.get_p_np(dt_s, frame="itrf")
+    r_gcrf = orbit.get_p(dt_s, frame="gcrf", as_quantity=False)
+    r_itrf = orbit.get_p(dt_s, frame="itrf", as_quantity=False)
     lat, lon, alt = orbit.get_geodetic(dt_s)
 
     print("GCRF shape:", r_gcrf.shape, "ITRF shape:", r_itrf.shape)
@@ -128,9 +129,9 @@ def example_4_precompute_and_coverage(orbit: Orbit) -> None:
 
     dt_s = np.arange(0.0, 4.0 * 3600.0, 10.0, dtype=np.float64)
     t0 = perf_counter()
-    _ = orbit.get_pv_np(dt_s, frame="gcrf")
+    _ = orbit.get_pv(dt_s, frame="gcrf", as_quantity=False)
     t1 = perf_counter()
-    _ = orbit.get_pv_np(dt_s, frame="gcrf")
+    _ = orbit.get_pv(dt_s, frame="gcrf", as_quantity=False)
     t2 = perf_counter()
 
     print(f"first query  ({dt_s.size} samples): {t1 - t0:.3f} s")
@@ -163,7 +164,7 @@ def example_5_numerical_propagator() -> Orbit:
     )
 
     dt_s = np.arange(0.0, 2.0 * 3600.0, 30.0, dtype=np.float64)
-    r_num, v_num = orbit.get_pv_np(dt_s, frame="gcrf")
+    r_num, v_num = orbit.get_pv(dt_s, frame="gcrf", as_quantity=False)
     print("numerical propagator:", orbit.propagator.__class__.__name__)
     print("queried shapes:", r_num.shape, v_num.shape)
     return orbit
@@ -185,25 +186,27 @@ def example_6_attitude_law_overrides(orbit: Orbit) -> None:
     print("\n=== Example 6: Attitude Law Overrides ===")
     t = np.array([0.0, 60.0, 120.0], dtype=np.float64)
 
-    q_default = orbit.get_attitude_np(t)
+    q_vvlh = orbit.get_attitude(t)
     orbit.set_attitude_law("tnw")
-    q_tnw = orbit.get_attitude_np(t)
+    q_tnw = orbit.get_attitude(t)
     orbit.set_attitude_law({"type": "nadir"})
-    q_nadir = orbit.get_attitude_np(t)
+    q_nadir = orbit.get_attitude(t)
     orbit.set_attitude_law(_attitude_callable)
-    q_callable = orbit.get_attitude_np(t)
+    q_callable = orbit.get_attitude(t)
 
     # Provider object form (requires JVM initialized; it is by now).
     from org.orekit.attitudes import LofOffset  # type: ignore
     from org.orekit.frames import LOFType  # type: ignore
 
-    orbit.set_attitude_law(LofOffset(orbit.get_native_frame(), LOFType.LVLH_CCSDS))
-    q_provider = orbit.get_attitude_np(t)
+    orbit.set_attitude_law(LofOffset(orbit.get_native_frame(), LOFType.QSW))
+    q_provider = orbit.get_attitude(t)
 
-    print("default vs tnw differs:", bool(not np.allclose(q_default, q_tnw)))
+    orbit.set_attitude_law("vvlh")
+
+    print("vvlh vs tnw differs:", bool(not np.allclose(q_vvlh, q_tnw)))
     print("tnw vs nadir differs:", bool(not np.allclose(q_tnw, q_nadir)))
     print("nadir vs callable differs:", bool(not np.allclose(q_nadir, q_callable)))
-    print("provider quaternion[0]:", q_provider[0])
+    print("provider quaternion[0] [q1, q2, q3, q4]:", q_provider[0])
 
 
 def example_7_get_state_convenience(orbit: Orbit) -> None:
@@ -225,9 +228,9 @@ def example_8_from_spacecraft_state(seed_orbit: Orbit) -> None:
 
     print("\n=== Example 8: Construct from SpacecraftState ===")
     state0 = seed_orbit.propagator.getInitialState()
-    orb2 = Orbit.from_spacecraft_state(state0, attitude="default")
+    orb2 = Orbit.from_spacecraft_state(state0, attitude="vvlh")
 
-    p0 = orb2.get_p_np(0.0, frame="native")
+    p0 = orb2.get_p(0.0, frame="native", as_quantity=False)
     print("new orbit native frame:", orb2.get_native_frame().getName())
     print("initial |r| [km]:", float(np.linalg.norm(p0) / 1e3))
 

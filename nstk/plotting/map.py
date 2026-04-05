@@ -114,7 +114,7 @@ class RasterBackgroundConfig:
 @dataclass(frozen=True)
 class FillRenderConfig:
     """
-    Rendering controls for filled polygon features (LAND/OCEAN).
+    Rendering controls for filled polygon features (LAND/OCEAN/LAKES).
 
     Important:
     - Opacity is always 1.0 (solid fill). Not configurable by design.
@@ -272,7 +272,8 @@ class MapConfig:
     extent: ExtentConfig = field(default_factory=ExtentConfig)
     figsize: Tuple[float, float] = (12.0, 6.0)
 
-    # Optional Natural Earth feature scale for cfeatures (LAND/OCEAN/BORDERS/COASTLINE)
+    # Optional Natural Earth feature scale for cfeatures
+    # (LAND/OCEAN/LAKES/BORDERS/COASTLINE)
     # If None, use default behavior. Otherwise one of: "10m", "50m", "110m".
     cfeature_scale: Optional[CFeatureScale] = None
 
@@ -624,7 +625,7 @@ DARK_DETAILED_STYLE = MapStyle(
     theme=_DARK_THEME,
     ocean=FillRenderConfig(
         enabled=True,
-        facecolor="#0F0F0F",
+        facecolor="#1E1E1E",
         zorder=0.0,
         seam_fix=True,
         antialiased=True,
@@ -632,7 +633,7 @@ DARK_DETAILED_STYLE = MapStyle(
     ),
     land=FillRenderConfig(
         enabled=True,
-        facecolor="#4D4D4D",
+        facecolor="#9A9A9A",
         zorder=1.0,
         seam_fix=True,
         antialiased=True,
@@ -642,13 +643,14 @@ DARK_DETAILED_STYLE = MapStyle(
     borders=BordersConfig(enabled=True, color="#0F0F0F", linewidth=0.4, zorder=3.0),
     gridlines=GridlinesConfig(alpha=0.35),
     bump_texture=BumpTextureConfig(opacity=0.32),
+    land_shadow=ShadowConfig(enabled=True, offset=(-0.8, -0.8), color="black", alpha=0.7),
 )
+
 DARK_DETAILED_NO_GRID_STYLE = DARK_DETAILED_STYLE.with_grid(alpha=0.0).update(name="dark_detailed_no_grid")
 DARK_STYLE = (
-    DARK_DETAILED_STYLE.with_borders(enabled=False)
-    .with_effects(
+    DARK_DETAILED_STYLE.with_effects(
         bump_texture={"enabled": False},
-        land_shadow={"enabled": False},
+        # land_shadow={"enabled": False},
     )
     .update(name="dark")
 )
@@ -677,17 +679,15 @@ LIGHT_DETAILED_STYLE = MapStyle(
     borders=BordersConfig(enabled=True, color="#FFFFFF", linewidth=0.4, zorder=3.0),
     gridlines=GridlinesConfig(color="#222222", alpha=0.5),
     bump_texture=BumpTextureConfig(opacity=0.15),
-    land_shadow=ShadowConfig(enabled=True, offset=(-0.8, -0.8), color="black", alpha=0.22),
+    land_shadow=ShadowConfig(enabled=True, offset=(-0.8, -0.8), color="black", alpha=0.18),
 )
 LIGHT_DETAILED_NO_GRID_STYLE = LIGHT_DETAILED_STYLE.with_grid(alpha=0.0).update(name="light_detailed_no_grid")
 LIGHT_STYLE = (
-    LIGHT_DETAILED_STYLE.with_borders(enabled=False)
-    .with_effects(bump_texture={"enabled": False}, land_shadow={"enabled": True})
+    LIGHT_DETAILED_STYLE.with_effects(bump_texture={"enabled": False}, land_shadow={"enabled": True})
     .update(name="light")
 )
 LIGHT_NO_GRID_STYLE = (
     LIGHT_STYLE.with_grid(alpha=0.0)
-    .with_borders(enabled=False)
     .update(name="light_no_grid")
 )
 
@@ -873,6 +873,27 @@ def _apply_fill_rendering(artist, cfg: FillRenderConfig) -> None:
         pass
 
 
+def _add_lakes_fill(ax, cfg: MapConfig, *, zorder: float) -> None:
+    """Draw lakes using the ocean fill styling so inland water stays visible."""
+    if not cfg.ocean.enabled:
+        return
+
+    feat_lakes = (
+        cfeature.LAKES
+        if cfg.cfeature_scale is None
+        else cfeature.LAKES.with_scale(cfg.cfeature_scale)
+    )
+    lakes_artist = ax.add_feature(  # type: ignore
+        feat_lakes,
+        facecolor=cfg.ocean.facecolor,
+        edgecolor="none",
+        linewidth=0.0,
+        alpha=1.0,
+        zorder=zorder,
+    )
+    _apply_fill_rendering(lakes_artist, cfg.ocean)
+
+
 def _safe_gridlines(ax, kwargs: dict) -> Any:
     """
     Cartopy versions differ slightly; drop unsupported kwargs instead of failing.
@@ -1002,6 +1023,7 @@ def _configure_basemap_axes(fig: Any, ax: Any, cfg: MapConfig) -> tuple[Any, Any
 
     # Background: raster OR vector fills (+ bump)
     land_artist = None
+    lakes_zorder = max(cfg.ocean.zorder, cfg.land.zorder)
 
     if cfg.raster_background.enabled:
         path = cfg.raster_background.path or _default_raster_path()
@@ -1090,6 +1112,9 @@ def _configure_basemap_axes(fig: Any, ax: Any, cfg: MapConfig) -> tuple[Any, Any
                 interpolation=cfg.bump_texture.interpolation,
                 origin=cfg.bump_texture.origin,
             )
+            lakes_zorder = max(lakes_zorder, cfg.bump_texture.zorder)
+
+    _add_lakes_fill(ax, cfg, zorder=lakes_zorder + 0.01)
 
     # Coastlines / borders
     if cfg.coastlines.enabled:

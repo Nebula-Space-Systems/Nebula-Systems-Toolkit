@@ -8,6 +8,66 @@ Design goals:
 - Thin, ergonomic Python API for Orekit users.
 - Lazy JVM startup (no VM init at module import time).
 - Efficient vector queries with Java-side loops.
+
+Attitude conventions
+--------------------
+NSTK orbits default to ``attitude="vvlh"``, implemented as
+``LofOffset(native_frame, LOFType.VVLH)``. This is a practical default for
+general Earth-observing satellites because the spacecraft body follows a local
+orbital, nadir-pointing attitude law.
+
+Two different LVLH naming families are supported because Orekit exposes both:
+
+- ``"vvlh"`` and ``"lvlh_ccsds"`` use Orekit's CCSDS-style local orbital frame
+  family (``LOFType.VVLH`` / ``LOFType.LVLH_CCSDS``).
+- ``"lvlh"`` and ``"qsw"`` use Orekit's STK/Vallado-style LVLH frame family
+  (``LOFType.LVLH`` / ``LOFType.QSW``).
+
+Users can select any supported Orekit local orbital frame with a string alias,
+an Orekit ``LOFType`` enum value, or a custom Orekit ``AttitudeProvider``.
+
+Common local-orbital-frame axis conventions used in NSTK/Orekit are:
+
+- ``"vvlh"`` / ``"lvlh_ccsds"``: ``+Z`` points opposite position and ``+Y``
+  points opposite orbital momentum.
+- ``"lvlh"`` / ``"qsw"``: ``+X`` points along position and ``+Z`` points along
+  orbital momentum.
+- ``"tnw"``: ``+X`` points along velocity and ``+Z`` points along orbital
+  momentum.
+- ``"ntw"``: ``+Y`` points along velocity and ``+Z`` points along orbital
+  momentum.
+- ``"vnc"``: ``+X`` points along velocity and ``+Y`` points along orbital
+  momentum.
+
+For each local orbital frame, the remaining axis is the one required to close a
+right-handed triad.
+
+Common Earth-pointing providers that are not pure LOF axis conventions are:
+
+- ``"nadir"``: Orekit ``NadirPointing`` using the WGS84 Earth shape. This
+  points the spacecraft toward the sub-satellite point on the reference
+  ellipsoid, so it accounts for Earth shape rather than only instantaneous LOF
+  geometry.
+- ``"body_center"``: Orekit ``BodyCenterPointing`` using the WGS84 Earth shape.
+  This points directly toward the Earth's center, which is simpler than nadir
+  pointing and differs slightly from ``"nadir"`` away from a spherical model.
+
+Quaternion convention
+---------------------
+``Orbit.get_attitude(...)`` returns attitude quaternions in STK-style
+scalar-last ordering ``[q1, q2, q3, q4]``:
+
+- ``q1``, ``q2``, and ``q3`` are the vector terms.
+- ``q4`` is the scalar term.
+- The quaternion represents the rotation from the attitude reference frame into
+  the spacecraft/body frame.
+
+Internally, Orekit exposes these same quaternions as ``[q0, q1, q2, q3]`` with
+the scalar term first, and NSTK reorders them on output to match STK
+conventions. In normal NSTK orbit usage, the attitude reference frame is
+typically the orbit native propagation frame returned by
+:meth:`Orbit.get_native_frame`. As with any unit quaternion representation,
+``q`` and ``-q`` represent the same physical orientation.
 """
 
 from __future__ import annotations
@@ -45,6 +105,7 @@ OneAxisEllipsoid = None
 
 # Lazily built WGS84 ellipsoid in ITRF/IERS2010/simpleEOP
 _WGS84_ELLIPSOID_CACHE = None
+DEFAULT_ATTITUDE = "vvlh"
 
 def _bind_java() -> None:
     """Bind Orekit/bridge classes lazily after starting the JVM.
@@ -212,10 +273,17 @@ def _reshape_1d(arr: np.ndarray, is_scalar: bool):
 
 
 def _reshape_quat(flat: np.ndarray, is_scalar: bool):
-    """Reshape flattened quaternion output to ``(N, 4)`` or ``(4,)``."""
+    """Reshape Orekit quaternions and reorder them to STK-style scalar-last."""
 
     out = np.asarray(flat, dtype=np.float64).reshape(-1, 4)
+    out = out[:, [1, 2, 3, 0]]
     return out[0] if is_scalar else out
+
+
+def _maybe_quantity(value: Any, unit: u.UnitBase, *, as_quantity: bool) -> Any:
+    """Attach an astropy unit when requested."""
+
+    return value * unit if as_quantity else value
 
 
 def _coerce_iers(iers_convention):
@@ -374,15 +442,30 @@ def _is_attitude_provider_instance(obj: Any) -> bool:
         return False
 
 
-def _resolve_lof_type(name: str):
-    """Resolve LOF type name to Orekit ``LOFType`` enum."""
+def _is_lof_type_instance(obj: Any) -> bool:
+    """Return True if ``obj`` is an Orekit ``LOFType`` enum instance."""
 
     _bind_java()
     from org.orekit.frames import LOFType  # type: ignore
 
+    try:
+        return bool(LOFType.class_.isInstance(obj))
+    except Exception:
+        return False
+
+
+def _resolve_lof_type(name: Any):
+    """Resolve LOF type name or enum to Orekit ``LOFType``."""
+
+    _bind_java()
+    from org.orekit.frames import LOFType  # type: ignore
+
+    if _is_lof_type_instance(name):
+        return name
+
     key = _normalize_frame_name(name)
     mapping = {
-        "lvlh": LOFType.LVLH_CCSDS,
+        "lvlh": LOFType.LVLH,
         "lvlhlegacy": LOFType.LVLH,
         "lvlhccsds": LOFType.LVLH_CCSDS,
         "vvlh": LOFType.VVLH,
@@ -397,8 +480,8 @@ def _resolve_lof_type(name: str):
     if key not in mapping:
         raise ValueError(
             "Unsupported LOF type. Use one of: "
-            "'lvlh_ccsds', 'lvlh', 'lvlh_legacy', 'vvlh', "
-            "'tnw', 'ntw', 'qsw', 'vnc', 'eqw', 'enu', 'ned'"
+            "'lvlh', 'qsw', 'vvlh', 'lvlh_ccsds', 'lvlh_legacy', "
+            "'tnw', 'ntw', 'vnc', 'eqw', 'enu', 'ned', or an Orekit LOFType"
         )
     return mapping[key]
 
@@ -414,14 +497,16 @@ def _coerce_attitude_provider(
 
     Supported inputs
     ----------------
-    - ``None`` / ``"default"`` / ``"lvlh"`` / ``"lvlh_ccsds"``
-      -> ``LofOffset(inertial_frame, LOFType.LVLH_CCSDS)``
-    - LOF string names -> ``LofOffset(inertial_frame, <LOFType>)``
+    - Default ``"vvlh"`` / compatibility aliases ``None`` / ``"default"``
+      -> ``LofOffset(inertial_frame, LOFType.VVLH)``
+    - LOF string names or direct Orekit ``LOFType`` values
+      -> ``LofOffset(inertial_frame, <LOFType>)``
     - ``"nadir"`` -> ``NadirPointing(inertial_frame, WGS84 ellipsoid)``
     - ``"body_center"`` -> ``BodyCenterPointing(inertial_frame, WGS84 ellipsoid)``
     - dict forms:
       ``{"provider": <AttitudeProvider>}``
       ``{"type": "lof", "lof": "tnw"}``
+      ``{"type": "lof", "lof": LOFType.QSW}``
       ``{"type": "nadir"}``
       ``{"type": "body_center"}``
     - direct Orekit ``AttitudeProvider`` object
@@ -442,13 +527,16 @@ def _coerce_attitude_provider(
     from org.orekit.frames import LOFType  # type: ignore
 
     def _default_provider():
-        return LofOffset(inertial_frame, LOFType.LVLH_CCSDS)
+        return LofOffset(inertial_frame, LOFType.VVLH)
 
     if attitude is None:
         return _default_provider()
 
     if _is_attitude_provider_instance(attitude):
         return attitude
+
+    if _is_lof_type_instance(attitude):
+        return LofOffset(inertial_frame, _resolve_lof_type(attitude))
 
     if callable(attitude):
         candidate = attitude(inertial_frame, iers, bool(simple_eop))
@@ -459,7 +547,9 @@ def _coerce_attitude_provider(
     if isinstance(attitude, str):
         key = _normalize_frame_name(attitude)
         if key in ("default", "lvlhccsds", "lvlhccsdsoffset"):
-            return _default_provider()
+            if key == "default":
+                return _default_provider()
+            return LofOffset(inertial_frame, _resolve_lof_type(attitude))
         if key in ("nadir", "nadirpointing"):
             itrf = FramesFactory.getITRF(iers, bool(simple_eop))
             return NadirPointing(inertial_frame, _build_earth_shape(itrf))
@@ -477,8 +567,8 @@ def _coerce_attitude_provider(
 
         kind = _normalize_frame_name(str(attitude.get("type", "lof")))
         if kind in ("default", "lvlh", "lvlhccsds", "lof", "lofoffset"):
-            lof_name = attitude.get("lof", attitude.get("lof_type", "lvlh_ccsds"))
-            return LofOffset(inertial_frame, _resolve_lof_type(str(lof_name)))
+            lof_name = attitude.get("lof", attitude.get("lof_type", DEFAULT_ATTITUDE))
+            return LofOffset(inertial_frame, _resolve_lof_type(lof_name))
         if kind in ("nadir", "nadirpointing"):
             itrf = FramesFactory.getITRF(iers, bool(simple_eop))
             return NadirPointing(inertial_frame, _build_earth_shape(itrf))
@@ -488,7 +578,7 @@ def _coerce_attitude_provider(
         raise ValueError("Unsupported attitude mapping type")
 
     raise TypeError(
-        "attitude must be None, str, mapping, callable, or an Orekit AttitudeProvider"
+        "attitude must be None, str, Orekit LOFType, mapping, callable, or an Orekit AttitudeProvider"
     )
 
 
@@ -659,7 +749,7 @@ class OrbitCreationMixin:
         state,
         iers_convention=None,
         simple_eop: bool = True,
-        attitude: Any = None,
+        attitude: Any = DEFAULT_ATTITUDE,
     ) -> "Orbit":
         """Construct an :class:`Orbit` from an existing ``SpacecraftState``.
 
@@ -672,8 +762,11 @@ class OrbitCreationMixin:
             Defaults to ``IERS_2010`` when omitted.
         simple_eop : bool, default True
             Whether to use simple EOP mode when resolving Earth-fixed frames.
-        attitude : optional
-            Attitude law spec applied immediately after construction.
+        attitude : optional, default ``"vvlh"``
+            Attitude law spec applied immediately after construction. The
+            built-in default is STK-style ``"vvlh"``, which resolves to
+            ``LofOffset(native_frame, LOFType.VVLH)`` for a nadir-pointing,
+            Earth-observing-friendly local orbital frame.
             See :meth:`Orbit.set_attitude_law`.
 
         Returns
@@ -727,7 +820,7 @@ class OrbitCreationMixin:
         inertial_frame=None,
         iers_convention=None,
         simple_eop: bool = True,
-        attitude: Any = None,
+        attitude: Any = DEFAULT_ATTITUDE,
     ) -> "Orbit":
         """Build a two-body analytical orbit using ``KeplerianPropagator``.
 
@@ -751,8 +844,11 @@ class OrbitCreationMixin:
             Convention used for Earth-fixed frame resolution.
         simple_eop : bool, default True
             Whether to use simple EOP mode for Earth-fixed frames.
-        attitude : optional
-            Attitude law spec applied immediately after construction.
+        attitude : optional, default ``"vvlh"``
+            Attitude law spec applied immediately after construction. The
+            built-in default is STK-style ``"vvlh"``, which resolves to
+            ``LofOffset(native_frame, LOFType.VVLH)`` for a nadir-pointing,
+            Earth-observing-friendly local orbital frame.
             See :meth:`Orbit.set_attitude_law`.
 
         Returns
@@ -829,7 +925,7 @@ class OrbitCreationMixin:
         inertial_frame=None,
         iers_convention=None,
         simple_eop: bool = True,
-        attitude: Any = None,
+        attitude: Any = DEFAULT_ATTITUDE,
         *,
         mu: float | None = None,
         position_tolerance_m: float = 0.1,
@@ -881,8 +977,11 @@ class OrbitCreationMixin:
             Convention used when resolving Earth-fixed frames.
         simple_eop : bool, default True
             Whether Earth-fixed frame resolution should use simple EOP mode.
-        attitude : optional
-            Attitude law spec. See :meth:`Orbit.set_attitude_law`.
+        attitude : optional, default ``"vvlh"``
+            Attitude law spec. The built-in default is STK-style ``"vvlh"``,
+            which resolves to ``LofOffset(native_frame, LOFType.VVLH)`` for a
+            nadir-pointing, Earth-observing-friendly local orbital frame.
+            See :meth:`Orbit.set_attitude_law`.
         mu : float | None, optional
             Gravitational parameter [m^3/s^2]. Defaults to WGS84 Earth ``mu``.
         position_tolerance_m : float, default 0.1
@@ -1060,6 +1159,11 @@ class Orbit(OrbitCreationMixin):
       ``AbsoluteDate`` (scalar or 1D collections), plus seconds-from-epoch
       numeric inputs.
     - String frame names are supported in addition to Orekit ``Frame`` objects.
+    - The default attitude law is ``"vvlh"``, which maps to
+      ``LofOffset(native_frame, LOFType.VVLH)``.
+    - ``"lvlh"`` and ``"qsw"`` are also available for the STK/Vallado-style
+      LVLH frame convention, while ``"lvlh_ccsds"`` and ``"vvlh"`` refer to
+      the CCSDS-style convention.
     """
 
     def __init__(
@@ -1182,25 +1286,49 @@ class Orbit(OrbitCreationMixin):
         self._bridge.precompute(float(t_min_s), float(t_max_s))
 
     def get_native_frame(self):
-        """Return the native propagation frame used by the underlying propagator."""
+        """Return the native propagation frame used by the underlying propagator.
+
+        This frame is also the inertial reference passed into Orekit
+        ``LofOffset`` attitude laws when you configure local orbital attitudes
+        through :meth:`set_attitude_law`.
+        """
 
         return self._native_frame
 
-    def set_attitude_law(self, attitude: Any = None) -> "Orbit":
+    def set_attitude_law(self, attitude: Any = DEFAULT_ATTITUDE) -> "Orbit":
         """Set or override the propagator attitude law.
 
         Parameters
         ----------
-        attitude : optional
+        attitude : optional, default ``"vvlh"``
             Supported forms:
-            - ``None`` / ``"default"`` / ``"lvlh_ccsds"``: LVLH_CCSDS ``LofOffset``.
-            - LOF strings: ``"lvlh"``, ``"lvlh_legacy"``, ``"vvlh"``, ``"tnw"``, ``"ntw"``,
-              ``"qsw"``, ``"vnc"``, ``"eqw"``, ``"enu"``, ``"ned"``.
+            - Default ``"vvlh"``: STK-style nadir-pointing ``LofOffset``.
+            - Compatibility aliases ``None`` and ``"default"`` map to the same
+              ``LofOffset(inertial_frame, LOFType.VVLH)``.
+            - LOF strings: ``"vvlh"``, ``"lvlh_ccsds"``, ``"lvlh"``, ``"qsw"``,
+              ``"lvlh_legacy"``, ``"tnw"``, ``"ntw"``, ``"vnc"``, ``"eqw"``,
+              ``"enu"``, ``"ned"``.
+            - direct Orekit ``LOFType`` enum values.
             - ``"nadir"`` or ``"body_center"``.
             - dict specs, e.g. ``{"type": "lof", "lof": "tnw"}``,
+              ``{"type": "lof", "lof": LOFType.QSW}``,
               ``{"type": "nadir"}``, ``{"provider": <AttitudeProvider>}``.
             - direct Orekit ``AttitudeProvider`` object.
             - callable ``(inertial_frame, iers, simple_eop) -> AttitudeProvider``.
+
+            Common choices:
+            - ``"vvlh"``: default Earth-observing choice. Uses Orekit
+              ``LOFType.VVLH``.
+            - ``"lvlh_ccsds"``: same axis family as ``"vvlh"`` using the CCSDS
+              LVLH name.
+            - ``"lvlh"`` or ``"qsw"``: Orekit's STK/Vallado-style LVLH family.
+            - ``"tnw"``: velocity-aligned local orbital frame.
+            - ``"nadir"``: Orekit nadir-pointing provider using the WGS84 Earth
+              shape instead of a pure local-orbital-frame offset.
+            - fixed angular offsets from a local orbital frame: create an
+              Orekit ``LofOffset`` provider explicitly and pass it here, for
+              example ``LofOffset(orbit.get_native_frame(), LOFType.QSW,
+              RotationOrder.ZYX, yaw_z, pitch_y, roll_x)``.
 
         Returns
         -------
@@ -1251,62 +1379,67 @@ class Orbit(OrbitCreationMixin):
 
         return frame
 
-    def get_p_np(
+    def get_p(
         self,
         time: Union[Time, float, int, np.ndarray, u.Quantity],
         frame: Union[Any, str, None] = None,
+        as_quantity: bool = True,
     ):
-        """Return position in meters as numpy output (no units wrapper).
+        """Return position in meters.
 
         The ``time`` input accepts ``astropy.Time``, Orekit ``AbsoluteDate``,
         seconds from epoch (scalar/array), or a time ``Quantity``.
 
         Scalar time input returns shape ``(3,)``. Vector time input returns
-        shape ``(N, 3)``.
+        shape ``(N, 3)``. When ``as_quantity`` is True the result is an
+        ``astropy.Quantity`` in meters. Otherwise raw numpy output is returned.
         """
 
         dt_s, is_scalar = _normalize_time_input(time, self._epoch)
         out = self._bridge.queryPosition(dt_s, self._resolve_frame(frame))
-        return _reshape_xyz(out, is_scalar)
+        return _maybe_quantity(_reshape_xyz(out, is_scalar), u.m, as_quantity=as_quantity)
 
-    def get_v_np(
+    def get_v(
         self,
         time: Union[Time, float, int, np.ndarray, u.Quantity],
         frame: Union[Any, str, None] = None,
+        as_quantity: bool = True,
     ):
-        """Return velocity in m/s as numpy output (no units wrapper).
+        """Return velocity in meters/second.
 
-        ``time`` supports the same formats as :meth:`get_p_np`, including
+        ``time`` supports the same formats as :meth:`get_p`, including
         Orekit ``AbsoluteDate``.
         """
 
         dt_s, is_scalar = _normalize_time_input(time, self._epoch)
         out = self._bridge.queryVelocity(dt_s, self._resolve_frame(frame))
-        return _reshape_xyz(out, is_scalar)
+        return _maybe_quantity(_reshape_xyz(out, is_scalar), u.m / u.s, as_quantity=as_quantity)
 
-    def get_a_np(
+    def get_a(
         self,
         time: Union[Time, float, int, np.ndarray, u.Quantity],
         frame: Union[Any, str, None] = None,
+        as_quantity: bool = True,
     ):
-        """Return acceleration in m/s^2 as numpy output (no units wrapper).
+        """Return acceleration in meters/second^2.
 
-        ``time`` supports the same formats as :meth:`get_p_np`, including
+        ``time`` supports the same formats as :meth:`get_p`, including
         Orekit ``AbsoluteDate``.
         """
 
         dt_s, is_scalar = _normalize_time_input(time, self._epoch)
         out = self._bridge.queryAcceleration(dt_s, self._resolve_frame(frame))
-        return _reshape_xyz(out, is_scalar)
+        return _maybe_quantity(_reshape_xyz(out, is_scalar), u.m / (u.s**2), as_quantity=as_quantity)
 
-    def get_pv_np(
+    def get_pv(
         self,
         time: Union[Time, float, int, np.ndarray, u.Quantity],
         frame: Union[Any, str, None] = None,
-    ) -> tuple[np.ndarray, np.ndarray]:
-        """Return ``(position, velocity)`` in SI units as numpy outputs.
+        as_quantity: bool = True,
+    ) -> tuple[Any, Any]:
+        """Return ``(position, velocity)``.
 
-        ``time`` supports the same formats as :meth:`get_p_np`, including
+        ``time`` supports the same formats as :meth:`get_p`, including
         Orekit ``AbsoluteDate``.
 
         Each component is shape ``(3,)`` for scalar queries or ``(N, 3)``
@@ -1315,35 +1448,38 @@ class Orbit(OrbitCreationMixin):
 
         dt_s, is_scalar = _normalize_time_input(time, self._epoch)
         out = self._bridge.queryPV(dt_s, self._resolve_frame(frame))
-        return _reshape_xyz(out.p, is_scalar), _reshape_xyz(out.v, is_scalar)
+        return (
+            _maybe_quantity(_reshape_xyz(out.p, is_scalar), u.m, as_quantity=as_quantity),
+            _maybe_quantity(_reshape_xyz(out.v, is_scalar), u.m / u.s, as_quantity=as_quantity),
+        )
 
-    def get_pva_np(
+    def get_pva(
         self,
         time: Union[Time, float, int, np.ndarray, u.Quantity],
         frame: Union[Any, str, None] = None,
-    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """Return ``(position, velocity, acceleration)`` in SI units as numpy outputs.
+        as_quantity: bool = True,
+    ) -> tuple[Any, Any, Any]:
+        """Return ``(position, velocity, acceleration)``.
 
-        ``time`` supports the same formats as :meth:`get_p_np`, including
+        ``time`` supports the same formats as :meth:`get_p`, including
         Orekit ``AbsoluteDate``.
         """
 
         dt_s, is_scalar = _normalize_time_input(time, self._epoch)
         out = self._bridge.queryPVA(dt_s, self._resolve_frame(frame))
         return (
-            _reshape_xyz(out.p, is_scalar),
-            _reshape_xyz(out.v, is_scalar),
-            _reshape_xyz(out.a, is_scalar),
+            _maybe_quantity(_reshape_xyz(out.p, is_scalar), u.m, as_quantity=as_quantity),
+            _maybe_quantity(_reshape_xyz(out.v, is_scalar), u.m / u.s, as_quantity=as_quantity),
+            _maybe_quantity(_reshape_xyz(out.a, is_scalar), u.m / (u.s**2), as_quantity=as_quantity),
         )
 
-    def get_geodetic_np(
+    def get_geodetic(
         self,
         time: Union[Time, float, int, np.ndarray, u.Quantity],
         ellipsoid=None,
-    ) -> tuple[
-        Union[np.ndarray, float], Union[np.ndarray, float], Union[np.ndarray, float]
-    ]:
-        """Return geodetic ``(lat_deg, lon_deg, alt_m)`` as raw numeric outputs.
+        as_quantity: bool = True,
+    ) -> tuple[Any, Any, Any]:
+        """Return geodetic ``(lat, lon, alt)``.
 
         Parameters
         ----------
@@ -1352,6 +1488,9 @@ class Orbit(OrbitCreationMixin):
             Orekit ``AbsoluteDate`` is accepted as a scalar or 1D collection.
         ellipsoid : OneAxisEllipsoid, optional
             Earth/body shape used for conversion. Defaults to cached WGS84.
+        as_quantity : bool, default True
+            If True, returns ``(deg, deg, m)`` quantities. Otherwise returns
+            raw numeric outputs.
         """
 
         if ellipsoid is None:
@@ -1360,87 +1499,47 @@ class Orbit(OrbitCreationMixin):
         dt_s, is_scalar = _normalize_time_input(time, self._epoch)
         out = self._bridge.queryGeodetic(dt_s, ellipsoid)
         return (
-            _reshape_1d(out.latDeg, is_scalar),
-            _reshape_1d(out.lonDeg, is_scalar),
-            _reshape_1d(out.altM, is_scalar),
+            _maybe_quantity(_reshape_1d(out.latDeg, is_scalar), u.deg, as_quantity=as_quantity),
+            _maybe_quantity(_reshape_1d(out.lonDeg, is_scalar), u.deg, as_quantity=as_quantity),
+            _maybe_quantity(_reshape_1d(out.altM, is_scalar), u.m, as_quantity=as_quantity),
         )
 
-    def get_attitude_np(
-        self, time: Union[Time, float, int, np.ndarray, u.Quantity]
+    def get_attitude(
+        self,
+        time: Union[Time, float, int, np.ndarray, u.Quantity],
     ) -> np.ndarray:
-        """Return attitude quaternions as numpy array(s) ``[q0, q1, q2, q3]``.
+        """Return spacecraft attitude quaternions at one or more query times.
 
-        ``time`` supports the same formats as :meth:`get_p_np`, including
+        ``time`` supports the same formats as :meth:`get_p`, including
         Orekit ``AbsoluteDate``.
+
+        The returned quaternion represents the current spacecraft/body
+        orientation produced by the propagator's attached attitude provider.
+        Use :meth:`set_attitude_law` to change that provider.
+
+        NSTK returns quaternions in STK-style scalar-last ordering:
+
+        - ``q1``, ``q2``, and ``q3`` are the vector terms.
+        - ``q4`` is the scalar term.
+        - The quaternion represents the rotation from the attitude reference
+          frame into the spacecraft/body frame.
+
+        Practical notes
+        ---------------
+        - The attitude reference frame is typically the orbit native frame
+          returned by :meth:`get_native_frame`.
+        - To express a body-frame vector in the reference/native frame, use the
+          inverse of the corresponding Orekit rotation.
+        - Orekit itself exposes the same rotation in scalar-first ordering
+          ``[q0, q1, q2, q3]``; NSTK reorders it to match STK conventions.
+        - ``q`` and ``-q`` represent the same physical orientation, so raw
+          elementwise quaternion comparisons can differ by a sign flip even when
+          the attitude is unchanged.
         """
 
         dt_s, is_scalar = _normalize_time_input(time, self._epoch)
         out = self._bridge.queryAttitudeQuaternion(dt_s)
         return _reshape_quat(out, is_scalar)
-
-    def get_p(
-        self,
-        time: Union[Time, float, int, np.ndarray, u.Quantity],
-        frame: Union[Any, str, None] = None,
-    ) -> u.Quantity:
-        """Return position as ``astropy.Quantity`` in meters."""
-
-        return self.get_p_np(time, frame=frame) * u.m
-
-    def get_v(
-        self,
-        time: Union[Time, float, int, np.ndarray, u.Quantity],
-        frame: Union[Any, str, None] = None,
-    ) -> u.Quantity:
-        """Return velocity as ``astropy.Quantity`` in meters/second."""
-
-        return self.get_v_np(time, frame=frame) * (u.m / u.s)
-
-    def get_a(
-        self,
-        time: Union[Time, float, int, np.ndarray, u.Quantity],
-        frame: Union[Any, str, None] = None,
-    ) -> u.Quantity:
-        """Return acceleration as ``astropy.Quantity`` in meters/second^2."""
-
-        return self.get_a_np(time, frame=frame) * (u.m / (u.s**2))
-
-    def get_pv(
-        self,
-        time: Union[Time, float, int, np.ndarray, u.Quantity],
-        frame: Union[Any, str, None] = None,
-    ) -> tuple[u.Quantity, u.Quantity]:
-        """Return ``(position, velocity)`` as ``astropy.Quantity`` objects."""
-
-        p, v = self.get_pv_np(time, frame=frame)
-        return p * u.m, v * (u.m / u.s)
-
-    def get_pva(
-        self,
-        time: Union[Time, float, int, np.ndarray, u.Quantity],
-        frame: Union[Any, str, None] = None,
-    ) -> tuple[u.Quantity, u.Quantity, u.Quantity]:
-        """Return ``(position, velocity, acceleration)`` as quantities."""
-
-        p, v, a = self.get_pva_np(time, frame=frame)
-        return p * u.m, v * (u.m / u.s), a * (u.m / (u.s**2))
-
-    def get_geodetic(
-        self,
-        time: Union[Time, float, int, np.ndarray, u.Quantity],
-        ellipsoid=None,
-    ) -> tuple[u.Quantity, u.Quantity, u.Quantity]:
-        """Return geodetic ``(lat, lon, alt)`` as ``(deg, deg, m)`` quantities."""
-
-        lat, lon, alt = self.get_geodetic_np(time, ellipsoid=ellipsoid)
-        return lat * u.deg, lon * u.deg, alt * u.m
-
-    def get_attitude(
-        self, time: Union[Time, float, int, np.ndarray, u.Quantity]
-    ) -> np.ndarray:
-        """Return attitude quaternions as numpy array(s) ``[q0, q1, q2, q3]``."""
-
-        return self.get_attitude_np(time)
 
     def plot(self, **kwargs):
         """Plot this orbit using :func:`nstk.plotting.plot_orbits`.
@@ -1498,37 +1597,19 @@ class Orbit(OrbitCreationMixin):
         key = fields.strip().lower()
 
         if key == "p":
-            out = (
-                self.get_p(time, frame=frame)
-                if as_quantity
-                else self.get_p_np(time, frame=frame)
-            )
+            out = self.get_p(time, frame=frame, as_quantity=as_quantity)
             return {"p": out}
         if key == "v":
-            out = (
-                self.get_v(time, frame=frame)
-                if as_quantity
-                else self.get_v_np(time, frame=frame)
-            )
+            out = self.get_v(time, frame=frame, as_quantity=as_quantity)
             return {"v": out}
         if key == "a":
-            out = (
-                self.get_a(time, frame=frame)
-                if as_quantity
-                else self.get_a_np(time, frame=frame)
-            )
+            out = self.get_a(time, frame=frame, as_quantity=as_quantity)
             return {"a": out}
         if key == "pv":
-            if as_quantity:
-                p, v = self.get_pv(time, frame=frame)
-            else:
-                p, v = self.get_pv_np(time, frame=frame)
+            p, v = self.get_pv(time, frame=frame, as_quantity=as_quantity)
             return {"p": p, "v": v}
         if key == "pva":
-            if as_quantity:
-                p, v, a = self.get_pva(time, frame=frame)
-            else:
-                p, v, a = self.get_pva_np(time, frame=frame)
+            p, v, a = self.get_pva(time, frame=frame, as_quantity=as_quantity)
             return {"p": p, "v": v, "a": a}
 
         raise ValueError("fields must be one of: 'p', 'v', 'a', 'pv', 'pva'")
@@ -1563,12 +1644,12 @@ if __name__ == "__main__":
     ts = Time(epoch.unix + dt_s, format="unix", scale="utc")
 
     # Warmup
-    orbit.get_pv_np(dt_s[:128], frame="gcrf")
-    orbit.get_geodetic_np(dt_s[:128])
-    orbit.get_attitude_np(dt_s[:128])
+    orbit.get_pv(dt_s[:128], frame="gcrf", as_quantity=False)
+    orbit.get_geodetic(dt_s[:128], as_quantity=False)
+    orbit.get_attitude(dt_s[:128])
 
     t0 = perf_counter()
-    p_np, v_np = orbit.get_pv_np(dt_s, frame="gcrf")
+    p_np, v_np = orbit.get_pv(dt_s, frame="gcrf", as_quantity=False)
     t1 = perf_counter()
 
     t2 = perf_counter()
@@ -1576,18 +1657,18 @@ if __name__ == "__main__":
     t3 = perf_counter()
 
     t4 = perf_counter()
-    lat, lon, alt = orbit.get_geodetic_np(dt_s)
+    lat, lon, alt = orbit.get_geodetic(dt_s, as_quantity=False)
     t5 = perf_counter()
 
     t6 = perf_counter()
-    q = orbit.get_attitude_np(dt_s)
+    q = orbit.get_attitude(dt_s)
     t7 = perf_counter()
 
     n = len(dt_s)
-    print(f"get_pv_np ({n} pts): {t1 - t0:.3f} s")
+    print(f"get_pv raw ({n} pts): {t1 - t0:.3f} s")
     print(f"get_pv quantity ({n} pts): {t3 - t2:.3f} s")
-    print(f"get_geodetic_np ({n} pts): {t5 - t4:.3f} s")
-    print(f"get_attitude_np ({n} pts): {t7 - t6:.3f} s")
+    print(f"get_geodetic raw ({n} pts): {t5 - t4:.3f} s")
+    print(f"get_attitude raw ({n} pts): {t7 - t6:.3f} s")
     print("outputs:", p_np.shape, v_np.shape, p_q.shape, v_q.shape, lat.shape, q.shape)
     # ------------------------------------------------------------------
     # Benchmark section: analytical vs numerical (DP853 + force models)
@@ -1611,9 +1692,9 @@ if __name__ == "__main__":
     orb_two_body = Orbit.from_kepler_two_body(**common)
     tb1 = perf_counter()
 
-    orb_two_body.get_pv_np(bench_dt_s[:64], frame="gcrf")
+    orb_two_body.get_pv(bench_dt_s[:64], frame="gcrf", as_quantity=False)
     tb2 = perf_counter()
-    r_tb, v_tb = orb_two_body.get_pv_np(bench_dt_s, frame="gcrf")
+    r_tb, v_tb = orb_two_body.get_pv(bench_dt_s, frame="gcrf", as_quantity=False)
     tb3 = perf_counter()
 
     num0 = perf_counter()
@@ -1630,9 +1711,9 @@ if __name__ == "__main__":
     )
     num1 = perf_counter()
 
-    orb_num.get_pv_np(bench_dt_s[:64], frame="gcrf")
+    orb_num.get_pv(bench_dt_s[:64], frame="gcrf", as_quantity=False)
     num2 = perf_counter()
-    r_num, v_num = orb_num.get_pv_np(bench_dt_s, frame="gcrf")
+    r_num, v_num = orb_num.get_pv(bench_dt_s, frame="gcrf", as_quantity=False)
     num3 = perf_counter()
 
     print(f"samples: {bench_n}")
@@ -1644,7 +1725,7 @@ if __name__ == "__main__":
     print("numerical output:", r_num.shape, v_num.shape)
 
     # Optional quick consistency indicator at epoch over shared frame.
-    p0_tb, v0_tb = orb_two_body.get_pv_np(0.0, frame="gcrf")
-    p0_num, v0_num = orb_num.get_pv_np(0.0, frame="gcrf")
+    p0_tb, v0_tb = orb_two_body.get_pv(0.0, frame="gcrf", as_quantity=False)
+    p0_num, v0_num = orb_num.get_pv(0.0, frame="gcrf", as_quantity=False)
     print("epoch |dr| (m):", float(np.linalg.norm(p0_tb - p0_num)))
     print("epoch |dv| (m/s):", float(np.linalg.norm(v0_tb - v0_num)))

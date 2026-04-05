@@ -142,7 +142,7 @@ def _relative_luminance(color: Any) -> float:
 
 
 def _resolve_orbit_plot_style(map_style: str | MapStyle | None) -> _OrbitPlotStyle:
-    style = get_map_style("dark_detailed" if map_style is None else map_style)
+    style = get_map_style("dark" if map_style is None else map_style)
     dark_background = _relative_luminance(style.theme.figure_face) < 0.45
     contrast = "white" if dark_background else "black"
     panel_blend = 0.08 if dark_background else 0.06
@@ -251,7 +251,7 @@ def _extract_keplerian_summary(orbit: Any) -> dict[str, str]:
 
 
 def _coerce_orbit_list(orbits: Any) -> list[Any]:
-    if hasattr(orbits, "get_p_np"):
+    if hasattr(orbits, "get_p"):
         out = [orbits]
     elif isinstance(orbits, Iterable):
         out = list(orbits)
@@ -261,7 +261,7 @@ def _coerce_orbit_list(orbits: Any) -> list[Any]:
     if not out:
         raise ValueError("orbits must contain at least one Orbit")
     for orbit in out:
-        if not hasattr(orbit, "get_p_np"):
+        if not hasattr(orbit, "get_p"):
             raise TypeError("all items in orbits must be Orbit-like objects")
     return out
 
@@ -1099,6 +1099,14 @@ def _add_bottom_legend(fig: Any, ax: Any, handles: Sequence[Line2D], plot_style:
     legend.set_in_layout(False)
     _style_legend(legend, plot_style)
 
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    legend_bbox = legend.get_window_extent(renderer=renderer).transformed(fig.transFigure.inverted())
+    ax_position = ax.get_position()
+    tight_bbox = ax.get_tightbbox(renderer=renderer).transformed(fig.transFigure.inverted())
+    label_overhang = max(0.0, ax_position.y0 - tight_bbox.y0)
+    _reserve_bottom_band(ax, band_top=legend_bbox.y1 + label_overhang)
+
 
 def _reserve_bottom_band(ax: Any, *, band_top: float) -> None:
     ax_position = ax.get_position()
@@ -1272,13 +1280,16 @@ def _sample_plot_windows(
         }
 
         if view == "3d":
-            points_km = np.asarray(orbit.get_p_np(query_s, frame=_PLOT_3D_FRAME), dtype=np.float64) / 1000.0
+            points_km = (
+                np.asarray(orbit.get_p(query_s, frame=_PLOT_3D_FRAME, as_quantity=False), dtype=np.float64)
+                / 1000.0
+            )
             if points_km.ndim != 2 or points_km.shape[1] != 3:
-                raise ValueError("orbit.get_p_np returned an unexpected shape")
+                raise ValueError("orbit.get_p returned an unexpected shape")
             window["points_km"] = points_km
             window["marker_xyz"] = points_km[-1]
         else:
-            lat_deg, lon_deg, alt_m = orbit.get_geodetic_np(query_s)
+            lat_deg, lon_deg, alt_m = orbit.get_geodetic(query_s, as_quantity=False)
             lat_arr = np.asarray(lat_deg, dtype=np.float64)
             lon_arr = np.asarray(lon_deg, dtype=np.float64)
             window["lat_deg"] = lat_arr
@@ -1691,7 +1702,7 @@ def plot_orbits(
     label_list = _coerce_labels(labels, len(orbit_list))
     color_list = _coerce_colors(colors, len(orbit_list))
     view_key = _coerce_view(view)
-    resolved_map_style = get_map_style("dark_detailed" if map_style is None else map_style)
+    resolved_map_style = get_map_style("dark" if map_style is None else map_style)
     resolved_figsize = _resolve_plot_figsize(view_key, figsize)
     sample_count = int(samples)
     alpha = _coerce_opacity(opacity)
