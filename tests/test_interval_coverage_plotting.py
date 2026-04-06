@@ -17,7 +17,6 @@ cartopy_geoaxes = pytest.importorskip("cartopy.mpl.geoaxes")
 
 from nstk.coverage import (
     BBoxDomain,
-    CoverageArray,
     CoverageField,
     CoverageTargets,
     CoverageTimeline,
@@ -32,7 +31,6 @@ from nstk.plotting import (
     plot_coverage_ecdf,
     plot_coverage_histogram,
     plot_coverage_map,
-    plot_coverage_small_multiples,
     plot_target_timeline,
 )
 from nstk.plotting.map import ExtentConfig
@@ -119,7 +117,6 @@ def _assert_global_coastline_overlay(fig: Figure, ax: cartopy_geoaxes.GeoAxes) -
 def test_generic_coverage_plotting_helpers_return_figures_and_axes() -> None:
     coverage = _coverage()
     field = coverage.access_duration(unit="minutes")
-    stack = coverage.access_duration(min_assets=[1, 2], unit="minutes")
     timeline = coverage.target(index=0).timeline()
 
     map_view = plot_coverage_map(field, map_cfg=LIGHT_DETAILED, title="Coverage")
@@ -142,11 +139,6 @@ def test_generic_coverage_plotting_helpers_return_figures_and_axes() -> None:
     assert ax_ecdf.get_title() == "ECDF"
     plt.close(fig_ecdf)
 
-    fig_stack, axes_stack = plot_coverage_small_multiples(stack, dim="min_assets", map_cfg=LIGHT_DETAILED)
-    assert isinstance(fig_stack, Figure)
-    assert np.atleast_1d(axes_stack).size >= 2
-    plt.close(fig_stack)
-
     fig_timeline, axes_timeline = plot_target_timeline(timeline, title="Target Timeline")
     assert isinstance(fig_timeline, Figure)
     assert len(fig_timeline.axes) == 2
@@ -156,7 +148,6 @@ def test_generic_coverage_plotting_helpers_return_figures_and_axes() -> None:
 def test_result_object_plot_methods_delegate_to_generic_plotting() -> None:
     coverage = _coverage()
     field = coverage.max_asset()
-    stack = coverage.access_duration(min_assets=[1, 2], unit="minutes")
     timeline = coverage.target(index=0).timeline()
 
     map_view = field.plot(map_cfg=LIGHT_DETAILED)
@@ -165,22 +156,13 @@ def test_result_object_plot_methods_delegate_to_generic_plotting() -> None:
     assert isinstance(fig_field, Figure)
     plt.close(fig_field)
 
-    fig_stack, _ = stack.plot_small_multiples(dim="min_assets", map_cfg=LIGHT_DETAILED)
-    assert isinstance(fig_stack, Figure)
-    plt.close(fig_stack)
-
     fig_timeline, _ = timeline.plot()
     assert isinstance(fig_timeline, Figure)
     plt.close(fig_timeline)
 
 
 def test_plot_coverage_histogram_handles_near_identical_float_maxima() -> None:
-    arr = CoverageArray(
-        values=np.array([96.0] * 9 + [96.00000000000001], dtype=np.float64),
-        dims=("sample",),
-        coords={"sample": np.arange(10, dtype=np.int64)},
-        label="Synthetic Access",
-    )
+    arr = np.array([96.0] * 9 + [96.00000000000001], dtype=np.float64)
 
     fig, ax = plot_coverage_histogram(arr, bins=30, title="Histogram")
     assert isinstance(fig, Figure)

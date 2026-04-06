@@ -21,7 +21,7 @@ from .domains import (
 )
 from .metrics import CompiledMetric
 from .observers import Observer, ObserverSource
-from .results import CoverageArray, CoverageField, CoverageResult, CoverageStack, TargetTimeline
+from .results import CoverageField, CoverageResult, TargetTimeline
 from .store import IntervalStore, PairChannelStore, TimeGateStore
 from .targets import (
     CoverageTargets,
@@ -40,10 +40,8 @@ __all__ = [
     "CompositeDomain",
     "ConstraintSet",
     "CountryDomain",
-    "CoverageArray",
     "CoverageField",
     "CoverageResult",
-    "CoverageStack",
     "CoverageTargetSelection",
     "CoverageTargets",
     "CoverageTimeline",

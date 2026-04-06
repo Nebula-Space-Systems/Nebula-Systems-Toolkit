@@ -59,107 +59,10 @@ class CoverageResult:
 
 
 @dataclass(frozen=True)
-class CoverageArray(CoverageResult):
+class CoverageField(CoverageResult):
     values: np.ndarray = field(default_factory=lambda: np.empty(0))
-    dims: tuple[str, ...] = field(default_factory=tuple)
-    coords: dict[str, np.ndarray] = field(default_factory=dict)
     unit: str | None = None
     label: str | None = None
-
-    def to_numpy(self, **kwargs: Any) -> np.ndarray:
-        return np.asarray(self.values)
-
-    def to_records(self) -> list[dict[str, Any]]:
-        return [{"index": int(i), "value": float(v)} for i, v in enumerate(np.asarray(self.values).ravel())]
-
-    def sel(self, **coords: Any) -> "CoverageArray | CoverageField | CoverageStack":
-        values = np.asarray(self.values)
-        dims = list(self.dims)
-        new_coords = {key: np.asarray(val) for key, val in self.coords.items()}
-        for dim_name, wanted in coords.items():
-            if dim_name not in dims:
-                raise KeyError(f"{dim_name!r} is not a dimension on this array")
-            axis = dims.index(dim_name)
-            coord_values = np.asarray(new_coords[dim_name])
-            matches = np.where(coord_values == wanted)[0]
-            if matches.size != 1:
-                raise KeyError(f"Could not select a unique value for {dim_name}={wanted!r}")
-            values = np.take(values, int(matches[0]), axis=axis)
-            dims.pop(axis)
-            new_coords.pop(dim_name)
-        return _wrap_array(
-            values=values,
-            dims=tuple(dims),
-            coords=new_coords,
-            targets=self.targets,
-            unit=self.unit,
-            label=self.label,
-            attrs=self.attrs,
-            metric_name=getattr(self, "metric_name", "coverage_metric"),
-            window_start_s=getattr(self, "window_start_s", 0.0),
-            window_stop_s=getattr(self, "window_stop_s", 0.0),
-            fill_value=getattr(self, "fill_value", None),
-        )
-
-    def reduce(
-        self,
-        dim: str,
-        op: str,
-        *,
-        weights: np.ndarray | None = None,
-    ) -> "CoverageArray | CoverageField | CoverageStack":
-        if dim not in self.dims:
-            raise KeyError(f"{dim!r} is not a dimension on this array")
-        axis = self.dims.index(dim)
-        values = np.asarray(self.values, dtype=np.float64)
-        if op.lower() in {"mean", "average"} and weights is not None:
-            result = np.average(values, axis=axis, weights=np.asarray(weights, dtype=np.float64))
-        elif op.lower() == "min":
-            result = np.min(values, axis=axis)
-        elif op.lower() == "max":
-            result = np.max(values, axis=axis)
-        elif op.lower() == "std":
-            result = np.std(values, axis=axis)
-        elif op.lower().startswith("p"):
-            result = np.percentile(values, float(op.lower()[1:]), axis=axis)
-        else:
-            raise ValueError(f"Unsupported reduction op: {op!r}")
-        dims = tuple(name for name in self.dims if name != dim)
-        coords = {key: value for key, value in self.coords.items() if key != dim}
-        return _wrap_array(
-            values=result,
-            dims=dims,
-            coords=coords,
-            targets=self.targets if "target" in dims else None,
-            unit=self.unit,
-            label=self.label,
-            attrs=self.attrs,
-            metric_name=getattr(self, "metric_name", "coverage_metric"),
-            window_start_s=getattr(self, "window_start_s", 0.0),
-            window_stop_s=getattr(self, "window_stop_s", 0.0),
-            fill_value=getattr(self, "fill_value", None),
-        )
-
-    def to_xarray(self) -> Any:
-        try:
-            import xarray as xr
-        except Exception as exc:  # pragma: no cover - xarray is optional
-            raise RuntimeError("xarray is not installed") from exc
-        return xr.DataArray(self.values, dims=self.dims, coords=self.coords, attrs=dict(self.attrs))
-
-    def plot_histogram(self, **kwargs: Any) -> tuple[Any, Any]:
-        from .plotting import plot_coverage_histogram
-
-        return plot_coverage_histogram(self, **kwargs)
-
-    def plot_ecdf(self, **kwargs: Any) -> tuple[Any, Any]:
-        from .plotting import plot_coverage_ecdf
-
-        return plot_coverage_ecdf(self, **kwargs)
-
-
-@dataclass(frozen=True)
-class CoverageField(CoverageArray):
     metric_name: str = "coverage_metric"
     window_start_s: float = 0.0
     window_stop_s: float = 0.0
@@ -173,10 +76,20 @@ class CoverageField(CoverageArray):
             raise ValueError("CoverageField requires CoverageTargets")
         if values.shape != (self.targets.n_targets,):
             raise ValueError("CoverageField.values must match the number of targets")
-        if not self.dims:
-            object.__setattr__(self, "dims", ("target",))
-        if not self.coords:
-            object.__setattr__(self, "coords", {"target": np.arange(self.targets.n_targets, dtype=np.int64)})
+        object.__setattr__(self, "values", values)
+
+    def to_numpy(self, **kwargs: Any) -> np.ndarray:
+        return np.asarray(self.values)
+
+    def plot_histogram(self, **kwargs: Any) -> tuple[Any, Any]:
+        from .plotting import plot_coverage_histogram
+
+        return plot_coverage_histogram(self, **kwargs)
+
+    def plot_ecdf(self, **kwargs: Any) -> tuple[Any, Any]:
+        from .plotting import plot_coverage_ecdf
+
+        return plot_coverage_ecdf(self, **kwargs)
 
     def plot_map(
         self,
@@ -398,77 +311,6 @@ class CoverageField(CoverageArray):
 
 
 @dataclass(frozen=True)
-class CoverageStack(CoverageArray):
-    metric_name: str = "coverage_metric"
-
-    def __post_init__(self) -> None:
-        if "target" not in self.dims:
-            raise ValueError("CoverageStack must include a 'target' dimension")
-
-    def plot_small_multiples(
-        self,
-        *,
-        dim: str,
-        style: str | "MapStyle" | None = None,
-        theme: str | "MapConfig" | "MapStyle" | None = "light_detailed",
-        view: "MapView" | None = None,
-        projection: str | "ProjectionConfig" | None = None,
-        extent: Any = None,
-        pad_deg: float = 0.0,
-        grid: bool | None = None,
-        coastlines: bool | None = None,
-        borders: bool | None = None,
-        frame: bool | None = None,
-        cfeature_scale: "CFeatureScale" | None = None,
-        map_cfg: "MapConfig" | None = None,
-        ncols: int = 2,
-        cmap: str = "viridis",
-        vmin: float | None = None,
-        vmax: float | None = None,
-        colorbar: bool = True,
-        colorbar_label: str | None = None,
-        alpha: float = 0.82,
-        outline: bool = True,
-        outline_color: str = "#111111",
-        outline_width: float = 0.8,
-        outline_alpha: float = 0.95,
-        point_size: float = 16.0,
-        render: str = "auto",
-    ) -> tuple[Any, Any]:
-        from .plotting import plot_coverage_small_multiples
-
-        return plot_coverage_small_multiples(
-            self,
-            dim=dim,
-            style=style,
-            theme=theme,
-            view=view,
-            projection=projection,
-            extent=extent,
-            pad_deg=pad_deg,
-            grid=grid,
-            coastlines=coastlines,
-            borders=borders,
-            frame=frame,
-            cfeature_scale=cfeature_scale,
-            map_cfg=map_cfg,
-            ncols=ncols,
-            cmap=cmap,
-            vmin=vmin,
-            vmax=vmax,
-            colorbar=colorbar,
-            colorbar_label=colorbar_label,
-            alpha=alpha,
-            outline=outline,
-            outline_color=outline_color,
-            outline_width=outline_width,
-            outline_alpha=outline_alpha,
-            point_size=point_size,
-            render=render,
-        )
-
-
-@dataclass(frozen=True)
 class TargetTimeline(CoverageResult):
     target_index: int = 0
     target_label: str | None = None
@@ -525,12 +367,10 @@ class TargetTimeline(CoverageResult):
         return plot_target_timeline(self, **kwargs)
 
 
-def _wrap_array(
+def _build_coverage_field(
     *,
     values: np.ndarray,
-    dims: tuple[str, ...],
-    coords: dict[str, np.ndarray],
-    targets: CoverageTargets | None,
+    targets: CoverageTargets,
     unit: str | None,
     label: str | None,
     attrs: dict[str, Any],
@@ -538,48 +378,28 @@ def _wrap_array(
     window_start_s: float = 0.0,
     window_stop_s: float = 0.0,
     fill_value: float | int | None = None,
-) -> CoverageArray | CoverageField | CoverageStack:
+) -> CoverageField:
     array = np.asarray(values)
-    if dims == ("target",):
-        return CoverageField(
-            targets=targets,
-            values=array.astype(np.float64 if np.issubdtype(array.dtype, np.floating) else array.dtype),
-            dims=dims,
-            coords=coords,
-            unit=unit,
-            label=label,
-            attrs=dict(attrs),
-            metric_name=metric_name,
-            window_start_s=float(window_start_s),
-            window_stop_s=float(window_stop_s),
-            fill_value=fill_value,
+    if array.ndim != 1:
+        raise ValueError(
+            "Coverage metrics must produce one value per target. "
+            f"Got shape {array.shape!r} for metric {metric_name!r}."
         )
-    if "target" in dims:
-        return CoverageStack(
-            targets=targets,
-            values=array,
-            dims=dims,
-            coords=coords,
-            unit=unit,
-            label=label,
-            attrs=dict(attrs),
-            metric_name=metric_name,
-        )
-    return CoverageArray(
+    return CoverageField(
         targets=targets,
-        values=array,
-        dims=dims,
-        coords=coords,
+        values=array.astype(np.float64 if np.issubdtype(array.dtype, np.floating) else array.dtype),
         unit=unit,
         label=label,
         attrs=dict(attrs),
+        metric_name=metric_name,
+        window_start_s=float(window_start_s),
+        window_stop_s=float(window_stop_s),
+        fill_value=fill_value,
     )
 
 
 __all__ = [
     "CoverageResult",
-    "CoverageArray",
     "CoverageField",
-    "CoverageStack",
     "TargetTimeline",
 ]

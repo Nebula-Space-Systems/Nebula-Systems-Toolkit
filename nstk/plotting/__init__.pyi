@@ -4,7 +4,6 @@ from .coverage import (
     plot_coverage_ecdf as plot_coverage_ecdf,
     plot_coverage_histogram as plot_coverage_histogram,
     plot_coverage_map as plot_coverage_map,
-    plot_coverage_small_multiples as plot_coverage_small_multiples,
     plot_target_timeline as plot_target_timeline,
 )
 from .country_shapes import (
@@ -100,7 +99,6 @@ __all__ = [
     "plot_coverage_ecdf",
     "plot_coverage_histogram",
     "plot_coverage_map",
-    "plot_coverage_small_multiples",
     "plot_orbits",
     "plot_target_timeline",
     "register_map_style",

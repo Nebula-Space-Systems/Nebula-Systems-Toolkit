@@ -57,7 +57,6 @@ def test_metric_methods_return_inspectable_result_objects() -> None:
     coverage = _coverage()
 
     duration = coverage.access_duration(min_assets=1, unit="minutes")
-    stack = coverage.access_duration(min_assets=[1, 2], unit="minutes")
     max_asset = coverage.max_asset()
     min_asset = coverage.min_asset()
     mtta = coverage.mtta(unit="minutes")
@@ -66,8 +65,6 @@ def test_metric_methods_return_inspectable_result_objects() -> None:
     separation = coverage.access_separation(max_separation_s=2000.0)
 
     assert duration.values.shape == (coverage.target_set.n_targets,)
-    assert stack.values.shape == (2, coverage.target_set.n_targets)
-    assert stack.dims == ("min_assets", "target")
     assert max_asset.metric_name == "max_asset"
     assert min_asset.values.shape == duration.values.shape
     assert mtta.unit == "minutes"
@@ -76,6 +73,13 @@ def test_metric_methods_return_inspectable_result_objects() -> None:
     assert separation.values.shape == duration.values.shape
     assert len(duration.to_records()) == coverage.target_set.n_targets
     assert np.isfinite(duration.reduce_targets("mean"))
+
+
+def test_access_duration_requires_scalar_min_assets() -> None:
+    coverage = _coverage()
+
+    with pytest.raises(TypeError, match="single integer min_assets"):
+        coverage.access_duration(min_assets=[1, 2], unit="minutes")
 
 
 def test_observer_subset_rescoring_matches_fresh_recompute() -> None:
@@ -186,6 +190,26 @@ def test_compiled_metric_and_python_side_analysis_hooks_work() -> None:
 
     max_concurrency = coverage.analyze(lambda cov: cov.max_asset().reduce_targets("max", weights=None))
     assert max_concurrency >= 1.0
+
+
+def test_compiled_metric_must_return_one_value_per_target() -> None:
+    coverage = _coverage()
+
+    def invalid_kernel(
+        pair_offsets: np.ndarray,
+        start_times: np.ndarray,
+        stop_times: np.ndarray,
+        n_observers: int,
+        n_targets: int,
+        time_start: float,
+        time_stop: float,
+    ) -> np.ndarray:
+        return np.zeros((2, n_targets), dtype=np.float64)
+
+    metric = CompiledMetric(name="invalid_shape", kernel=invalid_kernel)
+
+    with pytest.raises(ValueError, match="one value per target"):
+        coverage.evaluate(metric)
 
 
 def test_result_objects_support_regional_reductions_and_target_timeline_analysis() -> None:

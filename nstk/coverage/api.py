@@ -37,7 +37,7 @@ from .diagnostics import CoverageDiagnostics
 from .domains import GlobalEarthDomain, TargetDomain, coerce_domain
 from .metrics import CompiledMetric
 from .observers import Observer, resolve_observers
-from .results import CoverageArray, CoverageField, CoverageStack, TargetTimeline, _wrap_array
+from .results import CoverageField, TargetTimeline, _build_coverage_field
 from .store import (
     IntervalStore,
     PairChannelStore,
@@ -493,19 +493,12 @@ class _CoverageAnalysisMixin:
         metric_name: str,
         label: str | None,
         unit: str | None,
-        dims: tuple[str, ...] = ("target",),
-        coords: dict[str, np.ndarray] | None = None,
         fill_value: float | int | None = None,
-    ) -> CoverageArray | CoverageField | CoverageStack:
-        coord_map = dict(coords or {})
-        if "target" in dims and "target" not in coord_map:
-            coord_map["target"] = np.arange(self.target_set.n_targets, dtype=np.int64)
+    ) -> CoverageField:
         window_start_s, window_stop_s = self._selected_window()
-        return _wrap_array(
+        return _build_coverage_field(
             values=np.asarray(values),
-            dims=dims,
-            coords=coord_map,
-            targets=self.target_set if "target" in dims else None,
+            targets=self.target_set,
             unit=unit,
             label=label,
             attrs={"timeline_label": self.timeline.label},
@@ -618,7 +611,7 @@ class _CoverageAnalysisMixin:
         self._ensure_channels({name})
         return self._channel_subset(name)
 
-    def evaluate(self, metric: CompiledMetric) -> CoverageArray | CoverageField | CoverageStack:
+    def evaluate(self, metric: CompiledMetric) -> CoverageField:
         values = metric.kernel(
             np.asarray(self.store.pair_offsets, dtype=np.int64),
             np.asarray(self.store.start_times, dtype=np.float64),
@@ -628,58 +621,26 @@ class _CoverageAnalysisMixin:
             float(self.store.time_start),
             float(self.store.time_stop),
         )
-        dims = tuple(metric.dims)
-        coords = dict(metric.coords or {})
-        if "target" in dims and "target" not in coords:
-            coords["target"] = np.arange(self.target_set.n_targets, dtype=np.int64)
         return self._wrap_metric_result(
             np.asarray(values),
             metric_name=metric.name,
             label=metric.label or metric.name,
             unit=metric.unit,
-            dims=dims,
-            coords=coords,
         )
 
     def access_duration(
         self,
         *,
-        min_assets: int | Sequence[int] = 1,
+        min_assets: int = 1,
         normalize: str | bool | None = None,
         unit: TimeUnit = "seconds",
-    ) -> CoverageField | CoverageStack:
+    ) -> CoverageField:
         store = to_access_interval_store(self.store)
         if isinstance(min_assets, Sequence) and not isinstance(min_assets, (str, bytes)):
-            n_values = np.asarray([int(v) for v in min_assets], dtype=np.int64)
-            out = np.empty((n_values.size, self.target_set.n_targets), dtype=np.float64)
-            for row_idx, n_req in enumerate(n_values):
-                raw = access_duration_by_target(
-                    store,
-                    N=int(n_req),
-                    normalize_to_day=bool(normalize == "day" or normalize is True),
-                    reshape=False,
-                )
-                if str(normalize).lower() in {"fraction", "coverage_fraction"}:
-                    raw, unit_label = _convert_duration(
-                        raw,
-                        window_s=float(self.store.time_stop - self.store.time_start),
-                        unit=unit,
-                        normalize=normalize,
-                    )
-                else:
-                    scale, unit_label = _time_scale(unit)
-                    raw = raw * scale
-                    if normalize == "day" or normalize is True:
-                        unit_label = f"{unit_label}/day"
-                out[row_idx] = raw
-            return self._wrap_metric_result(
-                out,
-                metric_name="access_duration",
-                label="Access Duration",
-                unit=unit_label,
-                dims=("min_assets", "target"),
-                coords={"min_assets": n_values},
-            )  # type: ignore[return-value]
+            raise TypeError(
+                "access_duration() now accepts a single integer min_assets value. "
+                "Call it separately for each threshold you want to compare."
+            )
 
         raw = access_duration_by_target(
             store,
@@ -699,7 +660,7 @@ class _CoverageAnalysisMixin:
             label=f"Access Duration (min_assets={int(min_assets)})",
             unit=unit_label,
             fill_value=0.0,
-        )  # type: ignore[return-value]
+        )
 
     def max_asset(self) -> CoverageField:
         values = calculate_max_asset(to_access_interval_store(self.store), reshape=False).astype(np.float64)
@@ -709,7 +670,7 @@ class _CoverageAnalysisMixin:
             label="Maximum Concurrent Observers",
             unit="count",
             fill_value=0.0,
-        )  # type: ignore[return-value]
+        )
 
     def min_asset(self) -> CoverageField:
         values = calculate_min_asset(to_access_interval_store(self.store), reshape=False).astype(np.float64)
@@ -719,7 +680,7 @@ class _CoverageAnalysisMixin:
             label="Minimum Concurrent Observers",
             unit="count",
             fill_value=0.0,
-        )  # type: ignore[return-value]
+        )
 
     def mtta(
         self,
@@ -743,7 +704,7 @@ class _CoverageAnalysisMixin:
             label=f"Mean Time To Access (min_assets={int(min_assets)})",
             unit=unit_label,
             fill_value=fill_value,
-        )  # type: ignore[return-value]
+        )
 
     def gap_duration(
         self,
@@ -770,7 +731,7 @@ class _CoverageAnalysisMixin:
             label=f"Gap Duration ({statistic}, min_assets={int(min_assets)})",
             unit=unit_label,
             fill_value=fill_value,
-        )  # type: ignore[return-value]
+        )
 
     def revisit_time(
         self,
@@ -804,7 +765,7 @@ class _CoverageAnalysisMixin:
             label=f"Revisit Time ({statistic}, min_assets={int(min_assets)})",
             unit=unit_label,
             fill_value=float(self.store.time_stop - self.store.time_start) * scale,
-        )  # type: ignore[return-value]
+        )
 
     def access_separation(
         self,
@@ -828,7 +789,7 @@ class _CoverageAnalysisMixin:
             label="Access Separation",
             unit="binary",
             fill_value=fill_value,
-        )  # type: ignore[return-value]
+        )
 
 
 class IntervalCoverage(_CoverageAnalysisMixin):

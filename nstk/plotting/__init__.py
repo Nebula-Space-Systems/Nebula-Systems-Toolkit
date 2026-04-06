@@ -53,7 +53,6 @@ _COVERAGE_EXPORTS = {
     "plot_coverage_ecdf",
     "plot_coverage_histogram",
     "plot_coverage_map",
-    "plot_coverage_small_multiples",
     "plot_target_timeline",
 }
 

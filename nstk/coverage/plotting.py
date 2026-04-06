@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING, Any
 
 import matplotlib.pyplot as plt
@@ -156,103 +155,6 @@ def plot_coverage_map(
         render=render,
     )
     return map_view
-
-
-def plot_coverage_small_multiples(
-    stack: Any,
-    *,
-    dim: str,
-    style: str | "MapStyle" | None = None,
-    theme: str | "MapConfig" | "MapStyle" | None = "light_detailed",
-    view: "MapView" | None = None,
-    projection: str | "ProjectionConfig" | None = None,
-    extent: Any = None,
-    pad_deg: float = 0.0,
-    grid: bool | None = None,
-    coastlines: bool | None = None,
-    borders: bool | None = None,
-    frame: bool | None = None,
-    cfeature_scale: "CFeatureScale" | None = None,
-    map_cfg: "MapConfig" | None = None,
-    ncols: int = 2,
-    cmap: str = "viridis",
-    vmin: float | None = None,
-    vmax: float | None = None,
-    colorbar: bool = True,
-    colorbar_label: str | None = None,
-    alpha: float = 0.82,
-    outline: bool = True,
-    outline_color: str = "#111111",
-    outline_width: float = 0.8,
-    outline_alpha: float = 0.95,
-    point_size: float = 16.0,
-    render: str = "auto",
-) -> tuple[Any, np.ndarray]:
-    from nstk.plotting.geo import _resolve_map_config
-    from nstk.plotting.map import _projection_from_config
-
-    if dim not in stack.dims:
-        raise ValueError(f"{dim!r} is not a dimension on this CoverageStack")
-    coord = np.asarray(stack.coords[dim])
-    n_panels = int(coord.size)
-    ncols = max(1, int(ncols))
-    nrows = int(math.ceil(n_panels / ncols))
-    base_cfg, _ = _resolve_map_config(
-        style=style,
-        theme=theme,
-        view=view,
-        projection=projection,
-        extent=extent,
-        grid=grid,
-        coastlines=coastlines,
-        borders=borders,
-        frame=frame,
-        cfeature_scale=cfeature_scale,
-        map_cfg=map_cfg,
-    )
-    fig, axes = plt.subplots(
-        nrows,
-        ncols,
-        figsize=(5.8 * ncols, 3.8 * nrows),
-        subplot_kw={"projection": _projection_from_config(base_cfg.projection)},
-    )
-    axes_arr = np.atleast_1d(axes).reshape(-1)
-    for ax in axes_arr[n_panels:]:
-        ax.set_visible(False)
-    for panel_idx, value in enumerate(coord):
-        field = stack.sel(**{dim: value})
-        plot_coverage_map(
-            field,
-            style=style,
-            theme=theme,
-            view=view,
-            projection=projection,
-            extent=extent,
-            pad_deg=pad_deg,
-            grid=grid,
-            coastlines=coastlines,
-            borders=borders,
-            frame=frame,
-            cfeature_scale=cfeature_scale,
-            map_cfg=map_cfg,
-            ax=axes_arr[panel_idx],
-            title=f"{field.metric_name}: {dim}={value}",
-            cmap=cmap,
-            vmin=vmin,
-            vmax=vmax,
-            colorbar=colorbar,
-            colorbar_label=colorbar_label,
-            alpha=alpha,
-            outline=outline,
-            outline_color=outline_color,
-            outline_width=outline_width,
-            outline_alpha=outline_alpha,
-            point_size=point_size,
-            render=render,
-        )
-    return fig, axes
-
-
 def plot_target_timeline(
     timeline: Any,
     *,
@@ -304,6 +206,5 @@ __all__ = [
     "plot_coverage_histogram",
     "plot_coverage_ecdf",
     "plot_coverage_map",
-    "plot_coverage_small_multiples",
     "plot_target_timeline",
 ]
