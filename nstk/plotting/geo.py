@@ -1310,7 +1310,7 @@ class GeoMap:
         if values is not None:
             scatter_kwargs.update({"c": np.asarray(values), "cmap": cmap, "vmin": vmin, "vmax": vmax})
         else:
-            scatter_kwargs["c"] = color if color is not None else "C0"
+            scatter_kwargs["c"] = color if color is not None else self.config.theme.trace_default
         artist = self.ax.scatter(lon, lat, **scatter_kwargs)
         layer = self._register_layer(
             kind="points",
@@ -1328,7 +1328,7 @@ class GeoMap:
         lat_deg: Any,
         *,
         src_crs: Any | None = None,
-        color: str = "C0",
+        color: str | None = None,
         alpha: float = 1.0,
         linewidth: float = 1.5,
         linestyle: str = "-",
@@ -1342,6 +1342,7 @@ class GeoMap:
     ) -> MapLayer:
         lon = np.asarray(lon_deg, dtype=np.float64)
         lat = np.asarray(lat_deg, dtype=np.float64)
+        trace_color = self.config.theme.trace_default if color is None else color
         crs = _coerce_crs(src_crs)
         bounds = _bounds_from_lonlat(lon, lat, src_crs=crs)
         if auto_extent:
@@ -1352,7 +1353,7 @@ class GeoMap:
             lon,
             src_crs=crs,
             linewidth=float(linewidth),
-            color=color,
+            color=trace_color,
             linestyle=linestyle,
             marker=marker,
             markersize=float(markersize),
@@ -1374,17 +1375,20 @@ class GeoMap:
         lat_deg: Any,
         *,
         src_crs: Any | None = None,
-        color: str = "C0",
+        color: str | None = None,
         opacity: float = 1.0,
         line_width: float = 1.5,
+        line_style: str | tuple[Any, ...] = "-",
         marker_latlon: tuple[float, float] | None = None,
         marker_size: float = 6.0,
+        marker: str = "o",
         label: str | None = None,
         name: str | None = None,
         auto_extent: bool = True,
     ) -> MapLayer:
         lon = np.asarray(lon_deg, dtype=np.float64)
         lat = np.asarray(lat_deg, dtype=np.float64)
+        ground_track_color = self.config.theme.trace_default if color is None else color
         crs = _coerce_crs(src_crs)
         bounds = _bounds_from_lonlat(lon, lat, src_crs=crs)
         if auto_extent:
@@ -1394,15 +1398,16 @@ class GeoMap:
             lon,
             lat,
             src_crs=crs,
-            color=color,
+            color=ground_track_color,
             alpha=0.9 * float(opacity),
             linewidth=float(line_width),
+            linestyle=line_style,
             label=label,
             auto_extent=False,
         )
         artists = list(trace_layer.artists)
         halo = None
-        marker = None
+        marker_artist = None
         if marker_latlon is not None:
             marker_lat, marker_lon = marker_latlon
             halo = self.ax.scatter(
@@ -1410,23 +1415,25 @@ class GeoMap:
                 [marker_lat],
                 transform=crs,
                 s=(float(marker_size) * _GROUND_TRACK_HALO_SCALE) ** 2,
-                c=[color],
+                c=[ground_track_color],
                 alpha=0.15 * float(opacity),
                 linewidths=0.0,
+                marker=marker,
                 zorder=4,
             )
-            marker = self.ax.scatter(
+            marker_artist = self.ax.scatter(
                 [marker_lon],
                 [marker_lat],
                 transform=crs,
                 s=float(marker_size) ** 2,
-                c=[color],
+                c=[ground_track_color],
                 alpha=float(opacity),
                 edgecolors="white",
                 linewidths=0.9,
+                marker=marker,
                 zorder=5,
             )
-            artists.extend([halo, marker])
+            artists.extend([halo, marker_artist])
         self.layers.pop()
         return self._register_layer(
             kind="ground_track",
@@ -1437,7 +1444,7 @@ class GeoMap:
                 "source_crs": crs,
                 "trace_artists": trace_layer.artists,
                 "halo": halo,
-                "marker": marker,
+                "marker": marker_artist,
             },
         )
 

@@ -29,6 +29,21 @@ ProjectionName = Literal[
 # Natural Earth feature scale options
 CFeatureScale = Literal["10m", "50m", "110m"]
 
+# Official Amazon Orange from Amazon's published logo usage guidelines.
+NSTK_HIGHLIGHT_ORANGE = "#FF9900"
+NSTK_DEFAULT_COLOR_CYCLE = (
+    NSTK_HIGHLIGHT_ORANGE,
+    "#1f77b4",
+    "#2ca02c",
+    "#d62728",
+    "#9467bd",
+    "#8c564b",
+    "#e377c2",
+    "#7f7f7f",
+    "#bcbd22",
+    "#17becf",
+)
+
 
 # -----------------------------------------------------------------------------
 # Config objects
@@ -98,7 +113,7 @@ class ThemeConfig:
     grid_label_fontsize: float = 11.0
 
     # Default trace color (used by callers if they want a theme default)
-    trace_default: str = "C1"
+    trace_default: str = NSTK_HIGHLIGHT_ORANGE
 
 
 @dataclass(frozen=True)
@@ -608,7 +623,7 @@ _DARK_THEME = ThemeConfig(
     outline_edge="#616161",
     grid_color="#CFCFCF",
     grid_label_color="#DFDFDF",
-    trace_default="C1",
+    trace_default=NSTK_HIGHLIGHT_ORANGE,
 )
 
 _LIGHT_THEME = ThemeConfig(
@@ -617,7 +632,7 @@ _LIGHT_THEME = ThemeConfig(
     outline_edge="#FFFFFF",
     grid_color="#424242",
     grid_label_color="#222222",
-    trace_default="C0",
+    trace_default=NSTK_HIGHLIGHT_ORANGE,
 )
 
 DARK_DETAILED_STYLE = MapStyle(
@@ -1001,6 +1016,7 @@ def _configure_basemap_axes(fig: Any, ax: Any, cfg: MapConfig) -> tuple[Any, Any
 
     fig.set_facecolor(t.figure_face)
     ax.set_facecolor(t.axes_face)
+    ax.set_prop_cycle(color=NSTK_DEFAULT_COLOR_CYCLE)
 
     # Extent/global (extent takes precedence if provided)
     if cfg.extent.extent is not None:
@@ -1284,7 +1300,7 @@ def add_geodesic_trace(
     *,
     # primary styling (common)
     linewidth: float = 1.5,
-    color: str | None = "C1",
+    color: str | None = NSTK_HIGHLIGHT_ORANGE,
     linestyle: str = "-",
     marker: str | None = None,
     markersize: float = 2.0,

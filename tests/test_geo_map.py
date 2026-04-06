@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pytest
 from matplotlib.collections import PathCollection, QuadMesh
+from matplotlib.colors import to_rgba
 from shapely.geometry import box, mapping
 
 from nstk.coverage import CoverageField, CoverageTargets, LatitudeLongitudeSampler
@@ -102,6 +103,21 @@ def test_geomap_fit_uses_layer_bounds() -> None:
     assert south <= -5.0
     assert north >= 25.0
     assert (east - west) < 80.0
+
+    plt.close(m.fig)
+
+
+def test_geomap_default_trace_and_point_colors_use_highlight_orange() -> None:
+    m = GeoMap(theme="light_detailed", extent="auto")
+    trace_layer = m.add_trace(np.array([-10.0, 10.0]), np.array([-1.0, 1.0]))
+    point_layer = m.add_points(np.array([-2.0, 2.0]), np.array([-1.0, 1.0]))
+
+    m.fig.canvas.draw()
+
+    assert to_rgba(trace_layer.artist.get_color()) == pytest.approx(to_rgba(map_module.NSTK_HIGHLIGHT_ORANGE))
+    facecolors = point_layer.artist.get_facecolors()
+    assert facecolors.shape[0] >= 1
+    assert tuple(facecolors[0]) == pytest.approx(to_rgba(map_module.NSTK_HIGHLIGHT_ORANGE))
 
     plt.close(m.fig)
 

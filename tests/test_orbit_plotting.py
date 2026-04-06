@@ -10,6 +10,7 @@ matplotlib.use("Agg")
 
 import astropy.units as u
 import numpy as np
+import pytest
 from astropy.time import Time
 from cartopy.mpl.geoaxes import GeoAxes
 from matplotlib.colors import to_rgba
@@ -22,7 +23,9 @@ import nstk.plotting as plotting
 import nstk.propagation as propagation
 import nstk.propagation.orbit as orbit_module
 from nstk.plotting import MapView, get_map_style, plot_orbits
+from nstk.plotting import map as map_module
 from nstk.plotting.orbits import (
+    _DEFAULT_COLORS,
     _make_info_text,
     _points_visible_from_view,
     _set_3d_globe_interaction,
@@ -131,6 +134,8 @@ def test_plot_orbits_multi_orbit_3d_defaults() -> None:
     legend = ax.get_legend()
     assert legend is not None
     assert [text.get_text() for text in legend.get_texts()] == ["Alpha", "Bravo"]
+    assert to_rgba(legend.legend_handles[0].get_color()) == pytest.approx(to_rgba(map_module.NSTK_HIGHLIGHT_ORANGE))
+    assert to_rgba(legend.legend_handles[1].get_color()) == pytest.approx(to_rgba("#55C1FF"))
     fig.canvas.draw()
     renderer = fig.canvas.get_renderer()
     legend_bbox = legend.get_window_extent(renderer=renderer).transformed(fig.transFigure.inverted())
@@ -138,6 +143,26 @@ def test_plot_orbits_multi_orbit_3d_defaults() -> None:
     assert legend_bbox.y1 <= axes_bbox.y0
     assert len(ax.collections) >= 5
     assert all("Keplerian period" not in text.get_text() for text in fig.texts)
+
+    plt.close(fig)
+
+
+def test_plot_orbits_multi_orbit_3d_distinguishes_repeated_colors() -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+    orbit_count = len(_DEFAULT_COLORS) + 2
+    orbits = [
+        _make_orbit(epoch=epoch, raan_deg=float(idx * 20), anomaly_deg=float(idx * 25))
+        for idx in range(orbit_count)
+    ]
+
+    fig, ax = plot_orbits(orbits, view="3d", samples=72, show=False)
+
+    legend = ax.get_legend()
+    assert legend is not None
+    handles = legend.legend_handles
+    assert to_rgba(handles[0].get_color()) == pytest.approx(to_rgba(handles[len(_DEFAULT_COLORS)].get_color()))
+    assert handles[0].get_linestyle() != handles[len(_DEFAULT_COLORS)].get_linestyle()
+    assert handles[0].get_marker() != handles[len(_DEFAULT_COLORS)].get_marker()
 
     plt.close(fig)
 
@@ -436,6 +461,8 @@ def test_plot_orbits_multi_orbit_2d_legend() -> None:
     legend = ax.get_legend()
     assert legend is not None
     assert [text.get_text() for text in legend.get_texts()] == ["Alpha", "Bravo"]
+    assert to_rgba(legend.legend_handles[0].get_color()) == pytest.approx(to_rgba(map_module.NSTK_HIGHLIGHT_ORANGE))
+    assert to_rgba(legend.legend_handles[1].get_color()) == pytest.approx(to_rgba("#55C1FF"))
     fig.canvas.draw()
     renderer = fig.canvas.get_renderer()
     legend_bbox = legend.get_window_extent(renderer=renderer).transformed(fig.transFigure.inverted())
@@ -448,6 +475,36 @@ def test_plot_orbits_multi_orbit_2d_legend() -> None:
     text_blob = "\n".join(text.get_text() for text in fig.texts)
     assert "Initial Keplerian Elements" not in text_blob
     assert "Keplerian period" not in text_blob
+
+    plt.close(fig)
+
+
+def test_plot_orbits_multi_orbit_2d_distinguishes_repeated_colors() -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+    orbit_count = len(_DEFAULT_COLORS) + 2
+    orbits = [
+        _make_orbit(epoch=epoch, raan_deg=float(idx * 18), anomaly_deg=float(idx * 22))
+        for idx in range(orbit_count)
+    ]
+
+    fig, ax = plot_orbits(
+        orbits,
+        view="2d",
+        duration=35.0 * u.min,
+        samples=80,
+        show=False,
+    )
+
+    legend = ax.get_legend()
+    assert legend is not None
+    handles = legend.legend_handles
+    wrapped_idx = len(_DEFAULT_COLORS)
+    assert to_rgba(handles[0].get_color()) == pytest.approx(to_rgba(handles[wrapped_idx].get_color()))
+    assert handles[0].get_linestyle() != handles[wrapped_idx].get_linestyle()
+    assert handles[0].get_marker() != handles[wrapped_idx].get_marker()
+    wrapped_color = to_rgba(handles[wrapped_idx].get_color())
+    matching_lines = [line for line in ax.lines if np.allclose(to_rgba(line.get_color()), wrapped_color)]
+    assert any(line.is_dashed() for line in matching_lines)
 
     plt.close(fig)
 

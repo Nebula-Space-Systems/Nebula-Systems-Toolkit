@@ -23,7 +23,7 @@ from mpl_toolkits.mplot3d.art3d import Line3DCollection
 from nstk.time_utils import normalize_time_to_epoch_seconds
 
 from .geo import GeoMap
-from .map import MapStyle, get_map_style
+from .map import MapStyle, NSTK_DEFAULT_COLOR_CYCLE, NSTK_HIGHLIGHT_ORANGE, get_map_style
 from ._cartopy_data import (
     configure_cartopy_data_dir,
     get_natural_earth_shapefile,
@@ -42,14 +42,24 @@ configure_cartopy_data_dir()
 _EARTH_RADIUS_M = 6378137.0
 _EARTH_RADIUS_KM = _EARTH_RADIUS_M / 1000.0
 _DEFAULT_COLORS = (
+    NSTK_HIGHLIGHT_ORANGE,
     "#55C1FF",
-    "#FF7A59",
     "#9D7CFF",
     "#3DDC97",
     "#FFD166",
     "#FF5DA2",
     "#A1E44D",
     "#C792EA",
+)
+_REPEATED_COLOR_STYLE_VARIANTS: tuple[tuple[str | tuple[Any, ...], str], ...] = (
+    ("-", "o"),
+    ((0, (7.0, 2.2)), "s"),
+    ((0, (4.2, 1.8, 1.2, 1.8)), "D"),
+    ((0, (1.2, 1.8)), "^"),
+    ((0, (8.0, 2.2, 1.2, 2.0, 1.2, 2.0)), "v"),
+    ((0, (3.0, 1.2, 1.0, 1.2, 1.0, 1.2)), "P"),
+    ((0, (9.0, 2.2)), "X"),
+    ((0, (2.4, 1.4)), "h"),
 )
 _MAX_LEGEND_ITEMS = 24
 _DEFAULT_2D_MARKER_SIZE = math.sqrt(42.0)
@@ -86,6 +96,13 @@ class _Orbit3DArtistSet:
     color: str
     opacity: float
     marker_edge_color: tuple[float, float, float, float]
+
+
+@dataclass(frozen=True)
+class _OrbitTraceStyle:
+    color: str
+    line_style: str | tuple[Any, ...]
+    marker: str
 
 
 @dataclass
@@ -280,6 +297,26 @@ def _coerce_colors(colors: Sequence[str] | None, count: int) -> list[str]:
     if colors is None:
         return [_DEFAULT_COLORS[idx % len(_DEFAULT_COLORS)] for idx in range(count)]
     return [str(color) for color in colors]
+
+
+def _assign_trace_styles(colors: Sequence[str]) -> list[_OrbitTraceStyle]:
+    seen_by_color: dict[tuple[float, float, float, float], int] = {}
+    styled: list[_OrbitTraceStyle] = []
+    for color in colors:
+        color_key = tuple(float(channel) for channel in to_rgba(color))
+        occurrence = seen_by_color.get(color_key, 0)
+        seen_by_color[color_key] = occurrence + 1
+        line_style, marker = _REPEATED_COLOR_STYLE_VARIANTS[
+            occurrence % len(_REPEATED_COLOR_STYLE_VARIANTS)
+        ]
+        styled.append(
+            _OrbitTraceStyle(
+                color=str(color),
+                line_style=line_style,
+                marker=marker,
+            )
+        )
+    return styled
 
 
 def _coerce_view(view: str) -> str:
@@ -820,6 +857,8 @@ def _create_3d_orbit_artists(
     points_km: np.ndarray,
     marker_xyz: np.ndarray,
     color: str,
+    line_style: str | tuple[Any, ...],
+    marker: str,
     linewidth: float,
     opacity: float,
     marker_area: float,
@@ -833,6 +872,7 @@ def _create_3d_orbit_artists(
         linewidth=linewidth * 2.0,
         alpha=0.18 * opacity,
         zorder=14,
+        linestyle=line_style,
     )
     core = _make_3d_line_collection(
         gid=f"nstk-orbit-trail-core-{index}",
@@ -840,6 +880,7 @@ def _create_3d_orbit_artists(
         linewidth=linewidth,
         alpha=0.96 * opacity,
         zorder=15,
+        linestyle=line_style,
     )
     ax.add_collection3d(glow, autolim=False)
     ax.add_collection3d(core, autolim=False)
@@ -864,6 +905,7 @@ def _create_3d_orbit_artists(
         c=[color],
         alpha=0.13 * opacity,
         linewidths=0.0,
+        marker=marker,
         depthshade=False,
         clip_on=False,
         zorder=18,
@@ -878,6 +920,7 @@ def _create_3d_orbit_artists(
         alpha=opacity,
         edgecolors=[marker_edge_color],
         linewidths=0.9,
+        marker=marker,
         depthshade=False,
         clip_on=False,
         zorder=19,
@@ -1260,7 +1303,7 @@ def _sample_plot_windows(
     start_time: Any,
     duration: Any,
     labels: list[str] | None,
-    colors: list[str],
+    styles: list[_OrbitTraceStyle],
     samples: int,
 ) -> list[dict[str, Any]]:
     windows: list[dict[str, Any]] = []
@@ -1269,11 +1312,13 @@ def _sample_plot_windows(
         duration_s = _coerce_duration_seconds(duration, orbit)
         query_s = start_s + np.linspace(0.0, duration_s, int(samples), dtype=np.float64)
         label = labels[idx] if labels is not None else (f"Orbit {idx + 1}" if len(orbit_list) > 1 else "Orbit")
-        color = colors[idx]
+        style = styles[idx]
         window = {
             "orbit": orbit,
             "label": label,
-            "color": color,
+            "color": style.color,
+            "line_style": style.line_style,
+            "marker": style.marker,
             "start_s": start_s,
             "duration_s": duration_s,
             "query_s": query_s,
@@ -1325,6 +1370,7 @@ def _render_3d(
     if ax is None:
         fig = plt.figure(figsize=figsize, facecolor=plot_style.figure_face)
         ax = fig.add_subplot(111, projection="3d")
+        ax.set_prop_cycle(color=NSTK_DEFAULT_COLOR_CYCLE)
     else:
         fig = ax.figure
         if not hasattr(ax, "zaxis"):
@@ -1343,6 +1389,8 @@ def _render_3d(
     orbit_artists: list[_Orbit3DArtistSet] = []
     for idx, window in enumerate(windows):
         color = window["color"]
+        line_style = window["line_style"]
+        marker = window["marker"]
         orbit_artists.append(
             _create_3d_orbit_artists(
                 ax,
@@ -1350,6 +1398,8 @@ def _render_3d(
                 points_km=window["points_km"],
                 marker_xyz=window["marker_xyz"],
                 color=color,
+                line_style=line_style,
+                marker=marker,
                 linewidth=trail_width,
                 opacity=opacity,
                 marker_area=marker_area,
@@ -1364,7 +1414,8 @@ def _render_3d(
                 [0],
                 color=color,
                 lw=trail_width,
-                marker="o",
+                linestyle=line_style,
+                marker=marker,
                 markersize=legend_marker_size,
                 markerfacecolor=color,
                 markeredgecolor="white",
@@ -1486,14 +1537,18 @@ def _render_2d(
     handles: list[Line2D] = []
     for window in windows:
         color = window["color"]
+        line_style = window["line_style"]
+        marker = window["marker"]
         geo_map.add_ground_track(
             window["lon_deg"],
             window["lat_deg"],
             color=color,
             opacity=opacity,
             line_width=trail_width,
+            line_style=line_style,
             marker_latlon=window["marker_latlon"],
             marker_size=marker_diameter,
+            marker=marker,
         )
         handles.append(
             Line2D(
@@ -1501,7 +1556,8 @@ def _render_2d(
                 [0],
                 color=color,
                 lw=trail_width,
-                marker="o",
+                linestyle=line_style,
+                marker=marker,
                 markersize=legend_marker_size,
                 markerfacecolor=color,
                 markeredgecolor="white",
@@ -1658,7 +1714,9 @@ def plot_orbits(
     duration
         Optional trail duration. Defaults to one Keplerian period per orbit.
     labels, colors
-        Optional per-orbit legend labels and colors.
+        Optional per-orbit legend labels and colors. When a color is reused,
+        NSTK automatically varies the trail line style and endpoint marker so
+        repeated colors remain distinguishable.
     samples
         Number of sample points per plotted trail. Must be at least 2.
     ax
@@ -1701,6 +1759,7 @@ def plot_orbits(
     orbit_list = _coerce_orbit_list(orbits)
     label_list = _coerce_labels(labels, len(orbit_list))
     color_list = _coerce_colors(colors, len(orbit_list))
+    style_list = _assign_trace_styles(color_list)
     view_key = _coerce_view(view)
     resolved_map_style = get_map_style("dark" if map_style is None else map_style)
     resolved_figsize = _resolve_plot_figsize(view_key, figsize)
@@ -1717,7 +1776,7 @@ def plot_orbits(
         start_time=start_time,
         duration=duration,
         labels=label_list,
-        colors=color_list,
+        styles=style_list,
         samples=sample_count,
     )
 
