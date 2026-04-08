@@ -8,7 +8,7 @@ from nstk.localization.particle_initialization import (
     los_mask_all_observers,
     spacing_radius,
 )
-from nstk.transforms._ecef2geodetic import ecef2geodetic_vec_xyz
+from nstk.transforms._ecef2geodetic import ecef2geodetic
 from nstk.transforms._geodetic2ecef import geodetic2ecef
 
 
@@ -37,7 +37,7 @@ _DIST_PARAMS = dict(
 @pytest.fixture(scope="module")
 def particle_distribution_sample():
     pts = make_coarse_candidates_ecef(**_DIST_PARAMS)
-    lat, lon, h = ecef2geodetic_vec_xyz(
+    lat, lon, h = ecef2geodetic(
         pts[:, 0].astype(np.float64),
         pts[:, 1].astype(np.float64),
         pts[:, 2].astype(np.float64),

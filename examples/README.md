@@ -56,4 +56,4 @@ Use these notebooks in order:
    - Compare `vvlh`, `lvlh_ccsds`, `lvlh`, `qsw`, and other Orekit LOFs
    - Configure attitudes with strings, `LOFType`, mappings, providers, and callables
 
-Legacy script examples are still available in this folder for direct `python` execution.
+These notebooks are the canonical examples for the repository.

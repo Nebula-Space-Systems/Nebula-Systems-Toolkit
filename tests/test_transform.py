@@ -5,55 +5,27 @@ import math
 
 import numpy as np
 import pytest
+from numba import njit
 
 import nstk.transforms as transforms
-from nstk.transforms._aer2ecef import aer2ecef, aer2ecef_vec_aer, aer2ecef_vec_aer3
+from nstk.transforms._aer2ecef import aer2ecef
 from nstk.transforms._aer2ecef import aer2enu
-from nstk.transforms._aer2geodetic import (
-    aer2geodetic,
-    aer2geodetic_vec_aer,
-    aer2geodetic_vec_aer3,
-)
-from nstk.transforms._ecef2aer import ecef2aer, ecef2aer_vec_xyz, enu2aer
+from nstk.transforms._aer2geodetic import aer2geodetic
+from nstk.transforms._ecef2aer import ecef2aer, enu2aer
 from nstk.transforms._ecef2enu import (
     ecef2enu,
     ecef2enu_delta,
-    ecef2enu_vec_ecef,
-    ecef2enu_vec_xyz,
     enu_basis_from_ecef_xyz,
 )
-from nstk.transforms._ecef2geodetic import (
-    WGS84_A,
-    _wrap_lon_pi,
-    ecef2geodetic,
-    ecef2geodetic_vec_ecef,
-    ecef2geodetic_vec_xyz,
-)
-from nstk.transforms._enu2ecef import (
-    enu2ecef,
-    enu2ecef_delta,
-    enu2ecef_vec_enu,
-    enu2ecef_vec_enu3,
-)
-from nstk.transforms._enu2geodetic import (
-    _enu2uvw,
-    enu2geodetic,
-    enu2geodetic_vec_enu,
-    enu2geodetic_vec_enu3,
-)
-from nstk.transforms._geodetic2aer import geodetic2aer, geodetic2aer_vec_llh
-from nstk.transforms._geodetic2ecef import (
-    WGS84_E2,
-    geodetic2ecef,
-    geodetic2ecef_vec_lla,
-    geodetic2ecef_vec_llh,
-)
+from nstk.transforms._ecef2geodetic import WGS84_A, _wrap_lon_pi, ecef2geodetic
+from nstk.transforms._enu2ecef import enu2ecef, enu2ecef_delta
+from nstk.transforms._enu2geodetic import _enu2uvw, enu2geodetic
+from nstk.transforms._geodetic2aer import geodetic2aer
+from nstk.transforms._geodetic2ecef import WGS84_E2, geodetic2ecef
 from nstk.transforms._geodetic2enu import (
     _uvw2enu,
     enu_basis_from_latlon,
     geodetic2enu,
-    geodetic2enu_vec_lla,
-    geodetic2enu_vec_llh,
 )
 
 
@@ -108,18 +80,18 @@ def test_aer2ecef() -> None:
     el = ((rng.random(n) * 1.2 - 0.2) * (np.pi / 2.0)).astype(np.float64)
     sr = (rng.random(n) * 2.0e6).astype(np.float64)
 
-    x, y, z = aer2ecef_vec_aer(az, el, sr, lat0, lon0, h0)
-    az2, el2, sr2 = ecef2aer_vec_xyz(x, y, z, lat0, lon0, h0)
+    x, y, z = aer2ecef(az, el, sr, lat0, lon0, h0)
+    az2, el2, sr2 = ecef2aer(x, y, z, lat0, lon0, h0)
 
     assert np.max(np.abs(_az_diff(az2, az))) < 2e-10
     assert np.max(np.abs(el2 - el)) < 2e-10
     assert np.max(np.abs(sr2 - sr)) < 2e-3
 
     aer3 = np.column_stack((az, el, sr)).astype(np.float64)
-    r = aer2ecef_vec_aer3(aer3, lat0, lon0, h0)
-    assert np.max(np.abs(r[:, 0] - x)) < 1e-9
-    assert np.max(np.abs(r[:, 1] - y)) < 1e-9
-    assert np.max(np.abs(r[:, 2] - z)) < 1e-9
+    x3, y3, z3 = aer2ecef(aer3, lat0_rad=lat0, lon0_rad=lon0, h0_m=h0)
+    assert np.max(np.abs(x3 - x)) < 1e-9
+    assert np.max(np.abs(y3 - y)) < 1e-9
+    assert np.max(np.abs(z3 - z)) < 1e-9
 
 
 def test_aer2geodetic() -> None:
@@ -137,15 +109,15 @@ def test_aer2geodetic() -> None:
     el = ((rng.random(n) * 1.0 - 0.2) * (np.pi / 2.0)).astype(np.float64)
     sr = (rng.random(n) * 1.5e6).astype(np.float64)
 
-    lat, lon, h = aer2geodetic_vec_aer(az, el, sr, lat0, lon0, h0)
-    az2, el2, sr2 = geodetic2aer_vec_llh(lat, lon, h, lat0, lon0, h0)
+    lat, lon, h = aer2geodetic(az, el, sr, lat0, lon0, h0)
+    az2, el2, sr2 = geodetic2aer(lat, lon, h, lat0, lon0, h0)
 
     assert np.max(np.abs(_az_diff(az2, az))) < 5e-8
     assert np.max(np.abs(el2 - el)) < 5e-8
     assert np.max(np.abs(sr2 - sr)) < 2e-2
 
     aer3 = np.column_stack((az, el, sr)).astype(np.float64)
-    lat3, lon3, h3 = aer2geodetic_vec_aer3(aer3, lat0, lon0, h0)
+    lat3, lon3, h3 = aer2geodetic(aer3, lat0_rad=lat0, lon0_rad=lon0, h0_m=h0)
 
     assert np.max(np.abs(lat3 - lat)) < 1e-12
     assert np.max(np.abs(_az_diff(lon3, lon))) < 1e-12
@@ -161,7 +133,7 @@ def test_ecef2aer() -> None:
     lon0 = np.deg2rad(15.0)
     h0 = 120.0
 
-    x0, y0, z0 = enu2ecef_vec_enu(
+    x0, y0, z0 = enu2ecef(
         np.array([0.0], dtype=np.float64),
         np.array([0.0], dtype=np.float64),
         np.array([0.0], dtype=np.float64),
@@ -177,10 +149,10 @@ def test_ecef2aer() -> None:
     n_comp = (rng.standard_normal(n) * 15000.0).astype(np.float64)
     u = (rng.standard_normal(n) * 800.0).astype(np.float64)
 
-    x, y, z = enu2ecef_vec_enu(e, n_comp, u, lat0, lon0, h0)
-    az1, el1, sr1 = ecef2aer_vec_xyz(x, y, z, lat0, lon0, h0)
+    x, y, z = enu2ecef(e, n_comp, u, lat0, lon0, h0)
+    az1, el1, sr1 = ecef2aer(x, y, z, lat0, lon0, h0)
 
-    e2, n2, u2 = ecef2enu_vec_xyz(x, y, z, lat0, lon0, h0)
+    e2, n2, u2 = ecef2enu(x, y, z, lat0, lon0, h0)
     az2 = np.empty(n, dtype=np.float64)
     el2 = np.empty(n, dtype=np.float64)
     sr2 = np.empty(n, dtype=np.float64)
@@ -214,24 +186,24 @@ def test_ecef2enu() -> None:
     n0 = (rng.standard_normal(n) * 20000.0).astype(np.float64)
     u0 = (rng.standard_normal(n) * 1000.0).astype(np.float64)
 
-    x, y, z = enu2ecef_vec_enu(e0, n0, u0, lat0, lon0, h0)
-    e1, n1, u1 = ecef2enu_vec_xyz(x, y, z, lat0, lon0, h0)
+    x, y, z = enu2ecef(e0, n0, u0, lat0, lon0, h0)
+    e1, n1, u1 = ecef2enu(x, y, z, lat0, lon0, h0)
 
     assert np.max(np.abs(e1 - e0)) < 2e-6
     assert np.max(np.abs(n1 - n0)) < 2e-6
     assert np.max(np.abs(u1 - u0)) < 2e-6
 
     r = np.column_stack((x, y, z)).astype(np.float64)
-    e2, n2, u2 = ecef2enu_vec_ecef(r, lat0, lon0, h0)
+    e2, n2, u2 = ecef2enu(r, lat0_rad=lat0, lon0_rad=lon0, h0_m=h0)
     assert np.max(np.abs(e2 - e0)) < 2e-6
     assert np.max(np.abs(n2 - n0)) < 2e-6
     assert np.max(np.abs(u2 - u0)) < 2e-6
 
     enu = np.column_stack((e0, n0, u0)).astype(np.float64)
-    r2 = enu2ecef_vec_enu3(enu, lat0, lon0, h0)
-    assert np.max(np.abs(r2[:, 0] - x)) < 1e-9
-    assert np.max(np.abs(r2[:, 1] - y)) < 1e-9
-    assert np.max(np.abs(r2[:, 2] - z)) < 1e-9
+    x2, y2, z2 = enu2ecef(enu, lat0_rad=lat0, lon0_rad=lon0, h0_m=h0)
+    assert np.max(np.abs(x2 - x)) < 1e-9
+    assert np.max(np.abs(y2 - y)) < 1e-9
+    assert np.max(np.abs(z2 - z)) < 1e-9
 
 
 def test_ecef2geodetic() -> None:
@@ -252,8 +224,8 @@ def test_ecef2geodetic() -> None:
     xw = np.array([1.0, 2.0], dtype=np.float64)
     yw = np.array([1.0, 2.0], dtype=np.float64)
     zw = np.array([1.0, 2.0], dtype=np.float64)
-    _ = ecef2geodetic_vec_xyz(xw, yw, zw)
-    _ = ecef2geodetic_vec_ecef(np.column_stack((xw, yw, zw)))
+    _ = ecef2geodetic(xw, yw, zw)
+    _ = ecef2geodetic(np.column_stack((xw, yw, zw)))
 
     lat, lon, h = ecef2geodetic(0.0, 0.0, 0.0)
     assert abs(lat) < 1e-15
@@ -295,7 +267,7 @@ def test_ecef2geodetic() -> None:
         assert abs(_ang_diff(lo, float(_wrap_pi(lon_true[i])))) < 5e-8
         assert abs(hi - float(h_true[i])) < 5e-2
 
-    lat_v, lon_v, h_v = ecef2geodetic_vec_xyz(
+    lat_v, lon_v, h_v = ecef2geodetic(
         x.astype(np.float64),
         y.astype(np.float64),
         z.astype(np.float64),
@@ -305,7 +277,7 @@ def test_ecef2geodetic() -> None:
     assert np.max(np.abs(h_v - h_true)) < 5e-2
 
     r = np.column_stack((x, y, z)).astype(np.float64)
-    lat_m, lon_m, h_m = ecef2geodetic_vec_ecef(r)
+    lat_m, lon_m, h_m = ecef2geodetic(r)
     assert np.max(np.abs(lat_m - lat_v)) == 0.0
     assert np.max(np.abs(_ang_diff(lon_m, lon_v))) == 0.0
     assert np.max(np.abs(h_m - h_v)) == 0.0
@@ -330,15 +302,16 @@ def test_enu2ecef() -> None:
     n_comp = (rng.standard_normal(n) * 10000.0).astype(np.float64)
     u = (rng.standard_normal(n) * 500.0).astype(np.float64)
 
-    x, y, z = enu2ecef_vec_enu(e, n_comp, u, lat0, lon0, h0)
-    e2, n2, u2 = ecef2enu_vec_xyz(x, y, z, lat0, lon0, h0)
+    x, y, z = enu2ecef(e, n_comp, u, lat0, lon0, h0)
+    e2, n2, u2 = ecef2enu(x, y, z, lat0, lon0, h0)
     assert np.max(np.abs(e2 - e)) < 2e-6
     assert np.max(np.abs(n2 - n_comp)) < 2e-6
     assert np.max(np.abs(u2 - u)) < 2e-6
 
     enu = np.column_stack((e, n_comp, u)).astype(np.float64)
-    r = enu2ecef_vec_enu3(enu, lat0, lon0, h0)
-    e3, n3, u3 = ecef2enu_vec_ecef(r, lat0, lon0, h0)
+    x3, y3, z3 = enu2ecef(enu, lat0_rad=lat0, lon0_rad=lon0, h0_m=h0)
+    r = np.column_stack((x3, y3, z3))
+    e3, n3, u3 = ecef2enu(r, lat0_rad=lat0, lon0_rad=lon0, h0_m=h0)
     assert np.max(np.abs(e3 - e)) < 2e-6
     assert np.max(np.abs(n3 - n_comp)) < 2e-6
     assert np.max(np.abs(u3 - u)) < 2e-6
@@ -364,24 +337,24 @@ def test_enu2geodetic() -> None:
     n_comp = (rng.standard_normal(n) * 5000.0).astype(np.float64)
     u = (rng.standard_normal(n) * 200.0).astype(np.float64)
 
-    lat, lon, h = enu2geodetic_vec_enu(e, n_comp, u, lat0, lon0, h0)
-    e2, n2, u2 = geodetic2enu_vec_llh(lat, lon, h, lat0, lon0, h0)
+    lat, lon, h = enu2geodetic(e, n_comp, u, lat0, lon0, h0)
+    e2, n2, u2 = geodetic2enu(lat, lon, h, lat0, lon0, h0)
 
     assert np.max(np.abs(e2 - e)) < 2e-3
     assert np.max(np.abs(n2 - n_comp)) < 2e-3
     assert np.max(np.abs(u2 - u)) < 2e-3
 
     enu = np.column_stack((e, n_comp, u)).astype(np.float64)
-    lat2, lon2, h2 = enu2geodetic_vec_enu3(enu, lat0, lon0, h0)
+    lat2, lon2, h2 = enu2geodetic(enu, lat0_rad=lat0, lon0_rad=lon0, h0_m=h0)
     assert np.max(np.abs(lat2 - lat)) == 0.0
     assert np.max(np.abs(_ang_diff(lon2, lon))) == 0.0
     assert np.max(np.abs(h2 - h)) == 0.0
 
     lla = np.column_stack((lat, lon, h)).astype(np.float64)
-    enu2 = geodetic2enu_vec_lla(lla, lat0, lon0, h0)
-    assert np.max(np.abs(enu2[:, 0] - e)) < 2e-3
-    assert np.max(np.abs(enu2[:, 1] - n_comp)) < 2e-3
-    assert np.max(np.abs(enu2[:, 2] - u)) < 2e-3
+    e4, n4, u4 = geodetic2enu(lla, lat0_rad=lat0, lon0_rad=lon0, h0_m=h0)
+    assert np.max(np.abs(e4 - e)) < 2e-3
+    assert np.max(np.abs(n4 - n_comp)) < 2e-3
+    assert np.max(np.abs(u4 - u)) < 2e-3
 
 
 def test_geodetic2aer() -> None:
@@ -408,7 +381,7 @@ def test_geodetic2aer() -> None:
     lon = (lon0 + dlon).astype(np.float64)
     h = (h0 + dh).astype(np.float64)
 
-    az1, el1, sr1 = geodetic2aer_vec_llh(lat, lon, h, lat0, lon0, h0)
+    az1, el1, sr1 = geodetic2aer(lat, lon, h, lat0, lon0, h0)
 
     az2 = np.empty(n, dtype=np.float64)
     el2 = np.empty(n, dtype=np.float64)
@@ -432,8 +405,8 @@ def test_geodetic2ecef() -> None:
     latw = np.array([0.1, 0.2], dtype=np.float64)
     lonw = np.array([-0.2, 0.3], dtype=np.float64)
     hw = np.array([0.0, 1000.0], dtype=np.float64)
-    _ = geodetic2ecef_vec_llh(latw, lonw, hw)
-    _ = geodetic2ecef_vec_lla(np.column_stack((latw, lonw, hw)).astype(np.float64))
+    _ = geodetic2ecef(latw, lonw, hw)
+    _ = geodetic2ecef(np.column_stack((latw, lonw, hw)).astype(np.float64))
     _ = ecef2geodetic(1.0, 2.0, 3.0)
 
     x, y, z = geodetic2ecef(0.0, 0.0, 0.0)
@@ -457,7 +430,7 @@ def test_geodetic2ecef() -> None:
     lon_true = (rng.random(n) * 2.0 - 1.0) * np.pi
     h_true = (rng.random(n) * 2.0e6) - 1.0e3
 
-    x, y, z = geodetic2ecef_vec_llh(
+    x, y, z = geodetic2ecef(
         lat_true.astype(np.float64),
         lon_true.astype(np.float64),
         h_true.astype(np.float64),
@@ -470,21 +443,21 @@ def test_geodetic2ecef() -> None:
         assert abs(_ang_diff(lo, float(_wrap_pi(lon_true[i])))) < 2e-7
         assert abs(hi - float(h_true[i])) < 5e-2
 
-    lat_v, lon_v, h_v = ecef2geodetic_vec_xyz(x, y, z)
+    lat_v, lon_v, h_v = ecef2geodetic(x, y, z)
     assert np.max(np.abs(lat_v - lat_true)) < 2e-7
     assert np.max(np.abs(_ang_diff(lon_v, _wrap_pi(lon_true)))) < 2e-7
     assert np.max(np.abs(h_v - h_true)) < 5e-2
 
     r = np.column_stack((x, y, z)).astype(np.float64)
-    lat_m, lon_m, h_m = ecef2geodetic_vec_ecef(r)
+    lat_m, lon_m, h_m = ecef2geodetic(r)
     assert np.max(np.abs(lat_m - lat_v)) == 0.0
     assert np.max(np.abs(_ang_diff(lon_m, lon_v))) == 0.0
     assert np.max(np.abs(h_m - h_v)) == 0.0
 
     lla = np.column_stack((lat_true, lon_true, h_true)).astype(np.float64)
-    r2 = geodetic2ecef_vec_lla(lla)
+    x2, y2, z2 = geodetic2ecef(lla)
     r_ref = np.column_stack((x, y, z))
-    assert np.array_equal(r2, r_ref)
+    assert np.array_equal(np.column_stack((x2, y2, z2)), r_ref)
 
 
 def test_geodetic2enu() -> None:
@@ -509,16 +482,17 @@ def test_geodetic2enu() -> None:
     lon = (lon0 + dlon).astype(np.float64)
     h = (h0 + dh).astype(np.float64)
 
-    e, n_comp, u = geodetic2enu_vec_llh(lat, lon, h, lat0, lon0, h0)
-    lat2, lon2, h2 = enu2geodetic_vec_enu(e, n_comp, u, lat0, lon0, h0)
+    e, n_comp, u = geodetic2enu(lat, lon, h, lat0, lon0, h0)
+    lat2, lon2, h2 = enu2geodetic(e, n_comp, u, lat0, lon0, h0)
 
     assert np.max(np.abs(lat2 - lat)) < 5e-10
     assert np.max(np.abs(_ang_diff(lon2, lon))) < 5e-10
     assert np.max(np.abs(h2 - h)) < 2e-3
 
     lla = np.column_stack((lat, lon, h)).astype(np.float64)
-    enu = geodetic2enu_vec_lla(lla, lat0, lon0, h0)
-    lat3, lon3, h3 = enu2geodetic_vec_enu3(enu, lat0, lon0, h0)
+    e3, n3, u3 = geodetic2enu(lla, lat0_rad=lat0, lon0_rad=lon0, h0_m=h0)
+    enu = np.column_stack((e3, n3, u3))
+    lat3, lon3, h3 = enu2geodetic(enu, lat0_rad=lat0, lon0_rad=lon0, h0_m=h0)
     assert np.max(np.abs(lat3 - lat)) < 5e-10
     assert np.max(np.abs(_ang_diff(lon3, lon))) < 5e-10
     assert np.max(np.abs(h3 - h)) < 2e-3
@@ -592,68 +566,197 @@ def test_wrap_lon_pi_properties() -> None:
     assert abs(_wrap_lon_pi(0.0)) < 1e-12
 
 
-def test_vector_input_validation_errors() -> None:
+def test_unified_vector_input_validation_errors() -> None:
     with pytest.raises(ValueError):
-        aer2ecef_vec_aer(
-            np.array([0.0]), np.array([0.0, 1.0]), np.array([1.0]), 0.0, 0.0, 0.0
+        aer2ecef(np.array([0.0]), np.array([0.0, 1.0]), np.array([1.0]), 0.0, 0.0, 0.0)
+    with pytest.raises(ValueError):
+        aer2ecef(np.zeros((2, 2), dtype=np.float64), lat0_rad=0.0, lon0_rad=0.0, h0_m=0.0)
+
+    with pytest.raises(ValueError):
+        aer2geodetic(
+            np.array([0.0]),
+            np.array([0.0]),
+            np.array([1.0, 2.0]),
+            0.0,
+            0.0,
+            0.0,
         )
     with pytest.raises(ValueError):
-        aer2ecef_vec_aer3(np.zeros((2, 2), dtype=np.float64), 0.0, 0.0, 0.0)
-
-    with pytest.raises(ValueError):
-        aer2geodetic_vec_aer(
-            np.array([0.0]), np.array([0.0]), np.array([1.0, 2.0]), 0.0, 0.0, 0.0
-        )
-    with pytest.raises(ValueError):
-        aer2geodetic_vec_aer3(np.zeros((2, 4), dtype=np.float64), 0.0, 0.0, 0.0)
-
-    with pytest.raises(ValueError):
-        ecef2aer_vec_xyz(
-            np.array([0.0]), np.array([0.0, 1.0]), np.array([0.0]), 0.0, 0.0, 0.0
-        )
-
-    with pytest.raises(ValueError):
-        ecef2enu_vec_xyz(
-            np.array([0.0]), np.array([0.0]), np.array([0.0, 1.0]), 0.0, 0.0, 0.0
-        )
-    with pytest.raises(ValueError):
-        ecef2enu_vec_ecef(np.zeros((2, 2), dtype=np.float64), 0.0, 0.0, 0.0)
-
-    with pytest.raises(ValueError):
-        ecef2geodetic_vec_xyz(np.array([0.0]), np.array([0.0, 1.0]), np.array([0.0]))
-    with pytest.raises(ValueError):
-        ecef2geodetic_vec_ecef(np.zeros((3, 2), dtype=np.float64))
-
-    with pytest.raises(ValueError):
-        enu2ecef_vec_enu(
-            np.array([0.0]), np.array([0.0, 1.0]), np.array([0.0]), 0.0, 0.0, 0.0
-        )
-    with pytest.raises(ValueError):
-        enu2ecef_vec_enu3(np.zeros((3, 2), dtype=np.float64), 0.0, 0.0, 0.0)
-
-    with pytest.raises(ValueError):
-        enu2geodetic_vec_enu(
-            np.array([0.0]), np.array([0.0]), np.array([0.0, 1.0]), 0.0, 0.0, 0.0
-        )
-    with pytest.raises(ValueError):
-        enu2geodetic_vec_enu3(np.zeros((4, 2), dtype=np.float64), 0.0, 0.0, 0.0)
-
-    with pytest.raises(ValueError):
-        geodetic2aer_vec_llh(
-            np.array([0.0]), np.array([0.0, 1.0]), np.array([0.0]), 0.0, 0.0, 0.0
+        aer2geodetic(
+            np.zeros((2, 4), dtype=np.float64),
+            lat0_rad=0.0,
+            lon0_rad=0.0,
+            h0_m=0.0,
         )
 
     with pytest.raises(ValueError):
-        geodetic2ecef_vec_llh(np.array([0.0]), np.array([0.0]), np.array([0.0, 1.0]))
-    with pytest.raises(ValueError):
-        geodetic2ecef_vec_lla(np.zeros((2, 2), dtype=np.float64))
+        ecef2aer(np.array([0.0]), np.array([0.0, 1.0]), np.array([0.0]), 0.0, 0.0, 0.0)
 
     with pytest.raises(ValueError):
-        geodetic2enu_vec_llh(
-            np.array([0.0]), np.array([0.0]), np.array([0.0, 1.0]), 0.0, 0.0, 0.0
-        )
+        ecef2enu(np.array([0.0]), np.array([0.0]), np.array([0.0, 1.0]), 0.0, 0.0, 0.0)
     with pytest.raises(ValueError):
-        geodetic2enu_vec_lla(np.zeros((2, 2), dtype=np.float64), 0.0, 0.0, 0.0)
+        ecef2enu(np.zeros((2, 2), dtype=np.float64), lat0_rad=0.0, lon0_rad=0.0, h0_m=0.0)
+
+    with pytest.raises(ValueError):
+        ecef2geodetic(np.array([0.0]), np.array([0.0, 1.0]), np.array([0.0]))
+    with pytest.raises(ValueError):
+        ecef2geodetic(np.zeros((3, 2), dtype=np.float64))
+
+    with pytest.raises(ValueError):
+        enu2ecef(np.array([0.0]), np.array([0.0, 1.0]), np.array([0.0]), 0.0, 0.0, 0.0)
+    with pytest.raises(ValueError):
+        enu2ecef(np.zeros((3, 2), dtype=np.float64), lat0_rad=0.0, lon0_rad=0.0, h0_m=0.0)
+
+    with pytest.raises(ValueError):
+        enu2geodetic(np.array([0.0]), np.array([0.0]), np.array([0.0, 1.0]), 0.0, 0.0, 0.0)
+    with pytest.raises(ValueError):
+        enu2geodetic(np.zeros((4, 2), dtype=np.float64), lat0_rad=0.0, lon0_rad=0.0, h0_m=0.0)
+
+    with pytest.raises(ValueError):
+        geodetic2aer(np.array([0.0]), np.array([0.0, 1.0]), np.array([0.0]), 0.0, 0.0, 0.0)
+
+    with pytest.raises(ValueError):
+        geodetic2ecef(np.array([0.0]), np.array([0.0]), np.array([0.0, 1.0]))
+    with pytest.raises(ValueError):
+        geodetic2ecef(np.zeros((2, 2), dtype=np.float64))
+
+    with pytest.raises(ValueError):
+        geodetic2enu(np.array([0.0]), np.array([0.0]), np.array([0.0, 1.0]), 0.0, 0.0, 0.0)
+    with pytest.raises(ValueError):
+        geodetic2enu(np.zeros((2, 2), dtype=np.float64), lat0_rad=0.0, lon0_rad=0.0, h0_m=0.0)
+
+def test_public_transform_exports_include_unified_coordinate_apis() -> None:
+    public_callables = {
+        name for name in transforms.__all__ if callable(getattr(transforms, name))
+    }
+
+    expected = {
+        "aer2ecef",
+        "aer2enu",
+        "aer2geodetic",
+        "coarse_eci2geodetic",
+        "ecef2aer",
+        "ecef2enu",
+        "ecef2geodetic",
+        "enu2aer",
+        "enu2ecef",
+        "enu2geodetic",
+        "enu_basis_from_ecef_xyz",
+        "enu_basis_from_latlon",
+        "geodetic2aer",
+        "geodetic2ecef",
+        "geodetic2enu",
+    }
+
+    assert expected.issubset(public_callables)
+
+
+def test_matrix_input_forms_work_inside_njit() -> None:
+    lla = np.array(
+        [
+            [np.deg2rad(34.05), np.deg2rad(-117.85), 700.0],
+            [np.deg2rad(35.20), np.deg2rad(-118.40), 1200.0],
+            [np.deg2rad(33.90), np.deg2rad(-117.10), 50.0],
+        ],
+        dtype=np.float64,
+    )
+    lat0 = np.deg2rad(34.0)
+    lon0 = np.deg2rad(-118.0)
+    h0 = 250.0
+
+    r_ecef = np.column_stack(geodetic2ecef(lla))
+    enu = np.column_stack(geodetic2enu(lla, lat0_rad=lat0, lon0_rad=lon0, h0_m=h0))
+    aer = np.column_stack(geodetic2aer(lla, lat0_rad=lat0, lon0_rad=lon0, h0_m=h0))
+
+    @njit
+    def geodetic2ecef_jit(lla_rad_m):
+        return geodetic2ecef(lla_rad_m)
+
+    @njit
+    def ecef2geodetic_jit(r_ecef_m):
+        return ecef2geodetic(r_ecef_m, degrees=True)
+
+    @njit
+    def geodetic2enu_jit(lla_rad_m, lat0_rad, lon0_rad, h0_m):
+        return geodetic2enu(lla_rad_m, lat0_rad=lat0_rad, lon0_rad=lon0_rad, h0_m=h0_m)
+
+    @njit
+    def ecef2enu_jit(r_ecef_m, lat0_rad, lon0_rad, h0_m):
+        return ecef2enu(r_ecef_m, lat0_rad=lat0_rad, lon0_rad=lon0_rad, h0_m=h0_m)
+
+    @njit
+    def enu2ecef_jit(enu_m, lat0_rad, lon0_rad, h0_m):
+        return enu2ecef(enu_m, lat0_rad=lat0_rad, lon0_rad=lon0_rad, h0_m=h0_m)
+
+    @njit
+    def enu2geodetic_jit(enu_m, lat0_rad, lon0_rad, h0_m):
+        return enu2geodetic(enu_m, lat0_rad=lat0_rad, lon0_rad=lon0_rad, h0_m=h0_m)
+
+    @njit
+    def geodetic2aer_jit(lla_rad_m, lat0_rad, lon0_rad, h0_m):
+        return geodetic2aer(lla_rad_m, lat0_rad=lat0_rad, lon0_rad=lon0_rad, h0_m=h0_m)
+
+    @njit
+    def ecef2aer_jit(r_ecef_m, lat0_rad, lon0_rad, h0_m):
+        return ecef2aer(r_ecef_m, lat0_rad=lat0_rad, lon0_rad=lon0_rad, h0_m=h0_m)
+
+    @njit
+    def aer2ecef_jit(aer_rad_m, lat0_rad, lon0_rad, h0_m):
+        return aer2ecef(aer_rad_m, lat0_rad=lat0_rad, lon0_rad=lon0_rad, h0_m=h0_m)
+
+    @njit
+    def aer2geodetic_jit(aer_rad_m, lat0_rad, lon0_rad, h0_m):
+        return aer2geodetic(aer_rad_m, lat0_rad=lat0_rad, lon0_rad=lon0_rad, h0_m=h0_m)
+
+    expected_xyz = geodetic2ecef(lla)
+    got_xyz = geodetic2ecef_jit(lla)
+    for expected, got in zip(expected_xyz, got_xyz):
+        np.testing.assert_allclose(got, expected, atol=0.0, rtol=0.0)
+
+    expected_llh_deg = ecef2geodetic(r_ecef, degrees=True)
+    got_llh_deg = ecef2geodetic_jit(r_ecef)
+    for expected, got in zip(expected_llh_deg, got_llh_deg):
+        np.testing.assert_allclose(got, expected, atol=0.0, rtol=0.0)
+
+    expected_enu = geodetic2enu(lla, lat0_rad=lat0, lon0_rad=lon0, h0_m=h0)
+    got_enu = geodetic2enu_jit(lla, lat0, lon0, h0)
+    for expected, got in zip(expected_enu, got_enu):
+        np.testing.assert_allclose(got, expected, atol=0.0, rtol=0.0)
+
+    expected_enu_from_ecef = ecef2enu(r_ecef, lat0_rad=lat0, lon0_rad=lon0, h0_m=h0)
+    got_enu_from_ecef = ecef2enu_jit(r_ecef, lat0, lon0, h0)
+    for expected, got in zip(expected_enu_from_ecef, got_enu_from_ecef):
+        np.testing.assert_allclose(got, expected, atol=0.0, rtol=0.0)
+
+    expected_ecef_from_enu = enu2ecef(enu, lat0_rad=lat0, lon0_rad=lon0, h0_m=h0)
+    got_ecef_from_enu = enu2ecef_jit(enu, lat0, lon0, h0)
+    for expected, got in zip(expected_ecef_from_enu, got_ecef_from_enu):
+        np.testing.assert_allclose(got, expected, atol=0.0, rtol=0.0)
+
+    expected_geodetic_from_enu = enu2geodetic(enu, lat0_rad=lat0, lon0_rad=lon0, h0_m=h0)
+    got_geodetic_from_enu = enu2geodetic_jit(enu, lat0, lon0, h0)
+    for expected, got in zip(expected_geodetic_from_enu, got_geodetic_from_enu):
+        np.testing.assert_allclose(got, expected, atol=0.0, rtol=0.0)
+
+    expected_aer = geodetic2aer(lla, lat0_rad=lat0, lon0_rad=lon0, h0_m=h0)
+    got_aer = geodetic2aer_jit(lla, lat0, lon0, h0)
+    for expected, got in zip(expected_aer, got_aer):
+        np.testing.assert_allclose(got, expected, atol=0.0, rtol=0.0)
+
+    expected_aer_from_ecef = ecef2aer(r_ecef, lat0_rad=lat0, lon0_rad=lon0, h0_m=h0)
+    got_aer_from_ecef = ecef2aer_jit(r_ecef, lat0, lon0, h0)
+    for expected, got in zip(expected_aer_from_ecef, got_aer_from_ecef):
+        np.testing.assert_allclose(got, expected, atol=0.0, rtol=0.0)
+
+    expected_ecef_from_aer = aer2ecef(aer, lat0_rad=lat0, lon0_rad=lon0, h0_m=h0)
+    got_ecef_from_aer = aer2ecef_jit(aer, lat0, lon0, h0)
+    for expected, got in zip(expected_ecef_from_aer, got_ecef_from_aer):
+        np.testing.assert_allclose(got, expected, atol=0.0, rtol=0.0)
+
+    expected_geodetic_from_aer = aer2geodetic(aer, lat0_rad=lat0, lon0_rad=lon0, h0_m=h0)
+    got_geodetic_from_aer = aer2geodetic_jit(aer, lat0, lon0, h0)
+    for expected, got in zip(expected_geodetic_from_aer, got_geodetic_from_aer):
+        np.testing.assert_allclose(got, expected, atol=0.0, rtol=0.0)
 
 
 def test_constants_module_consistency() -> None:

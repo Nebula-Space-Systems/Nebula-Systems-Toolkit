@@ -1,51 +1,50 @@
-# _aer2ecef.py
+"""AER to ECEF transforms."""
+
+from __future__ import annotations
+
 import math
+from typing import overload as typing_overload
+
 import numpy as np
 from numba import njit, prange
+from numba.extending import overload as numba_overload
 
+from ._api_utils import (
+    as_1d_array,
+    as_nx3_array,
+    is_numba_absent,
+    is_numba_array1d,
+    is_numba_array2d,
+    is_numba_scalar,
+    require_not_none,
+    validate_matching_lengths,
+)
 from ._geodetic2ecef import geodetic2ecef
-
 from ._enu2ecef import enu2ecef_delta
 
 
 @njit(cache=True, inline="always")
 def aer2enu(az_rad: float, el_rad: float, srange_m: float):
-    """
-    Convert AER (azimuth, elevation, slant range) to local ENU coordinates.
-
-    Definitions (local tangent frame)
-    -------------------------------
-    - azimuth az is measured clockwise from North toward East:
-        az=0   => +North
-        az=π/2 => +East
-    - elevation el is measured above the local horizon:
-        el=0   => horizontal
-        el=π/2 => straight up
-    - slant range is Euclidean distance to the target.
-
-    With r = srange * cos(el):
-        e = r * sin(az)
-        n = r * cos(az)
-        u = srange * sin(el)
+    """Convert azimuth, elevation, and slant range to local ENU coordinates.
 
     Parameters
     ----------
-    az_rad : float
-        Azimuth in radians (any real; periodic).
-    el_rad : float
-        Elevation in radians.
+    az_rad, el_rad : float
+        Azimuth and elevation in radians. Azimuth is measured clockwise from
+        north and elevation is measured from the local horizon.
     srange_m : float
-        Slant range in meters (should be >= 0).
+        Slant range in meters.
 
     Returns
     -------
-    (e_m, n_m, u_m) : tuple[float, float, float]
-        ENU coordinates in meters.
+    tuple[float, float, float]
+        ``(e_m, n_m, u_m)`` east, north, and up coordinates in meters.
 
     Notes
     -----
-    - If srange_m == 0, returns (0,0,0).
+    The zero-range case returns ``(0.0, 0.0, 0.0)`` by convention.
     """
+
     if srange_m == 0.0:
         return 0.0, 0.0, 0.0
 
@@ -62,7 +61,7 @@ def aer2enu(az_rad: float, el_rad: float, srange_m: float):
 
 
 @njit(cache=True, inline="always")
-def aer2ecef(
+def _aer2ecef_scalar(
     az_rad: float,
     el_rad: float,
     srange_m: float,
@@ -70,53 +69,16 @@ def aer2ecef(
     lon0_rad: float,
     h0_m: float,
 ):
-    """
-    Convert AER (azimuth, elevation, slant range) from an observer into target ECEF.
+    """Scalar AER to ECEF kernel."""
 
-    Model
-    -----
-    1) Convert observer geodetic (lat0, lon0, h0) -> ECEF origin (x0,y0,z0).
-    2) Convert (az, el, srange) -> local ENU vector (e,n,u).
-    3) Rotate ENU vector -> ECEF delta (dx,dy,dz) at the observer tangent frame.
-    4) Translate: target_ecef = origin_ecef + delta
-
-    Conventions
-    -----------
-    - lat/lon in radians.
-    - heights and ranges in meters.
-    - ECEF outputs in meters.
-
-    Parameters
-    ----------
-    az_rad : float
-        Azimuth [rad], clockwise from North toward East.
-    el_rad : float
-        Elevation [rad] above horizon.
-    srange_m : float
-        Slant range [m] (>= 0).
-    lat0_rad, lon0_rad, h0_m : float
-        Observer geodetic latitude [rad], longitude [rad], height [m].
-
-    Returns
-    -------
-    (x_m, y_m, z_m) : tuple[float, float, float]
-        Target ECEF coordinates [m].
-
-    Notes
-    -----
-    - No refraction correction is applied.
-    - If srange_m == 0, returns the observer ECEF position.
-    """
     x0, y0, z0 = geodetic2ecef(lat0_rad, lon0_rad, h0_m)
-
     e, n, u = aer2enu(az_rad, el_rad, srange_m)
     dx, dy, dz = enu2ecef_delta(e, n, u, lat0_rad, lon0_rad)
-
     return x0 + dx, y0 + dy, z0 + dz
 
 
 @njit(cache=True, parallel=True)
-def aer2ecef_vec_aer(
+def _aer2ecef_vector_aer(
     az_rad: np.ndarray,
     el_rad: np.ndarray,
     srange_m: np.ndarray,
@@ -124,21 +86,8 @@ def aer2ecef_vec_aer(
     lon0_rad: float,
     h0_m: float,
 ):
-    """
-    Vectorized AER->ECEF conversion in parallel (prange).
+    """Vector AER to ECEF kernel for split ``az/el/range`` arrays."""
 
-    Parameters
-    ----------
-    az_rad, el_rad, srange_m : np.ndarray
-        1D arrays (N,) of azimuth [rad], elevation [rad], slant range [m].
-    lat0_rad, lon0_rad, h0_m : float
-        Observer geodetic coordinates defining the local tangent frame.
-
-    Returns
-    -------
-    x_m, y_m, z_m : tuple[np.ndarray, np.ndarray, np.ndarray]
-        1D arrays (N,) of target ECEF coordinates [m].
-    """
     npts = az_rad.shape[0]
     if el_rad.shape[0] != npts or srange_m.shape[0] != npts:
         raise ValueError("az_rad, el_rad, srange_m must have the same length")
@@ -147,10 +96,7 @@ def aer2ecef_vec_aer(
     y = np.empty(npts, dtype=np.float64)
     z = np.empty(npts, dtype=np.float64)
 
-    # Precompute observer origin once
     x0, y0, z0 = geodetic2ecef(lat0_rad, lon0_rad, h0_m)
-
-    # Precompute trig for ENU->ECEF delta once
     slat = math.sin(lat0_rad)
     clat = math.cos(lat0_rad)
     slon = math.sin(lon0_rad)
@@ -177,7 +123,6 @@ def aer2ecef_vec_aer(
         n = r * caz
         u = sr * sel
 
-        # enu2ecef_delta(e,n,u,lat0,lon0) expanded
         dx = -slon * e - slat * clon * n + clat * clon * u
         dy = clon * e - slat * slon * n + clat * slon * u
         dz = clat * n + slat * u
@@ -190,27 +135,14 @@ def aer2ecef_vec_aer(
 
 
 @njit(cache=True, parallel=True)
-def aer2ecef_vec_aer3(
+def _aer2ecef_vector_aer3(
     aer_rad_m: np.ndarray,
     lat0_rad: float,
     lon0_rad: float,
     h0_m: float,
 ):
-    """
-    Vectorized AER->ECEF conversion for an (N,3) array in parallel.
+    """Vector AER to ECEF kernel for an ``(N, 3)`` input array."""
 
-    Parameters
-    ----------
-    aer_rad_m : np.ndarray
-        2D array (N,3) with columns [az_rad, el_rad, srange_m].
-    lat0_rad, lon0_rad, h0_m : float
-        Observer geodetic coordinates.
-
-    Returns
-    -------
-    r_ecef_m : np.ndarray
-        2D array (N,3) of target ECEF coordinates [m].
-    """
     if aer_rad_m.ndim != 2 or aer_rad_m.shape[1] != 3:
         raise ValueError("aer_rad_m must have shape (N, 3)")
 
@@ -218,7 +150,6 @@ def aer2ecef_vec_aer3(
     out = np.empty((npts, 3), dtype=np.float64)
 
     x0, y0, z0 = geodetic2ecef(lat0_rad, lon0_rad, h0_m)
-
     slat = math.sin(lat0_rad)
     clat = math.cos(lat0_rad)
     slon = math.sin(lon0_rad)
@@ -254,3 +185,181 @@ def aer2ecef_vec_aer3(
         out[i, 2] = z0 + dz
 
     return out
+
+
+@typing_overload
+def aer2ecef(
+    az_rad: float,
+    el_rad: float,
+    srange_m: float,
+    lat0_rad: float,
+    lon0_rad: float,
+    h0_m: float,
+) -> tuple[float, float, float]:
+    ...
+
+
+@typing_overload
+def aer2ecef(
+    az_rad: np.ndarray,
+    el_rad: np.ndarray,
+    srange_m: np.ndarray,
+    lat0_rad: float,
+    lon0_rad: float,
+    h0_m: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ...
+
+
+@typing_overload
+def aer2ecef(
+    az_rad: np.ndarray,
+    el_rad: None = None,
+    srange_m: None = None,
+    lat0_rad: float | None = None,
+    lon0_rad: float | None = None,
+    h0_m: float | None = None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ...
+
+
+def aer2ecef(
+    az_rad: float | np.ndarray,
+    el_rad: float | np.ndarray | None = None,
+    srange_m: float | np.ndarray | None = None,
+    lat0_rad: float | None = None,
+    lon0_rad: float | None = None,
+    h0_m: float | None = None,
+) -> tuple[float, float, float] | tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Convert azimuth, elevation, and slant range to absolute ECEF coordinates.
+
+    The observer location is given in geodetic coordinates
+    ``(lat0_rad, lon0_rad, h0_m)``. The same observer is applied to every row
+    when array input is used.
+
+    Accepted input forms
+    --------------------
+    - ``aer2ecef(az_rad, el_rad, srange_m, lat0_rad, lon0_rad, h0_m)``
+    - ``aer2ecef(az_rad, el_rad, srange_m, lat0_rad, lon0_rad, h0_m)`` for matching 1D arrays
+    - ``aer2ecef(aer_rad_m, lat0_rad=..., lon0_rad=..., h0_m=...)`` for an ``(N, 3)`` array
+
+    Parameters
+    ----------
+    az_rad, el_rad : float or np.ndarray
+        Azimuth and elevation in radians. Azimuth is measured clockwise from
+        north and elevation is measured from the local horizon. If ``el_rad``
+        and ``srange_m`` are omitted, ``az_rad`` must be an array of shape
+        ``(N, 3)`` with columns ``[az_rad, el_rad, srange_m]``.
+    srange_m : float or np.ndarray, optional
+        Slant range in meters.
+    lat0_rad, lon0_rad : float
+        Observer geodetic latitude and longitude in radians.
+    h0_m : float
+        Observer height above the WGS84 ellipsoid in meters.
+
+    Returns
+    -------
+    tuple[float, float, float] or tuple[np.ndarray, np.ndarray, np.ndarray]
+        ``(x_m, y_m, z_m)`` ECEF coordinates in meters. Scalar input returns
+        three scalars. Array input returns three same-length 1D arrays.
+
+    Notes
+    -----
+    - The same scalar, split-array, and ``(N, 3)`` forms work inside
+      ``@numba.njit`` callers.
+    - For array inputs, the observer remains scalar and is broadcast across
+      all rows.
+
+    Examples
+    --------
+    >>> x_m, y_m, z_m = aer2ecef(az_rad, el_rad, srange_m, lat0_rad, lon0_rad, h0_m)
+    >>> x_m, y_m, z_m = aer2ecef(aer_rad_m, lat0_rad=lat0_rad, lon0_rad=lon0_rad, h0_m=h0_m)
+    """
+
+    lat0_rad = require_not_none(lat0_rad, "lat0_rad")
+    lon0_rad = require_not_none(lon0_rad, "lon0_rad")
+    h0_m = require_not_none(h0_m, "h0_m")
+
+    if el_rad is None and srange_m is None:
+        aer_rad_m = as_nx3_array(az_rad, "aer_rad_m")
+        out = _aer2ecef_vector_aer3(aer_rad_m, lat0_rad, lon0_rad, h0_m)
+        return out[:, 0], out[:, 1], out[:, 2]
+
+    if el_rad is None or srange_m is None:
+        raise TypeError("Provide either `az_rad, el_rad, srange_m` or one `(N, 3)` array")
+
+    if np.isscalar(az_rad) and np.isscalar(el_rad) and np.isscalar(srange_m):
+        return _aer2ecef_scalar(
+            float(az_rad),
+            float(el_rad),
+            float(srange_m),
+            float(lat0_rad),
+            float(lon0_rad),
+            float(h0_m),
+        )
+
+    az_arr = as_1d_array(az_rad, "az_rad")
+    el_arr = as_1d_array(el_rad, "el_rad")
+    sr_arr = as_1d_array(srange_m, "srange_m")
+    validate_matching_lengths(("az_rad", az_arr), ("el_rad", el_arr), ("srange_m", sr_arr))
+    return _aer2ecef_vector_aer(az_arr, el_arr, sr_arr, lat0_rad, lon0_rad, h0_m)
+
+
+@numba_overload(aer2ecef)
+def _ol_aer2ecef(
+    az_rad,
+    el_rad=None,
+    srange_m=None,
+    lat0_rad=None,
+    lon0_rad=None,
+    h0_m=None,
+):
+    if (
+        is_numba_scalar(az_rad)
+        and is_numba_scalar(el_rad)
+        and is_numba_scalar(srange_m)
+        and is_numba_scalar(lat0_rad)
+        and is_numba_scalar(lon0_rad)
+        and is_numba_scalar(h0_m)
+    ):
+
+        def impl(az_rad, el_rad=None, srange_m=None, lat0_rad=None, lon0_rad=None, h0_m=None):
+            return _aer2ecef_scalar(az_rad, el_rad, srange_m, lat0_rad, lon0_rad, h0_m)
+
+        return impl
+
+    if (
+        is_numba_array1d(az_rad)
+        and is_numba_array1d(el_rad)
+        and is_numba_array1d(srange_m)
+        and is_numba_scalar(lat0_rad)
+        and is_numba_scalar(lon0_rad)
+        and is_numba_scalar(h0_m)
+    ):
+
+        def impl(az_rad, el_rad=None, srange_m=None, lat0_rad=None, lon0_rad=None, h0_m=None):
+            return _aer2ecef_vector_aer(az_rad, el_rad, srange_m, lat0_rad, lon0_rad, h0_m)
+
+        return impl
+
+    if (
+        is_numba_array2d(az_rad)
+        and is_numba_absent(el_rad)
+        and is_numba_absent(srange_m)
+        and is_numba_scalar(lat0_rad)
+        and is_numba_scalar(lon0_rad)
+        and is_numba_scalar(h0_m)
+    ):
+
+        def impl(az_rad, el_rad=None, srange_m=None, lat0_rad=None, lon0_rad=None, h0_m=None):
+            out = _aer2ecef_vector_aer3(az_rad, lat0_rad, lon0_rad, h0_m)
+            return out[:, 0], out[:, 1], out[:, 2]
+
+        return impl
+
+    return None
+
+__all__ = [
+    "aer2enu",
+    "aer2ecef",
+]
