@@ -35,7 +35,7 @@ Use these notebooks in order:
    - Timed Orekit frame transforms with `transform(...)`
 
 3. `03_walker_constellation.ipynb`
-   - Build Walker delta/star constellations
+   - Build Walker constellations from seed `Orbit` objects with explicit RAAN spans, offsets, and anomaly controls
    - Use two-body and numerical member construction
 
 4. `04_coverage.ipynb`

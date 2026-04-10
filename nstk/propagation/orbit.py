@@ -76,7 +76,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 
-from typing import Any, Literal, Protocol, TypeAlias, Union
+from typing import Any, Callable, Literal, Protocol, TypeAlias, Union
 
 import astropy.units as u
 import numpy as np
@@ -1316,8 +1316,14 @@ class Orbit(OrbitCreationMixin):
         self._construction_factory_name = str(factory_name)
         self._construction_kwargs = dict(kwargs)
 
-    def _clone_for_walker(self, *, raan: float, anomaly: float) -> "Orbit":
-        """Clone this orbit for Walker generation using mean-anomaly phasing."""
+    def _clone_for_walker(
+        self,
+        *,
+        raan: float,
+        anomaly: float,
+        anomaly_type: str | Any = "mean",
+    ) -> "Orbit":
+        """Clone this orbit for Walker generation with explicit angle control."""
 
         if self._construction_factory_name is None or self._construction_kwargs is None:
             raise ValueError(
@@ -1334,8 +1340,130 @@ class Orbit(OrbitCreationMixin):
         kwargs = dict(self._construction_kwargs)
         kwargs["raan"] = float(raan)
         kwargs["anomaly"] = float(anomaly)
-        kwargs["anomaly_type"] = "mean"
+        kwargs["anomaly_type"] = anomaly_type if anomaly_type is not None else "mean"
         return factory(**kwargs)
+
+    def build_walker_initial_states(
+        self,
+        *,
+        total_satellites: int,
+        num_planes: int,
+        phasing: int = 1,
+        raan_span: float = 2.0 * math.pi,
+        initial_raan_offset: float = 0.0,
+        initial_anomaly_offset: float = 0.0,
+        anomaly_type: str | Any = "mean",
+        include_seed: bool = True,
+    ) -> list[SupportsSpacecraftState]:
+        """Build Walkerized Orekit ``SpacecraftState`` objects from this seed orbit.
+
+        This is the orbit-first convenience wrapper around
+        :func:`nstk.propagation.walker.build_walker_initial_states`.
+
+        Parameters
+        ----------
+        total_satellites : int
+            Total number of satellites ``T`` in the constellation.
+        num_planes : int
+            Number of orbital planes ``P``.
+        phasing : int, default 1
+            Walker phasing factor ``F``.
+        raan_span : float, default ``2*pi``
+            RAAN span in radians across the planes.
+        initial_raan_offset : float, default 0.0
+            Offset applied to the seed RAAN before Walker spacing is generated.
+        initial_anomaly_offset : float, default 0.0
+            Offset applied to the seed anomaly before Walker spacing is
+            generated.
+        anomaly_type : {"mean", "true", "eccentric"} or PositionAngleType, default "mean"
+            Keplerian anomaly coordinate used for phasing and offsets.
+        include_seed : bool, default True
+            If True, include plane 0 / slot 0 in the returned list.
+
+        Returns
+        -------
+        list[org.orekit.propagation.SpacecraftState]
+            Walkerized states derived from this orbit's initial state.
+        """
+
+        from .walker import build_walker_initial_states as _build_walker_initial_states
+
+        return _build_walker_initial_states(
+            self,
+            total_satellites=total_satellites,
+            num_planes=num_planes,
+            phasing=phasing,
+            raan_span=raan_span,
+            initial_raan_offset=initial_raan_offset,
+            initial_anomaly_offset=initial_anomaly_offset,
+            anomaly_type=anomaly_type,
+            include_seed=include_seed,
+        )
+
+    def build_walker_constellation(
+        self,
+        *,
+        total_satellites: int,
+        num_planes: int,
+        phasing: int = 1,
+        raan_span: float = 2.0 * math.pi,
+        initial_raan_offset: float = 0.0,
+        initial_anomaly_offset: float = 0.0,
+        anomaly_type: str | Any = "mean",
+        include_seed: bool = True,
+        orbit_factory: Callable[[SupportsSpacecraftState], "Orbit"] | None = None,
+    ) -> list["Orbit"]:
+        """Build a Walker constellation from this seed orbit.
+
+        This is the preferred user-facing Walker API. It wraps
+        :func:`nstk.propagation.walker.build_walker_constellation` while keeping
+        the workflow centered on an existing NSTK :class:`Orbit`.
+
+        Parameters
+        ----------
+        total_satellites : int
+            Total number of satellites ``T`` in the constellation.
+        num_planes : int
+            Number of orbital planes ``P``.
+        phasing : int, default 1
+            Walker phasing factor ``F``.
+        raan_span : float, default ``2*pi``
+            RAAN span in radians across the planes.
+        initial_raan_offset : float, default 0.0
+            Offset applied to the seed RAAN before Walker spacing is generated.
+        initial_anomaly_offset : float, default 0.0
+            Offset applied to the seed anomaly before Walker spacing is
+            generated.
+        anomaly_type : {"mean", "true", "eccentric"} or PositionAngleType, default "mean"
+            Keplerian anomaly coordinate used for phasing and offsets.
+        include_seed : bool, default True
+            If True, include plane 0 / slot 0 in the returned list.
+        orbit_factory : callable, optional
+            Advanced hook of the form ``orbit_factory(state) -> Orbit``. When
+            supplied, the callback receives Walkerized Orekit
+            ``SpacecraftState`` objects and can build custom NSTK ``Orbit``
+            wrappers from them.
+
+        Returns
+        -------
+        list[Orbit]
+            Walker constellation members as NSTK orbit wrappers.
+        """
+
+        from .walker import build_walker_constellation as _build_walker_constellation
+
+        return _build_walker_constellation(
+            self,
+            total_satellites=total_satellites,
+            num_planes=num_planes,
+            phasing=phasing,
+            raan_span=raan_span,
+            initial_raan_offset=initial_raan_offset,
+            initial_anomaly_offset=initial_anomaly_offset,
+            anomaly_type=anomaly_type,
+            include_seed=include_seed,
+            orbit_factory=orbit_factory,
+        )
 
     @property
     def epoch(self) -> Time:

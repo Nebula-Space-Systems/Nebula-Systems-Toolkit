@@ -1,40 +1,95 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Callable, Literal
+from typing import Any, Callable, Iterator, Literal, Protocol, TypeAlias
 
 import numpy as np
-from astropy.time import Time
 
+from nstk.propagation import orbit as orbit_module
 from nstk.propagation.orbit import (
-    DEFAULT_ATTITUDE,
     Orbit,
+    SupportsFrame,
+    SupportsSpacecraftState,
     _bind_java,
-    _coerce_attitude_provider,
-    _coerce_iers,
     _coerce_position_angle_type,
-    _resolve_named_frame,
-    astropy_time_to_orekit_date,
 )
 
-WalkerPattern = Literal["delta", "star"]
-WalkerOrbitFactory = Callable[[Any], Orbit]
+
+class SupportsWalkerState(SupportsSpacecraftState, Protocol):
+    """Structural subset of an Orekit ``SpacecraftState`` used in Walker helpers."""
+
+    def getDate(self) -> Any: ...
+
+    def getAttitude(self) -> Any: ...
+
+    def getPVCoordinates(self, frame: SupportsFrame | None = None) -> Any: ...
+
+    def getAdditionalDataValues(self) -> Any: ...
+
+    def getAdditionalStatesDerivatives(self) -> Any: ...
+
+
+WalkerOrbitFactory = Callable[[SupportsWalkerState], Orbit]
+WalkerSeed: TypeAlias = Orbit | SupportsWalkerState
+DEFAULT_WALKER_RAAN_SPAN = 2.0 * math.pi
+
+
+def _coerce_exact_int(name: str, value: Any) -> int:
+    if isinstance(value, bool):
+        raise TypeError(f"{name} must be an integer")
+
+    try:
+        coerced = int(value)
+    except Exception as exc:
+        raise TypeError(f"{name} must be an integer") from exc
+
+    try:
+        if float(value) != float(coerced):
+            raise ValueError(f"{name} must be an integer")
+    except Exception:
+        if value != coerced:
+            raise ValueError(f"{name} must be an integer")
+    return coerced
 
 
 def _wrap_pm_pi(x: float) -> float:
     return (float(x) + math.pi) % (2.0 * math.pi) - math.pi
 
 
-def _validate_walker_inputs(
+def _coerce_raan_span(raan_span: float) -> float:
+    span = float(raan_span)
+    if not math.isfinite(span) or span <= 0.0:
+        raise ValueError("raan_span must be finite and > 0")
+    if span > (2.0 * math.pi + 1.0e-12):
+        raise ValueError("raan_span must be <= 2*pi radians")
+    return span
+
+
+def _normalize_anomaly_type_label(anomaly_type: Any) -> Literal["mean", "true", "eccentric"]:
+    _bind_java()
+    pa_type = _coerce_position_angle_type(anomaly_type)
+
+    if pa_type == orbit_module.PositionAngleType.MEAN:
+        return "mean"
+    if pa_type == orbit_module.PositionAngleType.TRUE:
+        return "true"
+    if pa_type == orbit_module.PositionAngleType.ECCENTRIC:
+        return "eccentric"
+    raise ValueError("Unsupported anomaly_type")
+
+
+def _validate_walker_geometry(
     total_satellites: int,
     num_planes: int,
     phasing: int,
-    pattern: WalkerPattern,
-) -> tuple[int, int, int, WalkerPattern]:
-    t = int(total_satellites)
-    p = int(num_planes)
-    f = int(phasing)
-    pat = str(pattern).strip().lower()
+    *,
+    initial_raan_offset: float,
+    initial_anomaly_offset: float,
+    raan_span: float,
+) -> tuple[int, int, int]:
+    t = _coerce_exact_int("total_satellites", total_satellites)
+    p = _coerce_exact_int("num_planes", num_planes)
+    f = _coerce_exact_int("phasing", phasing)
 
     if t <= 0:
         raise ValueError("total_satellites must be >= 1")
@@ -42,25 +97,26 @@ def _validate_walker_inputs(
         raise ValueError("num_planes must be >= 1")
     if t % p != 0:
         raise ValueError("total_satellites must be divisible by num_planes")
-    if pat not in ("delta", "star"):
-        raise ValueError("pattern must be 'delta' or 'star'")
+    if not math.isfinite(float(initial_raan_offset)):
+        raise ValueError("initial_raan_offset must be finite")
+    if not math.isfinite(float(initial_anomaly_offset)):
+        raise ValueError("initial_anomaly_offset must be finite")
+    _coerce_raan_span(raan_span)
 
-    pattern_out: WalkerPattern = "delta" if pat == "delta" else "star"
-    return t, p, f, pattern_out
+    return t, p, f
 
 
-def _iter_walker_raan_mean(
+def _iter_walker_raan_anomaly(
     *,
     total_satellites: int,
     num_planes: int,
     phasing: int,
-    pattern: WalkerPattern,
+    raan_span: float,
     include_seed: bool,
-    seed_raan: float,
-    seed_mean: float,
-):
+    base_raan: float,
+    base_anomaly: float,
+) -> Iterator[tuple[float, float]]:
     sats_per_plane = total_satellites // num_planes
-    raan_span = (2.0 * math.pi) if pattern == "delta" else math.pi
     two_pi = 2.0 * math.pi
 
     for plane_idx in range(num_planes):
@@ -68,13 +124,13 @@ def _iter_walker_raan_mean(
         for slot_idx in range(sats_per_plane):
             if (not include_seed) and plane_idx == 0 and slot_idx == 0:
                 continue
-            d_mean = two_pi * (
+            d_anomaly = two_pi * (
                 float(slot_idx) / float(sats_per_plane)
                 + float(phasing * plane_idx) / float(total_satellites)
             )
             yield (
-                _wrap_pm_pi(seed_raan + d_raan),
-                _wrap_pm_pi(seed_mean + d_mean),
+                _wrap_pm_pi(base_raan + d_raan),
+                _wrap_pm_pi(base_anomaly + d_anomaly),
             )
 
 
@@ -88,7 +144,7 @@ def _is_spacecraft_state_instance(value: Any) -> bool:
         return False
 
 
-def _coerce_seed_state(seed: Orbit | Any):
+def _coerce_seed_state(seed: WalkerSeed) -> SupportsWalkerState:
     if isinstance(seed, Orbit):
         return seed.propagator.getInitialState()
     if _is_spacecraft_state_instance(seed):
@@ -96,8 +152,12 @@ def _coerce_seed_state(seed: Orbit | Any):
     raise TypeError("seed must be an nstk.propagation.Orbit or Orekit SpacecraftState")
 
 
-def _extract_state_kepler(state) -> tuple[Any, float, float, float, float, float, float, Any]:
-    """Return inertial seed geometry as ``(date, a, e, i, raan, argp, mean, frame)``."""
+def _extract_state_kepler(
+    state: SupportsWalkerState,
+    *,
+    anomaly_type: Any = "mean",
+) -> tuple[Any, float, float, float, float, float, float, SupportsFrame]:
+    """Return inertial seed geometry as ``(date, a, e, i, raan, argp, anomaly, frame)``."""
 
     from org.orekit.frames import FramesFactory  # type: ignore
     from org.orekit.orbits import CartesianOrbit, KeplerianOrbit  # type: ignore
@@ -117,6 +177,13 @@ def _extract_state_kepler(state) -> tuple[Any, float, float, float, float, float
         pv_inertial = tr.transformPVCoordinates(pv0)
 
     kep = KeplerianOrbit(CartesianOrbit(pv_inertial, inertial, date0, mu))
+    anomaly_label = _normalize_anomaly_type_label(anomaly_type)
+    if anomaly_label == "mean":
+        anomaly = float(kep.getMeanAnomaly())
+    elif anomaly_label == "true":
+        anomaly = float(kep.getTrueAnomaly())
+    else:
+        anomaly = float(kep.getEccentricAnomaly())
     return (
         date0,
         float(kep.getA()),
@@ -124,7 +191,7 @@ def _extract_state_kepler(state) -> tuple[Any, float, float, float, float, float
         float(kep.getI()),
         float(kep.getRightAscensionOfAscendingNode()),
         float(kep.getPerigeeArgument()),
-        float(kep.getMeanAnomaly()),
+        anomaly,
         inertial,
     )
 
@@ -150,16 +217,17 @@ def _copy_double_array_dictionary(source):
 
 
 def _state_with_kepler_angles(
-    seed_state,
+    seed_state: SupportsWalkerState,
     *,
-    inertial_frame,
+    inertial_frame: SupportsFrame,
     a: float,
     e: float,
     i: float,
     raan: float,
     argp: float,
     anomaly: float,
-):
+    anomaly_type: Any,
+) -> SupportsWalkerState:
     _bind_java()
     from org.orekit.orbits import KeplerianOrbit  # type: ignore
     from org.orekit.propagation import SpacecraftState  # type: ignore
@@ -172,7 +240,7 @@ def _state_with_kepler_angles(
         float(argp),
         float(raan),
         float(anomaly),
-        _coerce_position_angle_type("mean"),
+        _coerce_position_angle_type(anomaly_type),
         inertial_frame,
         seed_state.getDate(),
         float(orbit0.getMu()),
@@ -186,129 +254,61 @@ def _state_with_kepler_angles(
     )
 
 
-def spacecraft_state_from_kepler(
-    epoch: Time,
-    a: float,
-    e: float,
-    i: float,
-    raan: float,
-    argp: float,
-    anomaly: float,
-    anomaly_type: Any = None,
-    mass: float = 1000.0,
-    inertial_frame: Any = None,
-    iers_convention: Any = None,
-    simple_eop: bool = True,
-    attitude: Any = DEFAULT_ATTITUDE,
-    *,
-    mu: float | None = None,
-):
-    """Build an Orekit ``SpacecraftState`` from Keplerian elements.
-
-    Parameters
-    ----------
-    epoch : astropy.time.Time
-        Initial epoch for the returned state.
-    a, e, i, raan, argp, anomaly : float
-        Classical Keplerian elements in SI/radian units.
-    anomaly_type : {"mean", "true", "eccentric"} or PositionAngleType, optional
-        Interpretation of ``anomaly``. Defaults to mean anomaly when omitted.
-    mass : float, default 1000.0
-        Spacecraft mass in kilograms.
-    inertial_frame : Frame | str | None, optional
-        Pseudo-inertial frame for the constructed orbit. ``None`` defaults to
-        GCRF, and common NSTK frame strings are accepted.
-    iers_convention : IERSConventions, optional
-        Earth orientation convention used if frame-name resolution needs it.
-    simple_eop : bool, default True
-        Whether Earth-fixed frame resolution should use simple EOP mode.
-    attitude : optional, default ``"vvlh"``
-        Attitude law specification evaluated at ``epoch``. The built-in
-        default is STK-style ``"vvlh"``, which resolves to
-        ``LofOffset(inertial_frame, LOFType.VVLH)``. The returned
-        ``SpacecraftState`` stores the resulting attitude snapshot directly.
-    mu : float, optional
-        Gravitational parameter used to construct the Keplerian orbit. Defaults
-        to ``Constants.WGS84_EARTH_MU``.
-
-    Returns
-    -------
-    SpacecraftState
-        Orekit initial state that can seed custom propagator creation or Walker
-        geometry generation workflows.
-    """
-
-    _bind_java()
-    from org.orekit.orbits import KeplerianOrbit  # type: ignore
-    from org.orekit.propagation import SpacecraftState  # type: ignore
-    from org.orekit.utils import Constants  # type: ignore
-
-    iers = _coerce_iers(iers_convention)
-    if inertial_frame is None:
-        from org.orekit.frames import FramesFactory  # type: ignore
-
-        inertial_frame = FramesFactory.getGCRF()
-    elif isinstance(inertial_frame, str):
-        inertial_frame = _resolve_named_frame(
-            inertial_frame,
-            iers=iers,
-            simple_eop=bool(simple_eop),
-        )
-    if not bool(inertial_frame.isPseudoInertial()):
-        raise ValueError("inertial_frame must be pseudo-inertial")
-
-    mu_val = float(Constants.WGS84_EARTH_MU if mu is None else mu)
-    orbit0 = KeplerianOrbit(
-        float(a),
-        float(e),
-        float(i),
-        float(argp),
-        float(raan),
-        float(anomaly),
-        _coerce_position_angle_type(anomaly_type),
-        inertial_frame,
-        astropy_time_to_orekit_date(epoch),
-        mu_val,
-    )
-    provider = _coerce_attitude_provider(
-        attitude,
-        inertial_frame=inertial_frame,
-        iers=iers,
-        simple_eop=bool(simple_eop),
-    )
-    return SpacecraftState(
-        orbit0,
-        provider.getAttitude(orbit0, orbit0.getDate(), inertial_frame),
-        float(mass),
-    )
-
-
 def build_walker_initial_states(
-    seed: Orbit | Any,
+    seed: WalkerSeed,
     *,
     total_satellites: int,
     num_planes: int,
-    phasing: int = 0,
-    pattern: WalkerPattern = "delta",
+    phasing: int = 1,
+    raan_span: float = DEFAULT_WALKER_RAAN_SPAN,
+    initial_raan_offset: float = 0.0,
+    initial_anomaly_offset: float = 0.0,
+    anomaly_type: Any = "mean",
     include_seed: bool = True,
-) -> list[Any]:
+) -> list[SupportsWalkerState]:
     """Build Walkerized Orekit ``SpacecraftState`` objects from a seed state.
 
     Parameters
     ----------
     seed : Orbit | SpacecraftState
-        Seed state source. ``Orbit`` inputs are normalized via
-        ``orbit.propagator.getInitialState()``.
-    total_satellites, num_planes, phasing, pattern, include_seed
-        Standard Walker ``T/P/F`` geometry controls. ``pattern="delta"`` uses
-        a full ``2*pi`` RAAN span, while ``pattern="star"`` uses a ``pi`` span.
+        Seed state source. Normal user workflows should start from an NSTK
+        :class:`~nstk.propagation.orbit.Orbit` and call
+        ``seed_orbit.build_walker_initial_states(...)``. Raw Orekit
+        ``SpacecraftState`` inputs are retained for advanced interop only.
+    total_satellites : int
+        Total number of satellites ``T`` in the constellation.
+    num_planes : int
+        Number of orbital planes ``P``. ``total_satellites`` must be divisible
+        by ``num_planes``.
+    phasing : int, default 1
+        Walker phasing factor ``F``. Adjacent planes are shifted by
+        ``F * 2*pi / T`` in the selected anomaly coordinate.
+    raan_span : float, default ``2*pi``
+        RAAN span in radians across all planes. A full ``2*pi`` span matches a
+        classic Walker-delta style spread; a ``pi`` span matches the older
+        star-style spread. Values must lie in ``(0, 2*pi]``.
+    initial_raan_offset : float, default 0.0
+        Extra offset in radians applied to the seed RAAN before plane spacing
+        is generated. This shifts the whole constellation in RAAN.
+    initial_anomaly_offset : float, default 0.0
+        Extra offset in radians applied to the seed anomaly before slot spacing
+        and inter-plane phasing are generated.
+    anomaly_type : {"mean", "true", "eccentric"} or PositionAngleType, default "mean"
+        Keplerian anomaly coordinate used for ``initial_anomaly_offset`` and
+        Walker phasing. The selected anomaly is also what gets written into each
+        returned state.
+    include_seed : bool, default True
+        If True, include plane 0 / slot 0 in the returned list. When both
+        offsets are zero, that member matches the seed geometry. When either
+        offset is nonzero, the first member is an offset version of the seed.
 
     Returns
     -------
     list[SpacecraftState]
         New initial states with the seed's epoch, mass, attitude snapshot, and
-        additional state dictionaries preserved. Only RAAN and mean anomaly are
-        changed to satisfy the Walker geometry.
+        additional state dictionaries preserved. Only RAAN and the selected
+        anomaly coordinate are changed to satisfy the Walker geometry. Members
+        are returned in plane-major, slot-major order.
 
     Notes
     -----
@@ -318,20 +318,34 @@ def build_walker_initial_states(
     need custom propagators.
     """
 
-    t, p, f, pat = _validate_walker_inputs(total_satellites, num_planes, phasing, pattern)
+    resolved_span = _coerce_raan_span(raan_span)
+    anomaly_label = _normalize_anomaly_type_label(anomaly_type)
+    t, p, f = _validate_walker_geometry(
+        total_satellites,
+        num_planes,
+        phasing,
+        initial_raan_offset=initial_raan_offset,
+        initial_anomaly_offset=initial_anomaly_offset,
+        raan_span=resolved_span,
+    )
     seed_state = _coerce_seed_state(seed)
 
-    _, a0, e0, i0, seed_raan, argp0, seed_mean, inertial_frame = _extract_state_kepler(seed_state)
+    _, a0, e0, i0, seed_raan, argp0, seed_anomaly, inertial_frame = _extract_state_kepler(
+        seed_state,
+        anomaly_type=anomaly_label,
+    )
+    base_raan = _wrap_pm_pi(seed_raan + float(initial_raan_offset))
+    base_anomaly = _wrap_pm_pi(seed_anomaly + float(initial_anomaly_offset))
 
-    out: list[Any] = []
-    for raan_i, mean_i in _iter_walker_raan_mean(
+    out: list[SupportsWalkerState] = []
+    for raan_i, anomaly_i in _iter_walker_raan_anomaly(
         total_satellites=t,
         num_planes=p,
         phasing=f,
-        pattern=pat,
+        raan_span=resolved_span,
         include_seed=include_seed,
-        seed_raan=seed_raan,
-        seed_mean=seed_mean,
+        base_raan=base_raan,
+        base_anomaly=base_anomaly,
     ):
         out.append(
             _state_with_kepler_angles(
@@ -342,19 +356,23 @@ def build_walker_initial_states(
                 i=i0,
                 raan=raan_i,
                 argp=argp0,
-                anomaly=mean_i,
+                anomaly=anomaly_i,
+                anomaly_type=anomaly_label,
             )
         )
     return out
 
 
 def build_walker_constellation(
-    seed: Orbit | Any,
+    seed: WalkerSeed,
     *,
     total_satellites: int,
     num_planes: int,
-    phasing: int = 0,
-    pattern: WalkerPattern = "delta",
+    phasing: int = 1,
+    raan_span: float = DEFAULT_WALKER_RAAN_SPAN,
+    initial_raan_offset: float = 0.0,
+    initial_anomaly_offset: float = 0.0,
+    anomaly_type: Any = "mean",
     include_seed: bool = True,
     orbit_factory: WalkerOrbitFactory | None = None,
 ) -> list[Orbit]:
@@ -363,10 +381,34 @@ def build_walker_constellation(
     Parameters
     ----------
     seed : Orbit | SpacecraftState
-        Seed source for the Walker geometry. Raw ``SpacecraftState`` seeds are
-        supported when ``orbit_factory`` is provided.
-    total_satellites, num_planes, phasing, pattern, include_seed
-        Standard Walker ``T/P/F`` geometry controls.
+        Seed source for the Walker geometry. Normal user workflows should start
+        from an NSTK :class:`~nstk.propagation.orbit.Orbit` and call
+        ``seed_orbit.build_walker_constellation(...)``. Raw Orekit
+        ``SpacecraftState`` seeds are supported when ``orbit_factory`` is
+        provided for advanced interop.
+    total_satellites : int
+        Total number of satellites ``T`` in the constellation.
+    num_planes : int
+        Number of planes ``P``.
+    phasing : int, default 1
+        Walker phasing factor ``F``. Adjacent planes are shifted by
+        ``F * 2*pi / T`` in the selected anomaly coordinate.
+    raan_span : float, default ``2*pi``
+        RAAN span in radians across all planes. A full ``2*pi`` span matches a
+        classic Walker-delta style spread; a ``pi`` span matches the older
+        star-style spread. Values must lie in ``(0, 2*pi]``.
+    initial_raan_offset : float, default 0.0
+        Extra offset in radians applied to the seed RAAN before plane spacing
+        is generated.
+    initial_anomaly_offset : float, default 0.0
+        Extra offset in radians applied to the seed anomaly before slot spacing
+        and inter-plane phasing are generated.
+    anomaly_type : {"mean", "true", "eccentric"} or PositionAngleType, default "mean"
+        Keplerian anomaly coordinate used for the Walker slot spacing and
+        offsets.
+    include_seed : bool, default True
+        If True, include plane 0 / slot 0 in the returned list. When both
+        offsets are zero, that member matches the seed geometry.
     orbit_factory : callable, optional
         Callback of the form ``orbit_factory(state) -> Orbit``. When supplied,
         this function first creates Walkerized ``SpacecraftState`` objects and
@@ -376,7 +418,8 @@ def build_walker_constellation(
     Returns
     -------
     list[Orbit]
-        Walker constellation members as NSTK orbit wrappers.
+        Walker constellation members as NSTK orbit wrappers in plane-major,
+        slot-major order.
 
     Notes
     -----
@@ -388,12 +431,17 @@ def build_walker_constellation(
     """
 
     if orbit_factory is not None:
+        if not callable(orbit_factory):
+            raise TypeError("orbit_factory must be callable")
         states = build_walker_initial_states(
             seed,
             total_satellites=total_satellites,
             num_planes=num_planes,
             phasing=phasing,
-            pattern=pattern,
+            raan_span=raan_span,
+            initial_raan_offset=initial_raan_offset,
+            initial_anomaly_offset=initial_anomaly_offset,
+            anomaly_type=anomaly_type,
             include_seed=include_seed,
         )
         out: list[Orbit] = []
@@ -410,25 +458,40 @@ def build_walker_constellation(
             "otherwise pass orbit_factory=... or use build_walker_initial_states(...)."
         )
 
-    t, p, f, pat = _validate_walker_inputs(total_satellites, num_planes, phasing, pattern)
+    resolved_span = _coerce_raan_span(raan_span)
+    anomaly_label = _normalize_anomaly_type_label(anomaly_type)
+    t, p, f = _validate_walker_geometry(
+        total_satellites,
+        num_planes,
+        phasing,
+        initial_raan_offset=initial_raan_offset,
+        initial_anomaly_offset=initial_anomaly_offset,
+        raan_span=resolved_span,
+    )
     seed_state = seed.propagator.getInitialState()
-    _, _, _, _, seed_raan, _, seed_mean, _ = _extract_state_kepler(seed_state)
+    _, _, _, _, seed_raan, _, seed_anomaly, _ = _extract_state_kepler(
+        seed_state,
+        anomaly_type=anomaly_label,
+    )
+    base_raan = _wrap_pm_pi(seed_raan + float(initial_raan_offset))
+    base_anomaly = _wrap_pm_pi(seed_anomaly + float(initial_anomaly_offset))
     out: list[Orbit] = []
 
-    for raan_i, mean_i in _iter_walker_raan_mean(
+    for raan_i, anomaly_i in _iter_walker_raan_anomaly(
         total_satellites=t,
         num_planes=p,
         phasing=f,
-        pattern=pat,
+        raan_span=resolved_span,
         include_seed=include_seed,
-        seed_raan=seed_raan,
-        seed_mean=seed_mean,
+        base_raan=base_raan,
+        base_anomaly=base_anomaly,
     ):
         try:
             out.append(
                 seed._clone_for_walker(
                     raan=raan_i,
-                    anomaly=mean_i,
+                    anomaly=anomaly_i,
+                    anomaly_type=anomaly_label,
                 )
             )
         except ValueError as exc:
@@ -442,9 +505,8 @@ def build_walker_constellation(
 
 
 __all__ = [
-    "WalkerPattern",
     "WalkerOrbitFactory",
-    "spacecraft_state_from_kepler",
+    "DEFAULT_WALKER_RAAN_SPAN",
     "build_walker_initial_states",
     "build_walker_constellation",
 ]
