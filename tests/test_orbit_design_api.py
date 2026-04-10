@@ -132,6 +132,67 @@ def test_orbit_geodetic_and_attitude_accessors() -> None:
     assert np.allclose(att0, expected_stk_order)
 
 
+def test_orbit_attitude_rate_and_acceleration_accessors() -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+    orbit = Orbit.from_kepler_two_body(
+        epoch=epoch,
+        a=7200e3,
+        e=0.002,
+        i=np.deg2rad(40.0),
+        raan=np.deg2rad(5.0),
+        argp=np.deg2rad(30.0),
+        anomaly=np.deg2rad(20.0),
+    )
+
+    dt_s = np.array([0.0, 20.0, 40.0, 60.0], dtype=np.float64)
+    ts = Time(epoch.unix + dt_s, format="unix", scale="utc")
+
+    rate = orbit.get_attitude_rate(ts)
+    accel = orbit.get_attitude_acceleration(ts)
+
+    assert rate.shape == (4, 3)
+    assert accel.shape == (4, 3)
+    assert rate.unit == (u.rad / u.s)
+    assert accel.unit == (u.rad / (u.s**2))
+    assert np.all(np.isfinite(rate.to_value(u.rad / u.s)))
+    assert np.all(np.isfinite(accel.to_value(u.rad / (u.s**2))))
+
+    rate_scalar = orbit.get_attitude_rate(0.0, as_quantity=False)
+    accel_scalar = orbit.get_attitude_acceleration(0.0, as_quantity=False)
+    assert rate_scalar.shape == (3,)
+    assert accel_scalar.shape == (3,)
+
+    rate_np = orbit.get_attitude_rate(ts, as_quantity=False)
+    accel_np = orbit.get_attitude_acceleration(ts, as_quantity=False)
+
+    assert isinstance(rate_np, np.ndarray)
+    assert isinstance(accel_np, np.ndarray)
+    assert rate_np.shape == (4, 3)
+    assert accel_np.shape == (4, 3)
+    assert np.allclose(rate_np, rate.to_value(u.rad / u.s))
+    assert np.allclose(accel_np, accel.to_value(u.rad / (u.s**2)))
+
+    date0 = orbit.propagator.getInitialState().getDate()
+    expected_rate = np.empty((dt_s.size, 3), dtype=np.float64)
+    expected_accel = np.empty((dt_s.size, 3), dtype=np.float64)
+
+    for i, dt in enumerate(dt_s):
+        state = orbit.propagator.propagate(date0.shiftedBy(float(dt)))
+        spin = state.getAttitude().getSpin()
+        rotation_accel = state.getAttitude().getRotationAcceleration()
+        expected_rate[i] = [float(spin.getX()), float(spin.getY()), float(spin.getZ())]
+        expected_accel[i] = [
+            float(rotation_accel.getX()),
+            float(rotation_accel.getY()),
+            float(rotation_accel.getZ()),
+        ]
+
+    assert np.allclose(rate_np, expected_rate)
+    assert np.allclose(accel_np, expected_accel)
+    assert np.allclose(rate_scalar, expected_rate[0])
+    assert np.allclose(accel_scalar, expected_accel[0])
+
+
 def test_orbit_constructor_choices_two_body_and_numerical() -> None:
     epoch = Time("2026-01-01T00:00:00", scale="utc")
 

@@ -1,8 +1,9 @@
 """High-level Python interface for the standalone Java-first Orekit orbit wrapper.
 
 This module intentionally keeps Python-side work minimal. Heavy propagation,
-ephemeris interpolation, frame transforms, geodetic conversion, and attitude
-queries are executed in Java via ``OrekitOrbitPropagationBridge``.
+ephemeris interpolation, frame transforms, geodetic conversion, attitude
+queries, and attitude-kinematics queries are executed in Java via
+``OrekitOrbitPropagationBridge``.
 
 Design goals:
 - Thin, ergonomic Python API for Orekit users.
@@ -75,7 +76,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 
-from typing import Any, Union
+from typing import Any, Literal, Protocol, TypeAlias, Union
 
 import astropy.units as u
 import numpy as np
@@ -106,6 +107,43 @@ OneAxisEllipsoid = None
 # Lazily built WGS84 ellipsoid in ITRF/IERS2010/simpleEOP
 _WGS84_ELLIPSOID_CACHE = None
 DEFAULT_ATTITUDE = "vvlh"
+
+
+class SupportsFrame(Protocol):
+    """Structural subset of an Orekit ``Frame`` used by this module."""
+
+    def getName(self) -> str: ...
+
+    def isPseudoInertial(self) -> bool: ...
+
+
+class SupportsSpacecraftState(Protocol):
+    """Structural subset of an Orekit ``SpacecraftState`` used by this module."""
+
+    def getOrbit(self) -> Any: ...
+
+    def getMass(self) -> float: ...
+
+    def getFrame(self) -> SupportsFrame: ...
+
+
+class SupportsPropagator(Protocol):
+    """Structural subset of an Orekit ``Propagator`` used by this module."""
+
+    def getInitialState(self) -> SupportsSpacecraftState: ...
+
+
+class SupportsEllipsoid(Protocol):
+    """Structural subset of an Orekit ``OneAxisEllipsoid`` used by this module."""
+
+    def getBodyFrame(self) -> SupportsFrame: ...
+
+
+FrameLike: TypeAlias = SupportsFrame | str | None
+QuantityArray: TypeAlias = u.Quantity | np.ndarray
+QuantityScalarArray: TypeAlias = u.Quantity | np.ndarray | float
+StateFields: TypeAlias = Literal["p", "v", "a", "pv", "pva"]
+StateResult: TypeAlias = dict[str, QuantityScalarArray]
 
 def _bind_java() -> None:
     """Bind Orekit/bridge classes lazily after starting the JVM.
@@ -746,8 +784,8 @@ class OrbitCreationMixin:
     @classmethod
     def from_spacecraft_state(
         cls,
-        state,
-        iers_convention=None,
+        state: SupportsSpacecraftState,
+        iers_convention: Any | None = None,
         simple_eop: bool = True,
         attitude: Any = DEFAULT_ATTITUDE,
     ) -> "Orbit":
@@ -815,10 +853,10 @@ class OrbitCreationMixin:
         raan: float,
         argp: float,
         anomaly: float,
-        anomaly_type=None,
+        anomaly_type: str | Any | None = None,
         mass: float = 1000.0,
-        inertial_frame=None,
-        iers_convention=None,
+        inertial_frame: FrameLike = None,
+        iers_convention: Any | None = None,
         simple_eop: bool = True,
         attitude: Any = DEFAULT_ATTITUDE,
     ) -> "Orbit":
@@ -920,10 +958,10 @@ class OrbitCreationMixin:
         raan: float,
         argp: float,
         anomaly: float,
-        anomaly_type=None,
+        anomaly_type: str | Any | None = None,
         mass: float = 1000.0,
-        inertial_frame=None,
-        iers_convention=None,
+        inertial_frame: FrameLike = None,
+        iers_convention: Any | None = None,
         simple_eop: bool = True,
         attitude: Any = DEFAULT_ATTITUDE,
         *,
@@ -990,10 +1028,45 @@ class OrbitCreationMixin:
             DP853 integration step controls [s].
         gravity_degree, gravity_order : int, default 20
             Spherical harmonic degree/order for Earth gravity.
-        enable_drag, enable_third_body, enable_solid_tides, enable_ocean_tides,
-        enable_relativity, enable_de_sitter, enable_lense_thirring, enable_srp,
-        enable_erp : bool
-            Toggles for optional force models.
+        enable_drag : bool, default False
+            If True, attach an atmospheric drag model.
+        drag_area_m2 : float, default 1.0
+            Cross-sectional area used by the drag model [m^2].
+        drag_cd : float, default 2.2
+            Drag coefficient used by the drag model.
+        solar_activity_strength : {"low", "average", "high"}, default "average"
+            Solar-activity preset used by the drag atmosphere model.
+        enable_third_body : bool, default True
+            If True, attach third-body attraction for the bodies listed in
+            ``third_bodies``.
+        third_bodies : tuple[str, ...], default ("sun", "moon")
+            Named bodies used when ``enable_third_body`` is enabled.
+        enable_solid_tides : bool, default False
+            If True, add solid Earth tides from ``solid_tides_bodies``.
+        solid_tides_bodies : tuple[str, ...], default ("sun", "moon")
+            Bodies that raise solid Earth tides when enabled.
+        enable_ocean_tides : bool, default False
+            If True, add ocean tide gravity corrections.
+        ocean_degree, ocean_order : int, default 8
+            Degree/order used by the ocean tide model.
+        enable_relativity : bool, default False
+            If True, add Schwarzschild relativity.
+        enable_de_sitter : bool, default False
+            If True, add de Sitter relativity.
+        enable_lense_thirring : bool, default False
+            If True, add Lense-Thirring relativity.
+        enable_srp : bool, default False
+            If True, add direct solar-radiation pressure.
+        srp_area_m2 : float, default 1.0
+            Effective SRP cross-sectional area [m^2].
+        srp_cr : float, default 1.2
+            Solar-radiation pressure coefficient.
+        srp_occult_moon : bool, default True
+            If True, include lunar occultation for SRP.
+        enable_erp : bool, default False
+            If True, add Earth rediffused radiation pressure.
+        erp_angular_resolution_deg : float, default 1.0
+            Angular resolution used by the ERP force model [deg].
 
         Returns
         -------
@@ -1168,10 +1241,10 @@ class Orbit(OrbitCreationMixin):
 
     def __init__(
         self,
-        propagator,
-        iers=None,
+        propagator: SupportsPropagator,
+        iers: Any | None = None,
         simple_eop: bool = True,
-    ):
+    ) -> None:
         """Create an ``Orbit`` from an existing Orekit ``Propagator``.
 
         Parameters
@@ -1182,6 +1255,11 @@ class Orbit(OrbitCreationMixin):
             Earth orientation convention for Earth-fixed frame resolution.
         simple_eop : bool, default True
             Whether Earth-fixed frame resolution should use simple EOP mode.
+
+        Notes
+        -----
+        Most users should prefer :meth:`from_kepler_two_body`,
+        :meth:`from_kepler_numerical`, or :meth:`from_spacecraft_state`.
         """
 
         _bind_java()
@@ -1204,8 +1282,8 @@ class Orbit(OrbitCreationMixin):
     @classmethod
     def _from_bridge(
         cls,
-        bridge,
-        iers,
+        bridge: Any,
+        iers: Any | None,
         simple_eop: bool,
     ) -> "Orbit":
         """Internal constructor from a pre-built Java bridge object."""
@@ -1285,12 +1363,17 @@ class Orbit(OrbitCreationMixin):
 
         self._bridge.precompute(float(t_min_s), float(t_max_s))
 
-    def get_native_frame(self):
+    def get_native_frame(self) -> SupportsFrame:
         """Return the native propagation frame used by the underlying propagator.
 
         This frame is also the inertial reference passed into Orekit
         ``LofOffset`` attitude laws when you configure local orbital attitudes
         through :meth:`set_attitude_law`.
+
+        Returns
+        -------
+        org.orekit.frames.Frame
+            Native propagation frame.
         """
 
         return self._native_frame
@@ -1347,7 +1430,7 @@ class Orbit(OrbitCreationMixin):
             self._construction_kwargs["attitude"] = attitude
         return self
 
-    def _resolve_frame(self, frame: Union[Any, str, None]):
+    def _resolve_frame(self, frame: FrameLike) -> SupportsFrame:
         """Resolve output frame from Frame object, name string, or ``None``.
 
         Supported frame strings: ``native``, ``gcrf``, ``icrf``, ``eme2000``,
@@ -1382,17 +1465,25 @@ class Orbit(OrbitCreationMixin):
     def get_p(
         self,
         time: Union[Time, float, int, np.ndarray, u.Quantity],
-        frame: Union[Any, str, None] = None,
+        frame: FrameLike = None,
         as_quantity: bool = True,
-    ):
+    ) -> QuantityArray:
         """Return position in meters.
 
-        The ``time`` input accepts ``astropy.Time``, Orekit ``AbsoluteDate``,
-        seconds from epoch (scalar/array), or a time ``Quantity``.
+        Parameters
+        ----------
+        time : Time | AbsoluteDate | float | int | ndarray | Quantity
+            Query time(s). Numeric values are seconds from :attr:`epoch`.
+        frame : Frame | str | None, optional
+            Output frame. ``None`` means the native propagation frame.
+        as_quantity : bool, default True
+            If True, returns an ``astropy.Quantity`` in meters. Otherwise
+            returns a raw numpy array.
 
-        Scalar time input returns shape ``(3,)``. Vector time input returns
-        shape ``(N, 3)``. When ``as_quantity`` is True the result is an
-        ``astropy.Quantity`` in meters. Otherwise raw numpy output is returned.
+        Returns
+        -------
+        astropy.units.Quantity | numpy.ndarray
+            Shape ``(3,)`` for scalar input or ``(N, 3)`` for vector input.
         """
 
         dt_s, is_scalar = _normalize_time_input(time, self._epoch)
@@ -1402,13 +1493,25 @@ class Orbit(OrbitCreationMixin):
     def get_v(
         self,
         time: Union[Time, float, int, np.ndarray, u.Quantity],
-        frame: Union[Any, str, None] = None,
+        frame: FrameLike = None,
         as_quantity: bool = True,
-    ):
+    ) -> QuantityArray:
         """Return velocity in meters/second.
 
-        ``time`` supports the same formats as :meth:`get_p`, including
-        Orekit ``AbsoluteDate``.
+        Parameters
+        ----------
+        time : Time | AbsoluteDate | float | int | ndarray | Quantity
+            Query time(s). Numeric values are seconds from :attr:`epoch`.
+        frame : Frame | str | None, optional
+            Output frame. ``None`` means the native propagation frame.
+        as_quantity : bool, default True
+            If True, returns an ``astropy.Quantity`` in ``m/s``. Otherwise
+            returns a raw numpy array.
+
+        Returns
+        -------
+        astropy.units.Quantity | numpy.ndarray
+            Shape ``(3,)`` for scalar input or ``(N, 3)`` for vector input.
         """
 
         dt_s, is_scalar = _normalize_time_input(time, self._epoch)
@@ -1418,13 +1521,25 @@ class Orbit(OrbitCreationMixin):
     def get_a(
         self,
         time: Union[Time, float, int, np.ndarray, u.Quantity],
-        frame: Union[Any, str, None] = None,
+        frame: FrameLike = None,
         as_quantity: bool = True,
-    ):
+    ) -> QuantityArray:
         """Return acceleration in meters/second^2.
 
-        ``time`` supports the same formats as :meth:`get_p`, including
-        Orekit ``AbsoluteDate``.
+        Parameters
+        ----------
+        time : Time | AbsoluteDate | float | int | ndarray | Quantity
+            Query time(s). Numeric values are seconds from :attr:`epoch`.
+        frame : Frame | str | None, optional
+            Output frame. ``None`` means the native propagation frame.
+        as_quantity : bool, default True
+            If True, returns an ``astropy.Quantity`` in ``m/s^2``. Otherwise
+            returns a raw numpy array.
+
+        Returns
+        -------
+        astropy.units.Quantity | numpy.ndarray
+            Shape ``(3,)`` for scalar input or ``(N, 3)`` for vector input.
         """
 
         dt_s, is_scalar = _normalize_time_input(time, self._epoch)
@@ -1434,16 +1549,26 @@ class Orbit(OrbitCreationMixin):
     def get_pv(
         self,
         time: Union[Time, float, int, np.ndarray, u.Quantity],
-        frame: Union[Any, str, None] = None,
+        frame: FrameLike = None,
         as_quantity: bool = True,
-    ) -> tuple[Any, Any]:
+    ) -> tuple[QuantityArray, QuantityArray]:
         """Return ``(position, velocity)``.
 
-        ``time`` supports the same formats as :meth:`get_p`, including
-        Orekit ``AbsoluteDate``.
+        Parameters
+        ----------
+        time : Time | AbsoluteDate | float | int | ndarray | Quantity
+            Query time(s). Numeric values are seconds from :attr:`epoch`.
+        frame : Frame | str | None, optional
+            Output frame. ``None`` means the native propagation frame.
+        as_quantity : bool, default True
+            If True, each component is returned as an ``astropy.Quantity``.
+            Otherwise each component is a raw numpy array.
 
-        Each component is shape ``(3,)`` for scalar queries or ``(N, 3)``
-        for vector queries.
+        Returns
+        -------
+        tuple[astropy.units.Quantity | numpy.ndarray, astropy.units.Quantity | numpy.ndarray]
+            Position and velocity. Each component is shape ``(3,)`` for scalar
+            input or ``(N, 3)`` for vector input.
         """
 
         dt_s, is_scalar = _normalize_time_input(time, self._epoch)
@@ -1456,13 +1581,26 @@ class Orbit(OrbitCreationMixin):
     def get_pva(
         self,
         time: Union[Time, float, int, np.ndarray, u.Quantity],
-        frame: Union[Any, str, None] = None,
+        frame: FrameLike = None,
         as_quantity: bool = True,
-    ) -> tuple[Any, Any, Any]:
+    ) -> tuple[QuantityArray, QuantityArray, QuantityArray]:
         """Return ``(position, velocity, acceleration)``.
 
-        ``time`` supports the same formats as :meth:`get_p`, including
-        Orekit ``AbsoluteDate``.
+        Parameters
+        ----------
+        time : Time | AbsoluteDate | float | int | ndarray | Quantity
+            Query time(s). Numeric values are seconds from :attr:`epoch`.
+        frame : Frame | str | None, optional
+            Output frame. ``None`` means the native propagation frame.
+        as_quantity : bool, default True
+            If True, each component is returned as an ``astropy.Quantity``.
+            Otherwise each component is a raw numpy array.
+
+        Returns
+        -------
+        tuple[astropy.units.Quantity | numpy.ndarray, ...]
+            Position, velocity, and acceleration. Each component is shape
+            ``(3,)`` for scalar input or ``(N, 3)`` for vector input.
         """
 
         dt_s, is_scalar = _normalize_time_input(time, self._epoch)
@@ -1476,9 +1614,9 @@ class Orbit(OrbitCreationMixin):
     def get_geodetic(
         self,
         time: Union[Time, float, int, np.ndarray, u.Quantity],
-        ellipsoid=None,
+        ellipsoid: SupportsEllipsoid | None = None,
         as_quantity: bool = True,
-    ) -> tuple[Any, Any, Any]:
+    ) -> tuple[QuantityScalarArray, QuantityScalarArray, QuantityScalarArray]:
         """Return geodetic ``(lat, lon, alt)``.
 
         Parameters
@@ -1491,6 +1629,12 @@ class Orbit(OrbitCreationMixin):
         as_quantity : bool, default True
             If True, returns ``(deg, deg, m)`` quantities. Otherwise returns
             raw numeric outputs.
+
+        Returns
+        -------
+        tuple[astropy.units.Quantity | numpy.ndarray | float, ...]
+            ``(lat, lon, alt)``. Scalar time input returns scalar values;
+            vector time input returns 1D arrays.
         """
 
         if ellipsoid is None:
@@ -1535,13 +1679,93 @@ class Orbit(OrbitCreationMixin):
         - ``q`` and ``-q`` represent the same physical orientation, so raw
           elementwise quaternion comparisons can differ by a sign flip even when
           the attitude is unchanged.
+
+        Returns
+        -------
+        numpy.ndarray
+            Quaternion array in STK scalar-last ordering. Shape ``(4,)`` for
+            scalar input or ``(N, 4)`` for vector input.
         """
 
         dt_s, is_scalar = _normalize_time_input(time, self._epoch)
         out = self._bridge.queryAttitudeQuaternion(dt_s)
         return _reshape_quat(out, is_scalar)
 
-    def plot(self, **kwargs):
+    def get_attitude_rate(
+        self,
+        time: Union[Time, float, int, np.ndarray, u.Quantity],
+        as_quantity: bool = True,
+    ) -> QuantityArray:
+        """Return spacecraft angular velocity vectors at one or more query times.
+
+        ``time`` supports the same formats as :meth:`get_attitude`, including
+        Orekit ``AbsoluteDate``.
+
+        The returned vector is Orekit's attitude spin in the spacecraft/body
+        frame. This differs from :meth:`get_attitude`, which returns the
+        rotation from the attitude reference frame into the body frame.
+
+        Parameters
+        ----------
+        time : Time | AbsoluteDate | float | int | ndarray | Quantity
+            Query time(s). Numeric values are seconds from orbit epoch.
+        as_quantity : bool, default True
+            If True, returns ``rad/s`` quantities. Otherwise returns raw numpy
+            outputs.
+
+        Returns
+        -------
+        astropy.units.Quantity | numpy.ndarray
+            Body-frame angular velocity with shape ``(3,)`` for scalar input or
+            ``(N, 3)`` for vector input.
+        """
+
+        dt_s, is_scalar = _normalize_time_input(time, self._epoch)
+        out = self._bridge.queryAttitudeSpin(dt_s)
+        return _maybe_quantity(
+            _reshape_xyz(out, is_scalar),
+            u.rad / u.s,
+            as_quantity=as_quantity,
+        )
+
+    def get_attitude_acceleration(
+        self,
+        time: Union[Time, float, int, np.ndarray, u.Quantity],
+        as_quantity: bool = True,
+    ) -> QuantityArray:
+        """Return spacecraft angular acceleration vectors at one or more query times.
+
+        ``time`` supports the same formats as :meth:`get_attitude`, including
+        Orekit ``AbsoluteDate``.
+
+        The returned vector is Orekit's attitude rotation acceleration in the
+        spacecraft/body frame. If the underlying Orekit attitude omits rotation
+        acceleration, NSTK returns zeros for that sample.
+
+        Parameters
+        ----------
+        time : Time | AbsoluteDate | float | int | ndarray | Quantity
+            Query time(s). Numeric values are seconds from orbit epoch.
+        as_quantity : bool, default True
+            If True, returns ``rad/s^2`` quantities. Otherwise returns raw
+            numpy outputs.
+
+        Returns
+        -------
+        astropy.units.Quantity | numpy.ndarray
+            Body-frame angular acceleration with shape ``(3,)`` for scalar
+            input or ``(N, 3)`` for vector input.
+        """
+
+        dt_s, is_scalar = _normalize_time_input(time, self._epoch)
+        out = self._bridge.queryAttitudeRotationAcceleration(dt_s)
+        return _maybe_quantity(
+            _reshape_xyz(out, is_scalar),
+            u.rad / (u.s**2),
+            as_quantity=as_quantity,
+        )
+
+    def plot(self, **kwargs: Any) -> tuple[Any, Any]:
         """Plot this orbit using :func:`nstk.plotting.plot_orbits`.
 
         Parameters
@@ -1554,7 +1778,8 @@ class Orbit(OrbitCreationMixin):
         Returns
         -------
         tuple
-            ``(figure, axis)`` from the plotting helper.
+            ``(figure, axis)`` from the plotting helper. The concrete figure
+            and axis types depend on the selected plotting backend/view.
         """
 
         from nstk.plotting.orbits import plot_orbits
@@ -1564,10 +1789,10 @@ class Orbit(OrbitCreationMixin):
     def get_state(
         self,
         time: Union[Time, float, int, np.ndarray, u.Quantity],
-        frame: Union[Any, str, None] = None,
-        fields: str = "pva",
+        frame: FrameLike = None,
+        fields: StateFields = "pva",
         as_quantity: bool = True,
-    ) -> dict[str, Any]:
+    ) -> StateResult:
         """Query one or more Cartesian state components with a single API call.
 
         Parameters
@@ -1587,6 +1812,8 @@ class Orbit(OrbitCreationMixin):
         -------
         dict
             Dictionary containing requested keys from ``{"p", "v", "a"}``.
+            Values are quantities when ``as_quantity`` is True and raw numpy
+            arrays otherwise.
 
         Examples
         --------

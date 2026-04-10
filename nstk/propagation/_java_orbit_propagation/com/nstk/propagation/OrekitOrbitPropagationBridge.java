@@ -277,6 +277,14 @@ public final class OrekitOrbitPropagationBridge {
         return out;
     }
 
+    public synchronized double[] queryAttitudeSpin(final double[] dtSeconds) {
+        return queryAttitudeVector(dtSeconds, false);
+    }
+
+    public synchronized double[] queryAttitudeRotationAcceleration(final double[] dtSeconds) {
+        return queryAttitudeVector(dtSeconds, true);
+    }
+
     private StateBatchResult queryState(
             final double[] dtSeconds,
             final Frame outputFrame,
@@ -314,6 +322,30 @@ public final class OrekitOrbitPropagationBridge {
         }
 
         return new StateBatchResult(p, v, a);
+    }
+
+    private double[] queryAttitudeVector(final double[] dtSeconds, final boolean rotationAcceleration) {
+        final int n = dtSeconds.length;
+        final double[] out = new double[3 * n];
+
+        if (n == 0) {
+            return out;
+        }
+
+        ensureCovered(dtSeconds);
+
+        for (int i = 0; i < n; i++) {
+            final int off = 3 * i;
+            final AbsoluteDate absT = epoch.shiftedBy(dtSeconds[i]);
+            final SpacecraftState state = ephemeris.propagate(absT);
+            final Vector3D vec =
+                    rotationAcceleration
+                            ? state.getAttitude().getRotationAcceleration()
+                            : state.getAttitude().getSpin();
+            copyVectorOrZero(vec, out, off);
+        }
+
+        return out;
     }
 
     private void ensureCovered(final double[] dtSeconds) {
@@ -468,6 +500,5 @@ public final class OrekitOrbitPropagationBridge {
         }
     }
 }
-
 
 

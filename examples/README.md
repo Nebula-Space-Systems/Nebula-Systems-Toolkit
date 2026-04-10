@@ -55,5 +55,6 @@ Use these notebooks in order:
    - Understand NSTK orbit attitude defaults and naming conventions
    - Compare `vvlh`, `lvlh_ccsds`, `lvlh`, `qsw`, and other Orekit LOFs
    - Configure attitudes with strings, `LOFType`, mappings, providers, and callables
+   - Query quaternions, body-frame angular rates, and angular accelerations
 
 These notebooks are the canonical examples for the repository.
