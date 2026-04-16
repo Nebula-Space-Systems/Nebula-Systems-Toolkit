@@ -3,13 +3,28 @@ from __future__ import annotations
 import numpy as np
 from astropy.time import Time
 
-from nstk.propagation.orbit import Orbit
+from nstk.propagation import (
+    NumericalPropagatorFactory,
+    Orbit,
+    TwoBodyPropagatorFactory,
+    build_j2_j3_j4_propagator,
+    build_numerical_propagator,
+    build_two_body_propagator,
+)
 from nstk.time_utils import astropy_time_to_orekit_date
+
+
+def _make_two_body_orbit(*args, **kwargs) -> Orbit:
+    return Orbit(build_two_body_propagator(*args, **kwargs))
+
+
+def _make_numerical_orbit(*args, **kwargs) -> Orbit:
+    return Orbit(build_numerical_propagator(*args, **kwargs))
 
 
 def test_orbit_cartesian_accessors_return_vectorized_numpy() -> None:
     epoch = Time("2026-01-01T00:00:00", scale="utc")
-    orbit = Orbit.from_kepler_two_body(
+    orbit = _make_two_body_orbit(
         epoch=epoch,
         a=7000e3,
         e=0.001,
@@ -50,7 +65,7 @@ def test_orbit_cartesian_accessors_return_vectorized_numpy() -> None:
 
 def test_orbit_geodetic_and_attitude_accessors() -> None:
     epoch = Time("2026-01-01T00:00:00", scale="utc")
-    orbit = Orbit.from_kepler_two_body(
+    orbit = _make_two_body_orbit(
         epoch=epoch,
         a=7200e3,
         e=0.002,
@@ -96,7 +111,7 @@ def test_orbit_geodetic_and_attitude_accessors() -> None:
 
 def test_orbit_attitude_rate_and_acceleration_accessors() -> None:
     epoch = Time("2026-01-01T00:00:00", scale="utc")
-    orbit = Orbit.from_kepler_two_body(
+    orbit = _make_two_body_orbit(
         epoch=epoch,
         a=7200e3,
         e=0.002,
@@ -146,7 +161,7 @@ def test_orbit_attitude_rate_and_acceleration_accessors() -> None:
 def test_orbit_constructor_choices_two_body_and_numerical() -> None:
     epoch = Time("2026-01-01T00:00:00", scale="utc")
 
-    two_body = Orbit.from_kepler_two_body(
+    two_body = _make_two_body_orbit(
         epoch,
         7000e3,
         0.001,
@@ -155,7 +170,7 @@ def test_orbit_constructor_choices_two_body_and_numerical() -> None:
         np.deg2rad(15.0),
         np.deg2rad(10.0),
     )
-    numerical = Orbit.from_kepler_numerical(
+    numerical = _make_numerical_orbit(
         epoch,
         7000e3,
         0.001,
@@ -174,11 +189,37 @@ def test_orbit_constructor_choices_two_body_and_numerical() -> None:
     assert str(numerical.propagator.__class__.__name__) == "org.orekit.propagation.numerical.NumericalPropagator"
 
 
+def test_state_based_factory_classes_cover_old_constructor_behavior() -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+    seed = _make_two_body_orbit(
+        epoch=epoch,
+        a=7000e3,
+        e=0.001,
+        i=np.deg2rad(53.0),
+        raan=np.deg2rad(20.0),
+        argp=np.deg2rad(15.0),
+        anomaly=np.deg2rad(10.0),
+    )
+    state = seed.propagator.getInitialState()
+
+    two_body = TwoBodyPropagatorFactory()(state)
+    numerical = NumericalPropagatorFactory(
+        gravity_degree=8,
+        gravity_order=8,
+        enable_drag=False,
+        enable_third_body=False,
+        enable_srp=False,
+    )(state)
+
+    assert str(two_body.__class__.__name__) == "org.orekit.propagation.analytical.KeplerianPropagator"
+    assert str(numerical.__class__.__name__) == "org.orekit.propagation.numerical.NumericalPropagator"
+
+
 def test_orbit_default_attitude_quaternions_are_available() -> None:
     epoch = Time("2026-01-01T00:00:00", scale="utc")
     t_query = np.array([0.0, 60.0, 120.0], dtype=np.float64)
 
-    orb_default = Orbit.from_kepler_two_body(
+    orb_default = _make_two_body_orbit(
         epoch=epoch,
         a=7000e3,
         e=0.001,
@@ -194,7 +235,7 @@ def test_orbit_default_attitude_quaternions_are_available() -> None:
 
 def test_orbit_accepts_orekit_absolutedate_time_inputs() -> None:
     epoch = Time("2026-01-01T00:00:00", scale="utc")
-    orbit = Orbit.from_kepler_two_body(
+    orbit = _make_two_body_orbit(
         epoch=epoch,
         a=7000e3,
         e=0.001,
@@ -222,3 +263,28 @@ def test_orbit_accepts_orekit_absolutedate_time_inputs() -> None:
     assert r_scalar.shape == (1, 3)
     assert np.all(np.isfinite(r_scalar))
     assert np.allclose(r_scalar[0], r_from_seconds[1], rtol=0.0, atol=1.0e-8)
+
+
+def test_orbit_no_longer_exposes_propagator_constructor_classmethods() -> None:
+    assert not hasattr(Orbit, "from_spacecraft_state")
+    assert not hasattr(Orbit, "from_kepler_two_body")
+    assert not hasattr(Orbit, "from_kepler_numerical")
+
+
+def test_j2_j3_j4_builder_returns_eckstein_hechler_propagator() -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+
+    propagator = build_j2_j3_j4_propagator(
+        epoch=epoch,
+        a=7050e3,
+        e=0.001,
+        i=np.deg2rad(50.0),
+        raan=np.deg2rad(15.0),
+        argp=np.deg2rad(12.0),
+        anomaly=np.deg2rad(8.0),
+    )
+
+    assert (
+        str(propagator.__class__.__name__)
+        == "org.orekit.propagation.analytical.EcksteinHechlerPropagator"
+    )

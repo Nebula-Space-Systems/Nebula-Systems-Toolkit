@@ -7,12 +7,20 @@ import numpy as np
 from astropy.time import Time
 
 from nstk.propagation import orbit as orbit_module
+from nstk.propagation import _propagator_utils as propagator_utils
+from nstk.propagation.propagator_factories import (
+    J2J3J4PropagatorFactory,
+    NumericalPropagatorFactory,
+    PropagatorFactory,
+    TwoBodyPropagatorFactory,
+    _build_keplerian_state,
+)
+from nstk.propagation._propagator_utils import _coerce_position_angle_type
 from nstk.propagation.orbit import (
     Orbit,
     SupportsFrame,
     SupportsSpacecraftState,
     _bind_orbit_java,
-    _coerce_position_angle_type,
 )
 
 
@@ -30,7 +38,7 @@ class SupportsWalkerState(SupportsSpacecraftState, Protocol):
     def getAdditionalStatesDerivatives(self) -> Any: ...
 
 
-WalkerOrbitFactory = Callable[[SupportsWalkerState], Orbit]
+WalkerPropagatorFactory = Callable[[SupportsWalkerState], Any] | PropagatorFactory
 WalkerSeed: TypeAlias = Orbit | SupportsWalkerState
 DEFAULT_WALKER_RAAN_SPAN = 2.0 * math.pi
 
@@ -68,13 +76,14 @@ def _coerce_raan_span(raan_span: float) -> float:
 
 def _normalize_anomaly_type_label(anomaly_type: Any) -> Literal["mean", "true", "eccentric"]:
     _bind_orbit_java()
+    propagator_utils._bind_java()
     pa_type = _coerce_position_angle_type(anomaly_type)
 
-    if pa_type == orbit_module.PositionAngleType.MEAN:
+    if pa_type == propagator_utils.PositionAngleType.MEAN:
         return "mean"
-    if pa_type == orbit_module.PositionAngleType.TRUE:
+    if pa_type == propagator_utils.PositionAngleType.TRUE:
         return "true"
-    if pa_type == orbit_module.PositionAngleType.ECCENTRIC:
+    if pa_type == propagator_utils.PositionAngleType.ECCENTRIC:
         return "eccentric"
     raise ValueError("Unsupported anomaly_type")
 
@@ -364,52 +373,6 @@ def build_walker_initial_states(
     return out
 
 
-def _build_walker_orbits_from_factory(
-    orbit_builder: Callable[..., Orbit],
-    base_kwargs: dict[str, Any],
-    *,
-    total_satellites: int,
-    num_planes: int,
-    phasing: int = 1,
-    raan_span: float = DEFAULT_WALKER_RAAN_SPAN,
-    initial_raan_offset: float = 0.0,
-    initial_anomaly_offset: float = 0.0,
-    anomaly_type: Any = "mean",
-    include_seed: bool = True,
-) -> list[Orbit]:
-    """Build Walker members by repeatedly calling an Orbit factory."""
-
-    resolved_span = _coerce_raan_span(raan_span)
-    anomaly_label = _normalize_anomaly_type_label(anomaly_type)
-    t, p, f = _validate_walker_geometry(
-        total_satellites,
-        num_planes,
-        phasing,
-        initial_raan_offset=initial_raan_offset,
-        initial_anomaly_offset=initial_anomaly_offset,
-        raan_span=resolved_span,
-    )
-    base_raan = _wrap_pm_pi(float(base_kwargs["raan"]) + float(initial_raan_offset))
-    base_anomaly = _wrap_pm_pi(float(base_kwargs["anomaly"]) + float(initial_anomaly_offset))
-
-    out: list[Orbit] = []
-    for raan_i, anomaly_i in _iter_walker_raan_anomaly(
-        total_satellites=t,
-        num_planes=p,
-        phasing=f,
-        raan_span=resolved_span,
-        include_seed=include_seed,
-        base_raan=base_raan,
-        base_anomaly=base_anomaly,
-    ):
-        kwargs = dict(base_kwargs)
-        kwargs["raan"] = float(raan_i)
-        kwargs["anomaly"] = float(anomaly_i)
-        kwargs["anomaly_type"] = anomaly_label
-        out.append(orbit_builder(**kwargs))
-    return out
-
-
 def build_two_body_walker_constellation(
     *,
     epoch: Time,
@@ -435,29 +398,29 @@ def build_two_body_walker_constellation(
 ) -> list[Orbit]:
     """Build a Walker constellation of analytical two-body :class:`Orbit` objects.
 
-    The orbital arguments match :meth:`nstk.propagation.orbit.Orbit.from_kepler_two_body`.
+    The orbital arguments match :func:`nstk.propagation.build_two_body_propagator`.
     Walker layout arguments control how RAAN and anomaly are distributed across
-    planes and slots.
+    planes and slots. Each Walker member is built by generating a Walkerized
+    ``SpacecraftState``, passing it into :class:`TwoBodyPropagatorFactory`, and
+    then wrapping the resulting propagator with :class:`Orbit`.
     """
 
-    base_kwargs = {
-        "epoch": epoch,
-        "a": float(a),
-        "e": float(e),
-        "i": float(i),
-        "raan": float(raan),
-        "argp": float(argp),
-        "anomaly": float(anomaly),
-        "anomaly_type": anomaly_type,
-        "mass": float(mass),
-        "inertial_frame": inertial_frame,
-        "iers_convention": iers_convention,
-        "simple_eop": bool(simple_eop),
-        "should_cache": bool(should_cache),
-    }
-    return _build_walker_orbits_from_factory(
-        Orbit.from_kepler_two_body,
-        base_kwargs,
+    seed_state = _build_keplerian_state(
+        epoch=epoch,
+        a=float(a),
+        e=float(e),
+        i=float(i),
+        raan=float(raan),
+        argp=float(argp),
+        anomaly=float(anomaly),
+        anomaly_type=anomaly_type,
+        mass=float(mass),
+        inertial_frame=inertial_frame,
+        iers_convention=iers_convention,
+        simple_eop=bool(simple_eop),
+    )
+    return build_walker_constellation(
+        seed_state,
         total_satellites=total_satellites,
         num_planes=num_planes,
         phasing=phasing,
@@ -466,6 +429,8 @@ def build_two_body_walker_constellation(
         initial_anomaly_offset=initial_anomaly_offset,
         anomaly_type=anomaly_type,
         include_seed=include_seed,
+        propagator_factory=TwoBodyPropagatorFactory(),
+        should_cache=bool(should_cache),
     )
 
 
@@ -522,56 +487,61 @@ def build_numerical_walker_constellation(
     """Build a Walker constellation of numerical :class:`Orbit` objects.
 
     The orbital and force-model arguments match
-    :meth:`nstk.propagation.orbit.Orbit.from_kepler_numerical`. Walker layout
+    :func:`nstk.propagation.build_numerical_propagator`. Walker layout
     arguments control how RAAN and anomaly are distributed across planes and
-    slots.
+    slots. Each Walker member is built by generating a Walkerized
+    ``SpacecraftState``, passing it into :class:`NumericalPropagatorFactory`,
+    and then wrapping the resulting propagator with :class:`Orbit`.
     """
 
-    base_kwargs = {
-        "epoch": epoch,
-        "a": float(a),
-        "e": float(e),
-        "i": float(i),
-        "raan": float(raan),
-        "argp": float(argp),
-        "anomaly": float(anomaly),
-        "anomaly_type": anomaly_type,
-        "mass": float(mass),
-        "inertial_frame": inertial_frame,
-        "iers_convention": iers_convention,
-        "simple_eop": bool(simple_eop),
-        "should_cache": bool(should_cache),
-        "mu": mu,
-        "position_tolerance_m": float(position_tolerance_m),
-        "min_step_s": float(min_step_s),
-        "max_step_s": float(max_step_s),
-        "initial_step_s": float(initial_step_s),
-        "gravity_degree": int(gravity_degree),
-        "gravity_order": int(gravity_order),
-        "enable_drag": bool(enable_drag),
-        "drag_area_m2": float(drag_area_m2),
-        "drag_cd": float(drag_cd),
-        "solar_activity_strength": solar_activity_strength,
-        "enable_third_body": bool(enable_third_body),
-        "third_bodies": tuple(third_bodies),
-        "enable_solid_tides": bool(enable_solid_tides),
-        "solid_tides_bodies": tuple(solid_tides_bodies),
-        "enable_ocean_tides": bool(enable_ocean_tides),
-        "ocean_degree": int(ocean_degree),
-        "ocean_order": int(ocean_order),
-        "enable_relativity": bool(enable_relativity),
-        "enable_de_sitter": bool(enable_de_sitter),
-        "enable_lense_thirring": bool(enable_lense_thirring),
-        "enable_srp": bool(enable_srp),
-        "srp_area_m2": float(srp_area_m2),
-        "srp_cr": float(srp_cr),
-        "srp_occult_moon": bool(srp_occult_moon),
-        "enable_erp": bool(enable_erp),
-        "erp_angular_resolution_deg": float(erp_angular_resolution_deg),
-    }
-    return _build_walker_orbits_from_factory(
-        Orbit.from_kepler_numerical,
-        base_kwargs,
+    seed_state = _build_keplerian_state(
+        epoch=epoch,
+        a=float(a),
+        e=float(e),
+        i=float(i),
+        raan=float(raan),
+        argp=float(argp),
+        anomaly=float(anomaly),
+        anomaly_type=anomaly_type,
+        mass=float(mass),
+        inertial_frame=inertial_frame,
+        iers_convention=iers_convention,
+        simple_eop=bool(simple_eop),
+        mu=mu,
+    )
+    factory = NumericalPropagatorFactory(
+        iers_convention=iers_convention,
+        simple_eop=bool(simple_eop),
+        mu=mu,
+        position_tolerance_m=float(position_tolerance_m),
+        min_step_s=float(min_step_s),
+        max_step_s=float(max_step_s),
+        initial_step_s=float(initial_step_s),
+        gravity_degree=int(gravity_degree),
+        gravity_order=int(gravity_order),
+        enable_drag=bool(enable_drag),
+        drag_area_m2=float(drag_area_m2),
+        drag_cd=float(drag_cd),
+        solar_activity_strength=solar_activity_strength,
+        enable_third_body=bool(enable_third_body),
+        third_bodies=tuple(third_bodies),
+        enable_solid_tides=bool(enable_solid_tides),
+        solid_tides_bodies=tuple(solid_tides_bodies),
+        enable_ocean_tides=bool(enable_ocean_tides),
+        ocean_degree=int(ocean_degree),
+        ocean_order=int(ocean_order),
+        enable_relativity=bool(enable_relativity),
+        enable_de_sitter=bool(enable_de_sitter),
+        enable_lense_thirring=bool(enable_lense_thirring),
+        enable_srp=bool(enable_srp),
+        srp_area_m2=float(srp_area_m2),
+        srp_cr=float(srp_cr),
+        srp_occult_moon=bool(srp_occult_moon),
+        enable_erp=bool(enable_erp),
+        erp_angular_resolution_deg=float(erp_angular_resolution_deg),
+    )
+    return build_walker_constellation(
+        seed_state,
         total_satellites=total_satellites,
         num_planes=num_planes,
         phasing=phasing,
@@ -580,10 +550,71 @@ def build_numerical_walker_constellation(
         initial_anomaly_offset=initial_anomaly_offset,
         anomaly_type=anomaly_type,
         include_seed=include_seed,
+        propagator_factory=factory,
+        should_cache=bool(should_cache),
     )
 
 
-def build_walker_constellation(
+def build_j2_j3_j4_walker_constellation(
+    *,
+    epoch: Time,
+    a: float,
+    e: float,
+    i: float,
+    raan: float,
+    argp: float,
+    anomaly: float,
+    anomaly_type: Any = "mean",
+    mass: float = 1000.0,
+    inertial_frame: orbit_module.FrameLike = None,
+    iers_convention: Any | None = None,
+    simple_eop: bool = True,
+    should_cache: bool = True,
+    total_satellites: int,
+    num_planes: int,
+    phasing: int = 1,
+    raan_span: float = DEFAULT_WALKER_RAAN_SPAN,
+    initial_raan_offset: float = 0.0,
+    initial_anomaly_offset: float = 0.0,
+    include_seed: bool = True,
+) -> list[Orbit]:
+    """Build a Walker constellation of fast J2/J3/J4 analytical :class:`Orbit` objects.
+
+    The orbital arguments match :func:`nstk.propagation.build_j2_j3_j4_propagator`.
+    Internally this uses :class:`J2J3J4PropagatorFactory` for each Walkerized
+    initial state.
+    """
+
+    seed_state = _build_keplerian_state(
+        epoch=epoch,
+        a=float(a),
+        e=float(e),
+        i=float(i),
+        raan=float(raan),
+        argp=float(argp),
+        anomaly=float(anomaly),
+        anomaly_type=anomaly_type,
+        mass=float(mass),
+        inertial_frame=inertial_frame,
+        iers_convention=iers_convention,
+        simple_eop=bool(simple_eop),
+    )
+    return build_walker_constellation(
+        seed_state,
+        total_satellites=total_satellites,
+        num_planes=num_planes,
+        phasing=phasing,
+        raan_span=raan_span,
+        initial_raan_offset=initial_raan_offset,
+        initial_anomaly_offset=initial_anomaly_offset,
+        anomaly_type=anomaly_type,
+        include_seed=include_seed,
+        propagator_factory=J2J3J4PropagatorFactory(),
+        should_cache=bool(should_cache),
+    )
+
+
+def build_walker_propagators(
     seed: WalkerSeed,
     *,
     total_satellites: int,
@@ -594,17 +625,17 @@ def build_walker_constellation(
     initial_anomaly_offset: float = 0.0,
     anomaly_type: Any = "mean",
     include_seed: bool = True,
-    orbit_factory: WalkerOrbitFactory | None = None,
-) -> list[Orbit]:
-    """Build Walker satellites as NSTK ``Orbit`` objects.
+    propagator_factory: WalkerPropagatorFactory | None = None,
+) -> list[Any]:
+    """Build Walker satellites as Orekit propagators.
 
     Parameters
     ----------
     seed : Orbit | SpacecraftState
         Seed source for the Walker geometry. Normal user workflows should start
         from an NSTK :class:`~nstk.propagation.orbit.Orbit` and call
-        :func:`build_walker_constellation`. Raw Orekit
-        ``SpacecraftState`` seeds are supported when ``orbit_factory`` is
+        :func:`build_walker_propagators`. Raw Orekit
+        ``SpacecraftState`` seeds are supported when ``propagator_factory`` is
         provided for advanced interop.
     total_satellites : int
         Total number of satellites ``T`` in the constellation.
@@ -629,35 +660,35 @@ def build_walker_constellation(
     include_seed : bool, default True
         If True, include plane 0 / slot 0 in the returned list. When both
         offsets are zero, that member matches the seed geometry.
-    orbit_factory : callable, optional
-        Callback of the form ``orbit_factory(state) -> Orbit``. When supplied,
-        this function first creates Walkerized ``SpacecraftState`` objects and
-        then lets the callback build custom propagators or NSTK ``Orbit``
-        wrappers from each state.
+    propagator_factory : callable, optional
+        Callback of the form ``propagator_factory(state) -> Propagator``. This
+        function first creates Walkerized ``SpacecraftState`` objects and then
+        lets the callback build custom Orekit propagators from each state.
 
     Returns
     -------
-    list[Orbit]
-        Walker constellation members as NSTK orbit wrappers in plane-major,
+    list[Propagator]
+        Walker constellation members as Orekit propagators in plane-major,
         slot-major order.
 
     Notes
     -----
     This function always builds Walkerized ``SpacecraftState`` objects first
-    and then calls ``orbit_factory`` to construct the returned orbits. For the
-    common built-in NSTK workflows, prefer
+    and then calls ``propagator_factory`` to construct the returned
+    propagators. For the common built-in NSTK workflows, prefer
     :func:`build_two_body_walker_constellation` or
     :func:`build_numerical_walker_constellation`.
     """
 
-    if orbit_factory is None:
+    if propagator_factory is None:
         raise ValueError(
-            "orbit_factory is required when building Walker Orbit wrappers from an existing "
-            "seed. Pass orbit_factory=..., or use build_two_body_walker_constellation(...) "
-            "or build_numerical_walker_constellation(...) for the built-in NSTK workflows."
+            "propagator_factory is required when building Walker propagators from an existing "
+            "seed. Pass propagator_factory=..., or use build_two_body_walker_constellation(...), "
+            "build_j2_j3_j4_walker_constellation(...), or "
+            "build_numerical_walker_constellation(...) for the built-in NSTK workflows."
         )
-    if not callable(orbit_factory):
-        raise TypeError("orbit_factory must be callable")
+    if not callable(propagator_factory):
+        raise TypeError("propagator_factory must be callable")
 
     states = build_walker_initial_states(
         seed,
@@ -671,20 +702,59 @@ def build_walker_constellation(
         include_seed=include_seed,
     )
 
-    out: list[Orbit] = []
+    out: list[Any] = []
     for state in states:
-        orbit = orbit_factory(state)
-        if not isinstance(orbit, Orbit):
-            raise TypeError("orbit_factory must return nstk.propagation.Orbit instances")
-        out.append(orbit)
+        propagator = propagator_factory(state)
+        if not hasattr(propagator, "getInitialState"):
+            raise TypeError("propagator_factory must return Orekit propagator instances")
+        out.append(propagator)
     return out
 
 
+def build_walker_constellation(
+    seed: WalkerSeed,
+    *,
+    total_satellites: int,
+    num_planes: int,
+    phasing: int = 1,
+    raan_span: float = DEFAULT_WALKER_RAAN_SPAN,
+    initial_raan_offset: float = 0.0,
+    initial_anomaly_offset: float = 0.0,
+    anomaly_type: Any = "mean",
+    include_seed: bool = True,
+    propagator_factory: WalkerPropagatorFactory | None = None,
+    should_cache: bool = True,
+) -> list[Orbit]:
+    """Build Walker satellites as NSTK ``Orbit`` objects.
+
+    This function creates Walkerized ``SpacecraftState`` objects, passes them
+    through ``propagator_factory``, and wraps each returned Orekit propagator
+    with :class:`Orbit`.
+    """
+
+    propagators = build_walker_propagators(
+        seed,
+        total_satellites=total_satellites,
+        num_planes=num_planes,
+        phasing=phasing,
+        raan_span=raan_span,
+        initial_raan_offset=initial_raan_offset,
+        initial_anomaly_offset=initial_anomaly_offset,
+        anomaly_type=anomaly_type,
+        include_seed=include_seed,
+        propagator_factory=propagator_factory,
+    )
+
+    return [Orbit(propagator, should_cache=bool(should_cache)) for propagator in propagators]
+
+
 __all__ = [
-    "WalkerOrbitFactory",
+    "WalkerPropagatorFactory",
     "DEFAULT_WALKER_RAAN_SPAN",
     "build_walker_initial_states",
+    "build_walker_propagators",
     "build_walker_constellation",
     "build_two_body_walker_constellation",
+    "build_j2_j3_j4_walker_constellation",
     "build_numerical_walker_constellation",
 ]

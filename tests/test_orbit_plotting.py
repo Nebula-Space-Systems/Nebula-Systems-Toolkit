@@ -34,18 +34,20 @@ from nstk.plotting.orbits import (
     _view_direction_from_angles,
     plot_orbits as plot_orbits_impl,
 )
-from nstk.propagation.orbit import Orbit
+from nstk.propagation import Orbit, build_two_body_propagator
 
 
 def _make_orbit(*, epoch: Time, raan_deg: float, anomaly_deg: float) -> Orbit:
-    return Orbit.from_kepler_two_body(
-        epoch=epoch,
-        a=7000e3,
-        e=0.001,
-        i=np.deg2rad(53.0),
-        raan=np.deg2rad(raan_deg),
-        argp=np.deg2rad(20.0),
-        anomaly=np.deg2rad(anomaly_deg),
+    return Orbit(
+        build_two_body_propagator(
+            epoch=epoch,
+            a=7000e3,
+            e=0.001,
+            i=np.deg2rad(53.0),
+            raan=np.deg2rad(raan_deg),
+            argp=np.deg2rad(20.0),
+            anomaly=np.deg2rad(anomaly_deg),
+        )
     )
 
 
@@ -281,16 +283,18 @@ def test_orbit_plot_supports_explicit_time_window_in_3d() -> None:
 
 def test_plot_orbits_single_orbit_3d_reports_keplerian_reference_frame() -> None:
     epoch = Time("2026-01-01T00:00:00", scale="utc")
-    orbit = Orbit.from_kepler_two_body(
-        epoch=epoch,
-        a=7000e3,
-        e=0.001,
-        i=np.deg2rad(53.0),
-        raan=np.deg2rad(20.0),
-        argp=np.deg2rad(15.0),
-        anomaly=np.deg2rad(10.0),
-        anomaly_type="mean",
-        inertial_frame="eme2000",
+    orbit = Orbit(
+        build_two_body_propagator(
+            epoch=epoch,
+            a=7000e3,
+            e=0.001,
+            i=np.deg2rad(53.0),
+            raan=np.deg2rad(20.0),
+            argp=np.deg2rad(15.0),
+            anomaly=np.deg2rad(10.0),
+            anomaly_type="mean",
+            inertial_frame="eme2000",
+        )
     )
 
     fig, _ = plot_orbits(orbit, view="3d", show_info=True, show=False)
@@ -336,15 +340,17 @@ def test_orbit_plot_supports_custom_style_controls_in_3d() -> None:
 
 def test_plot_orbits_3d_updates_marker_style_when_camera_changes() -> None:
     epoch = Time("2026-01-01T00:00:00", scale="utc")
-    orbit = Orbit.from_kepler_two_body(
-        epoch=epoch,
-        a=7000e3,
-        e=0.001,
-        i=np.deg2rad(53.0),
-        raan=np.deg2rad(20.0),
-        argp=np.deg2rad(15.0),
-        anomaly=np.deg2rad(10.0),
-        anomaly_type="mean",
+    orbit = Orbit(
+        build_two_body_propagator(
+            epoch=epoch,
+            a=7000e3,
+            e=0.001,
+            i=np.deg2rad(53.0),
+            raan=np.deg2rad(20.0),
+            argp=np.deg2rad(15.0),
+            anomaly=np.deg2rad(10.0),
+            anomaly_type="mean",
+        )
     )
 
     fig, ax = orbit.plot(view="3d", show=False)

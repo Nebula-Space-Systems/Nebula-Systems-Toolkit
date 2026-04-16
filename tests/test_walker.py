@@ -8,11 +8,19 @@ from astropy.time import Time
 
 import nstk.propagation as propagation
 from nstk.propagation import (
+    J2J3J4PropagatorFactory,
+    NumericalPropagatorFactory,
     Orbit,
+    TwoBodyPropagatorFactory,
+    build_j2_j3_j4_propagator,
+    build_j2_j3_j4_walker_constellation,
+    build_numerical_propagator,
     build_numerical_walker_constellation,
+    build_two_body_propagator,
     build_two_body_walker_constellation,
     build_walker_constellation,
     build_walker_initial_states,
+    build_walker_propagators,
 )
 
 
@@ -59,9 +67,17 @@ def _attitude_quaternion(state) -> tuple[float, float, float, float]:
     )
 
 
+def _make_two_body_orbit(*args, **kwargs) -> Orbit:
+    return Orbit(build_two_body_propagator(*args, **kwargs))
+
+
+def _make_numerical_orbit(*args, **kwargs) -> Orbit:
+    return Orbit(build_numerical_propagator(*args, **kwargs))
+
+
 def test_two_body_walker_constellation_defaults_to_full_raan_span_and_phasing_one() -> None:
     epoch = Time("2026-01-01T00:00:00", scale="utc")
-    seed = Orbit.from_kepler_two_body(
+    seed = _make_two_body_orbit(
         epoch=epoch,
         a=7000e3,
         e=0.001,
@@ -107,7 +123,7 @@ def test_two_body_walker_constellation_defaults_to_full_raan_span_and_phasing_on
 
 def test_walker_custom_raan_span_offsets_and_true_anomaly() -> None:
     epoch = Time("2026-01-01T00:00:00", scale="utc")
-    seed = Orbit.from_kepler_two_body(
+    seed = _make_two_body_orbit(
         epoch=epoch,
         a=7050e3,
         e=0.02,
@@ -262,7 +278,7 @@ def test_walker_include_seed_false_and_validation() -> None:
 
 def test_walker_clones_seed_numerical_configuration() -> None:
     epoch = Time("2026-01-01T00:00:00", scale="utc")
-    seed = Orbit.from_kepler_numerical(
+    seed = _make_numerical_orbit(
         epoch=epoch,
         a=7100e3,
         e=0.002,
@@ -328,7 +344,7 @@ def test_walker_clones_seed_numerical_configuration() -> None:
 
 
 def test_build_walker_initial_states_from_orbit_seed() -> None:
-    seed = Orbit.from_kepler_two_body(
+    seed = _make_two_body_orbit(
         epoch=Time("2026-01-01T00:00:00", scale="utc"),
         a=7050e3,
         e=0.0015,
@@ -375,7 +391,7 @@ def test_build_walker_initial_states_from_orbit_seed() -> None:
 
 
 def test_build_walker_initial_states_from_spacecraft_state_seed() -> None:
-    seed_orbit = Orbit.from_kepler_two_body(
+    seed_orbit = _make_two_body_orbit(
         epoch=Time("2026-01-01T00:00:00", scale="utc"),
         a=7050e3,
         e=0.0015,
@@ -421,8 +437,8 @@ def test_build_walker_initial_states_from_spacecraft_state_seed() -> None:
     assert _attitude_quaternion(walker_states[0]) == pytest.approx(seed_quat)
 
 
-def test_build_walker_constellation_with_spacecraft_state_seed_and_orbit_factory() -> None:
-    seed_orbit = Orbit.from_kepler_two_body(
+def test_build_walker_constellation_with_spacecraft_state_seed_and_propagator_factory() -> None:
+    seed_orbit = _make_two_body_orbit(
         epoch=Time("2026-01-01T00:00:00", scale="utc"),
         a=7200e3,
         e=0.002,
@@ -437,16 +453,16 @@ def test_build_walker_constellation_with_spacecraft_state_seed_and_orbit_factory
 
     built_states = []
 
-    def orbit_factory(state) -> Orbit:
+    def propagator_factory(state):
         built_states.append(state)
-        return Orbit.from_spacecraft_state(state)
+        return TwoBodyPropagatorFactory()(state)
 
     walker = build_walker_constellation(
         seed_state,
         total_satellites=4,
         num_planes=2,
         phasing=1,
-        orbit_factory=orbit_factory,
+        propagator_factory=propagator_factory,
     )
     assert len(walker) == 4
     assert len(built_states) == 4
@@ -465,8 +481,60 @@ def test_build_walker_constellation_with_spacecraft_state_seed_and_orbit_factory
         assert _ang_diff(mean, exp_mean) < 1e-9
 
 
-def test_walker_requires_callable_orbit_factory() -> None:
-    seed_orbit = Orbit.from_kepler_two_body(
+def test_build_walker_propagators_returns_raw_propagators() -> None:
+    seed = _make_two_body_orbit(
+        epoch=Time("2026-01-01T00:00:00", scale="utc"),
+        a=7150e3,
+        e=0.001,
+        i=np.deg2rad(54.0),
+        raan=np.deg2rad(18.0),
+        argp=np.deg2rad(11.0),
+        anomaly=np.deg2rad(7.0),
+        anomaly_type="mean",
+    )
+
+    propagators = build_walker_propagators(
+        seed,
+        total_satellites=4,
+        num_planes=2,
+        phasing=1,
+        propagator_factory=J2J3J4PropagatorFactory(),
+    )
+
+    assert len(propagators) == 4
+    assert all(
+        str(propagator.__class__.__name__)
+        == "org.orekit.propagation.analytical.EcksteinHechlerPropagator"
+        for propagator in propagators
+    )
+
+
+def test_j2_j3_j4_walker_constellation_builds_fast_analytical_orbits() -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+
+    walker = build_j2_j3_j4_walker_constellation(
+        epoch=epoch,
+        a=7050e3,
+        e=0.001,
+        i=np.deg2rad(50.0),
+        raan=np.deg2rad(12.0),
+        argp=np.deg2rad(9.0),
+        anomaly=np.deg2rad(6.0),
+        total_satellites=4,
+        num_planes=2,
+        phasing=1,
+    )
+
+    assert len(walker) == 4
+    assert all(
+        str(orbit.propagator.__class__.__name__)
+        == "org.orekit.propagation.analytical.EcksteinHechlerPropagator"
+        for orbit in walker
+    )
+
+
+def test_walker_requires_callable_propagator_factory() -> None:
+    seed_orbit = _make_two_body_orbit(
         epoch=Time("2026-01-01T00:00:00", scale="utc"),
         a=7200e3,
         e=0.002,
@@ -484,12 +552,12 @@ def test_walker_requires_callable_orbit_factory() -> None:
             seed_state,
             total_satellites=4,
             num_planes=2,
-            orbit_factory=object(),
+            propagator_factory=object(),
         )
 
 
-def test_build_walker_constellation_requires_orbit_factory() -> None:
-    seed = Orbit.from_kepler_two_body(
+def test_build_walker_constellation_requires_propagator_factory() -> None:
+    seed = _make_two_body_orbit(
         epoch=Time("2026-01-01T00:00:00", scale="utc"),
         a=7000e3,
         e=0.001,
@@ -499,7 +567,7 @@ def test_build_walker_constellation_requires_orbit_factory() -> None:
         anomaly=np.deg2rad(10.0),
         anomaly_type="mean",
     )
-    with pytest.raises(ValueError, match="orbit_factory"):
+    with pytest.raises(ValueError, match="propagator_factory"):
         build_walker_constellation(
             seed,
             total_satellites=6,

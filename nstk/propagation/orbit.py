@@ -12,10 +12,11 @@ Design goals:
 
 Attitude conventions
 --------------------
-Convenience constructors in this module create propagators with the Java
-bridge's default VVLH attitude provider. When callers construct Orekit
-propagators directly and wrap them with :class:`Orbit`, the attitude provider
-is whatever the caller already configured on that propagator.
+The builder functions in :mod:`nstk.propagation.propagator_factories` attach a
+default VVLH attitude provider unless the caller passes an explicit Orekit
+attitude provider. When callers construct Orekit propagators directly and wrap
+them with :class:`Orbit`, the attitude provider is whatever the caller already
+configured on that propagator.
 
 Common local-orbital-frame axis conventions used in NSTK/Orekit are:
 
@@ -62,8 +63,6 @@ typically the orbit native propagation frame returned by
 """
 
 from __future__ import annotations
-
-import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field, fields as dataclass_fields
 
@@ -81,19 +80,11 @@ from nstk.time_utils import (
     safe_orekit_date_to_astropy_time,
 )
 from nstk._orekit_frames import (
-    _coerce_iers,
-    _coerce_iers_from_suffix,
     _iers_default,
-    _latest_iers_convention,
-    _latest_itrf_version,
     _normalize_frame_name,
-    _resolve_iers_versioned_frame,
-    _resolve_itrf_frame,
     _resolve_named_frame,
-    _resolve_predefined_frame,
-    _supported_iers_suffixes,
-    _supported_itrf_suffixes,
 )
+from ._propagator_utils import _coerce_position_angle_type
 
 from ._orbit_propagation_bridge import (
     get_orbit_propagation_bridge_class,
@@ -113,9 +104,6 @@ else:
 _RUNTIME_BOUND = False
 _JavaOrbitPropagationBridge = None
 FramesFactory = None
-ITRFVersion = None
-Predefined = None
-PositionAngleType = None
 TimeScalesFactory = None
 AbsoluteDate = None
 IERSConventions = None
@@ -305,7 +293,7 @@ def _bind_orbit_java() -> None:
 
     global _RUNTIME_BOUND
     global _JavaOrbitPropagationBridge
-    global FramesFactory, ITRFVersion, Predefined, PositionAngleType, TimeScalesFactory
+    global FramesFactory, TimeScalesFactory
     global AbsoluteDate, IERSConventions, OneAxisEllipsoid
 
     if _RUNTIME_BOUND:
@@ -317,14 +305,10 @@ def _bind_orbit_java() -> None:
     _orekit_frames._bind_java()
 
     from org.orekit.bodies import OneAxisEllipsoid as _OneAxisEllipsoid
-    from org.orekit.orbits import PositionAngleType as _PositionAngleType
     from org.orekit.time import AbsoluteDate as _AbsoluteDate
     from org.orekit.time import TimeScalesFactory as _TimeScalesFactory
 
     FramesFactory = _orekit_frames.FramesFactory
-    ITRFVersion = _orekit_frames.ITRFVersion
-    Predefined = _orekit_frames.Predefined
-    PositionAngleType = _PositionAngleType
     TimeScalesFactory = _TimeScalesFactory
     AbsoluteDate = _AbsoluteDate
     IERSConventions = _orekit_frames.IERSConventions
@@ -440,654 +424,19 @@ def _build_reference_ellipsoid(
         FramesFactory.getITRF(iers, bool(simple_eop)),
     )
 
-
-def _coerce_position_angle_type(anomaly_type):
-    """Normalize anomaly type input to Orekit ``PositionAngleType`` enum."""
-
-    _bind_orbit_java()
-    if anomaly_type is None:
-        return PositionAngleType.MEAN
-    if isinstance(anomaly_type, str):
-        key = anomaly_type.strip().lower()
-        if key == "mean":
-            return PositionAngleType.MEAN
-        if key == "true":
-            return PositionAngleType.TRUE
-        if key == "eccentric":
-            return PositionAngleType.ECCENTRIC
-        raise ValueError(
-            "anomaly_type must be 'mean', 'true', 'eccentric', or PositionAngleType"
-        )
-    if anomaly_type in (
-        PositionAngleType.MEAN,
-        PositionAngleType.TRUE,
-        PositionAngleType.ECCENTRIC,
-    ):
-        return anomaly_type
-    raise ValueError("Unsupported anomaly_type")
-
-
-def _validate_kepler(a: float, e: float, mass: float) -> None:
-    """Validate basic Keplerian constructor inputs."""
-
-    if not np.isfinite(a) or a <= 0.0:
-        raise ValueError("semi-major axis 'a' must be finite and > 0")
-    if not np.isfinite(e) or e < 0.0:
-        raise ValueError("eccentricity 'e' must be finite and >= 0")
-    if not np.isfinite(mass) or mass <= 0.0:
-        raise ValueError("mass must be finite and > 0")
-
-
-def _resolve_solar_activity_strength(level: str):
-    """Map user-friendly solar activity label to Orekit enum."""
-
-    _bind_orbit_java()
-    from org.orekit.models.earth.atmosphere.data import (
-        MarshallSolarActivityFutureEstimation,  # type: ignore
-    )
-
-    key = str(level).strip().lower()
-    if key == "average":
-        return MarshallSolarActivityFutureEstimation.StrengthLevel.AVERAGE
-    if key == "weak":
-        return MarshallSolarActivityFutureEstimation.StrengthLevel.WEAK
-    if key == "strong":
-        return MarshallSolarActivityFutureEstimation.StrengthLevel.STRONG
-    raise ValueError("solar_activity_strength must be 'average', 'weak', or 'strong'")
-
-
-def _resolve_third_body(name: str):
-    """Resolve a third-body name to Orekit celestial body object."""
-
-    _bind_orbit_java()
-    from org.orekit.bodies import CelestialBodyFactory  # type: ignore
-
-    key = str(name).strip().lower()
-    if key == "sun":
-        return CelestialBodyFactory.getSun()
-    if key == "moon":
-        return CelestialBodyFactory.getMoon()
-    if key == "earth":
-        return CelestialBodyFactory.getEarth()
-    if key == "mercury":
-        return CelestialBodyFactory.getMercury()
-    if key == "venus":
-        return CelestialBodyFactory.getVenus()
-    if key == "mars":
-        return CelestialBodyFactory.getMars()
-    if key == "jupiter":
-        return CelestialBodyFactory.getJupiter()
-    if key == "saturn":
-        return CelestialBodyFactory.getSaturn()
-    if key == "uranus":
-        return CelestialBodyFactory.getUranus()
-    if key == "neptune":
-        return CelestialBodyFactory.getNeptune()
-    if key == "pluto":
-        return CelestialBodyFactory.getPluto()
-    raise ValueError(f"Unsupported third body: '{name}'")
-
-
-def _build_earth_shape(itrf):
-    """Create a WGS84 Earth shape in the requested Earth-fixed frame."""
-
-    _bind_orbit_java()
-    from org.orekit.bodies import OneAxisEllipsoid  # type: ignore
-    from org.orekit.utils import Constants  # type: ignore
-
-    return OneAxisEllipsoid(
-        Constants.WGS84_EARTH_EQUATORIAL_RADIUS,
-        Constants.WGS84_EARTH_FLATTENING,
-        itrf,
-    )
-
-
-def _build_numerical_propagator(
-    *,
-    initial_orbit,
-    initial_state,
-    position_tolerance_m: float,
-    min_step_s: float,
-    max_step_s: float,
-    initial_step_s: float,
-):
-    """Create a DP853-based Orekit ``NumericalPropagator`` in Cartesian form."""
-
-    _bind_orbit_java()
-    from org.hipparchus.ode.nonstiff import DormandPrince853Integrator  # type: ignore
-    from org.orekit.orbits import OrbitType  # type: ignore
-    from org.orekit.propagation.numerical import NumericalPropagator  # type: ignore
-
-    tolerances = NumericalPropagator.tolerances(
-        float(position_tolerance_m),
-        initial_orbit,
-        OrbitType.CARTESIAN,
-    )
-
-    integrator = DormandPrince853Integrator(
-        float(min_step_s),
-        float(max_step_s),
-        tolerances[0],
-        tolerances[1],
-    )
-    integrator.setInitialStepSize(float(initial_step_s))
-
-    propagator = NumericalPropagator(integrator)
-    propagator.setOrbitType(OrbitType.CARTESIAN)
-    propagator.setInitialState(initial_state)
-    return propagator
-
-def _configure_numerical_force_models(
-    *,
-    propagator,
-    itrf,
-    utc,
-    iers,
-    simple_eop: bool,
-    mu: float,
-    ae: float,
-    earth_shape,
-    gravity_degree: int = 20,
-    gravity_order: int = 20,
-    enable_drag: bool = False,
-    drag_area_m2: float = 1.0,
-    drag_cd: float = 2.2,
-    solar_activity_strength: str = "average",
-    enable_third_body: bool = True,
-    third_bodies: tuple[str, ...] = ("sun", "moon"),
-    enable_solid_tides: bool = False,
-    solid_tides_bodies: tuple[str, ...] = ("sun", "moon"),
-    enable_ocean_tides: bool = False,
-    ocean_degree: int = 8,
-    ocean_order: int = 8,
-    enable_relativity: bool = False,
-    enable_de_sitter: bool = False,
-    enable_lense_thirring: bool = False,
-    enable_srp: bool = False,
-    srp_area_m2: float = 1.0,
-    srp_cr: float = 1.2,
-    srp_occult_moon: bool = True,
-    enable_erp: bool = False,
-    erp_angular_resolution_deg: float = 1.0,
-) -> None:
-    """Attach selected high-fidelity force models to a numerical propagator.
-
-    Notes
-    -----
-    Harmonic gravity is always configured via
-    ``HolmesFeatherstoneAttractionModel`` using ``gravity_degree`` and
-    ``gravity_order``. Other models are optional toggles.
-    """
-
-    _bind_orbit_java()
-    from org.orekit.forces.drag import DragForce, IsotropicDrag  # type: ignore
-    from org.orekit.forces.gravity import (  # type: ignore
-        DeSitterRelativity,
-        HolmesFeatherstoneAttractionModel,
-        LenseThirringRelativity,
-        OceanTides,
-        Relativity,
-        SolidTides,
-        ThirdBodyAttraction,
-    )
-    from org.orekit.forces.gravity.potential import (  # type: ignore
-        GravityFieldFactory,
-        TideSystem,
-    )
-    from org.orekit.forces.radiation import (  # type: ignore
-        IsotropicRadiationSingleCoefficient,
-        KnockeRediffusedForceModel,
-        SolarRadiationPressure,
-    )
-    from org.orekit.models.earth.atmosphere import NRLMSISE00  # type: ignore
-    from org.orekit.models.earth.atmosphere.data import (  # type: ignore
-        MarshallSolarActivityFutureEstimation,
-    )
-    from org.orekit.time import TimeScalesFactory  # type: ignore
-    from org.orekit.utils import Constants  # type: ignore
-
-    provider = GravityFieldFactory.getNormalizedProvider(
-        int(gravity_degree), int(gravity_order)
-    )
-    propagator.addForceModel(HolmesFeatherstoneAttractionModel(itrf, provider))
-
-    sun = _resolve_third_body("sun")
-    moon = _resolve_third_body("moon")
-    earth_body = _resolve_third_body("earth")
-
-    if enable_drag:
-        msafe = MarshallSolarActivityFutureEstimation(
-            MarshallSolarActivityFutureEstimation.DEFAULT_SUPPORTED_NAMES,
-            _resolve_solar_activity_strength(solar_activity_strength),
-        )
-        atmosphere = NRLMSISE00(msafe, sun, earth_shape)
-        drag_sensitive = IsotropicDrag(float(drag_area_m2), float(drag_cd))
-        propagator.addForceModel(DragForce(atmosphere, drag_sensitive))
-
-    if enable_third_body:
-        for name in third_bodies:
-            propagator.addForceModel(ThirdBodyAttraction(_resolve_third_body(name)))
-
-    if enable_solid_tides or enable_ocean_tides:
-        ut1 = TimeScalesFactory.getUT1(iers, bool(simple_eop))
-        tide_system = TideSystem.ZERO_TIDE
-
-        if enable_solid_tides:
-            for name in solid_tides_bodies:
-                propagator.addForceModel(
-                    SolidTides(
-                        itrf,
-                        float(ae),
-                        float(mu),
-                        tide_system,
-                        iers,
-                        ut1,
-                        _resolve_third_body(name),
-                    )
-                )
-
-        if enable_ocean_tides:
-            propagator.addForceModel(
-                OceanTides(
-                    itrf,
-                    float(ae),
-                    float(mu),
-                    int(ocean_degree),
-                    int(ocean_order),
-                    iers,
-                    ut1,
-                )
-            )
-
-    if enable_relativity:
-        propagator.addForceModel(Relativity(float(mu)))
-    if enable_de_sitter:
-        propagator.addForceModel(DeSitterRelativity(earth_body, sun))
-    if enable_lense_thirring:
-        propagator.addForceModel(LenseThirringRelativity(float(mu), itrf))
-
-    radiation_sensitive = None
-    if enable_srp or enable_erp:
-        radiation_sensitive = IsotropicRadiationSingleCoefficient(
-            float(srp_area_m2), float(srp_cr)
-        )
-
-    if enable_srp:
-        srp = SolarRadiationPressure(sun, earth_shape, radiation_sensitive)
-        if bool(srp_occult_moon):
-            srp.addOccultingBody(moon, Constants.MOON_EQUATORIAL_RADIUS)
-        propagator.addForceModel(srp)
-
-    if enable_erp:
-        if radiation_sensitive is None:
-            radiation_sensitive = IsotropicRadiationSingleCoefficient(
-                float(srp_area_m2), float(srp_cr)
-            )
-        ang_res_rad = math.radians(float(erp_angular_resolution_deg))
-        propagator.addForceModel(
-            KnockeRediffusedForceModel(
-                sun,
-                radiation_sensitive,
-                Constants.WGS84_EARTH_EQUATORIAL_RADIUS,
-                ang_res_rad,
-                utc,
-            )
-        )
-
-class OrbitCreationMixin:
-    """Factory constructors for creating Java-backed :class:`Orbit` objects."""
-
-    @classmethod
-    def from_spacecraft_state(
-        cls,
-        state: SupportsSpacecraftState,
-        iers_convention: Any | None = None,
-        simple_eop: bool = True,
-        should_cache: bool = True,
-    ) -> "Orbit":
-        """Construct an :class:`Orbit` from an existing ``SpacecraftState``.
-
-        Parameters
-        ----------
-        state : org.orekit.propagation.SpacecraftState
-            Initial state used to seed a Java-side propagator.
-        iers_convention : org.orekit.utils.IERSConventions, optional
-            Earth orientation convention used for Earth-fixed frame resolution.
-            Defaults to ``IERS_2010`` when omitted.
-        simple_eop : bool, default True
-            Whether to use simple EOP mode when resolving Earth-fixed frames.
-        Returns
-        -------
-        Orbit
-            New Java-backed orbit wrapper.
-        """
-
-        _bind_orbit_java()
-        iers = _coerce_iers(iers_convention)
-        bridge = _JavaOrbitPropagationBridge.fromSpacecraftState(state, bool(should_cache))
-        orbit = cls._from_bridge(
-            bridge,
-            iers,
-            bool(simple_eop),
-        )
-        return orbit
-
-    @classmethod
-    def from_kepler_two_body(
-        cls,
-        epoch: Time,
-        a: float,
-        e: float,
-        i: float,
-        raan: float,
-        argp: float,
-        anomaly: float,
-        anomaly_type: str | Any | None = None,
-        mass: float = 1000.0,
-        inertial_frame: FrameLike = None,
-        iers_convention: Any | None = None,
-        simple_eop: bool = True,
-        should_cache: bool = True,
-    ) -> "Orbit":
-        """Build a two-body analytical orbit using ``KeplerianPropagator``.
-
-        Parameters
-        ----------
-        epoch : astropy.time.Time
-            Initial orbit epoch (scalar UTC-compatible time).
-        a, e, i, raan, argp, anomaly : float
-            Keplerian elements in SI/radian units:
-            semi-major axis [m], eccentricity [-], inclination [rad],
-            right ascension of ascending node [rad], argument of perigee [rad],
-            and anomaly [rad].
-        anomaly_type : {"mean", "true", "eccentric"} or PositionAngleType, optional
-            Type of the supplied anomaly. Defaults to ``"mean"``.
-        mass : float, default 1000.0
-            Spacecraft mass in kilograms.
-        inertial_frame : Frame | str | None, optional
-            Propagation frame. Must be pseudo-inertial. If ``None``, uses GCRF.
-            String aliases are accepted (for example ``"gcrf"``, ``"eme2000"``).
-        iers_convention : IERSConventions, optional
-            Convention used for Earth-fixed frame resolution.
-        simple_eop : bool, default True
-            Whether to use simple EOP mode for Earth-fixed frames.
-        Returns
-        -------
-        Orbit
-            New analytical two-body orbit wrapper.
-        """
-
-        _bind_orbit_java()
-        _validate_kepler(float(a), float(e), float(mass))
-
-        iers = _coerce_iers(iers_convention)
-        if inertial_frame is None:
-            inertial_frame = FramesFactory.getGCRF()
-        elif isinstance(inertial_frame, str):
-            inertial_frame = _resolve_named_frame(
-                inertial_frame,
-                iers=iers,
-                simple_eop=bool(simple_eop),
-            )
-        if not bool(inertial_frame.isPseudoInertial()):
-            raise ValueError("inertial_frame must be pseudo-inertial")
-
-        bridge = _JavaOrbitPropagationBridge.fromKeplerTwoBody(
-            astropy_time_to_orekit_date(
-                epoch,
-                bind_java=_bind_orbit_java,
-                absolute_date_cls=AbsoluteDate,
-                time_scales_factory=TimeScalesFactory,
-            ),
-            float(a),
-            float(e),
-            float(i),
-            float(raan),
-            float(argp),
-            float(anomaly),
-            _coerce_position_angle_type(anomaly_type),
-            float(mass),
-            inertial_frame,
-            bool(should_cache),
-        )
-        orbit = cls._from_bridge(
-            bridge,
-            iers,
-            bool(simple_eop),
-        )
-        return orbit
-
-    @classmethod
-    def from_kepler_numerical(
-        cls,
-        epoch: Time,
-        a: float,
-        e: float,
-        i: float,
-        raan: float,
-        argp: float,
-        anomaly: float,
-        anomaly_type: str | Any | None = None,
-        mass: float = 1000.0,
-        inertial_frame: FrameLike = None,
-        iers_convention: Any | None = None,
-        simple_eop: bool = True,
-        should_cache: bool = True,
-        *,
-        mu: float | None = None,
-        position_tolerance_m: float = 0.1,
-        min_step_s: float = 1.0e-3,
-        max_step_s: float = 180.0,
-        initial_step_s: float = 20.0,
-        gravity_degree: int = 20,
-        gravity_order: int = 20,
-        enable_drag: bool = False,
-        drag_area_m2: float = 1.0,
-        drag_cd: float = 2.2,
-        solar_activity_strength: str = "average",
-        enable_third_body: bool = True,
-        third_bodies: tuple[str, ...] = ("sun", "moon"),
-        enable_solid_tides: bool = False,
-        solid_tides_bodies: tuple[str, ...] = ("sun", "moon"),
-        enable_ocean_tides: bool = False,
-        ocean_degree: int = 8,
-        ocean_order: int = 8,
-        enable_relativity: bool = False,
-        enable_de_sitter: bool = False,
-        enable_lense_thirring: bool = False,
-        enable_srp: bool = False,
-        srp_area_m2: float = 1.0,
-        srp_cr: float = 1.2,
-        srp_occult_moon: bool = True,
-        enable_erp: bool = False,
-        erp_angular_resolution_deg: float = 1.0,
-    ) -> "Orbit":
-        """Build a high-fidelity numerical orbit from Keplerian elements.
-
-        Uses Orekit ``NumericalPropagator`` with ``DormandPrince853Integrator``
-        and optional force-model toggles for harmonic gravity (degree/order),
-        third-body attraction, tides, drag, SRP, and relativistic terms.
-
-        Parameters
-        ----------
-        epoch : astropy.time.Time
-            Initial orbit epoch (scalar UTC-compatible time).
-        a, e, i, raan, argp, anomaly : float
-            Keplerian elements in SI/radian units.
-        anomaly_type : {"mean", "true", "eccentric"} or PositionAngleType, optional
-            Type of supplied anomaly. Defaults to ``"mean"``.
-        mass : float, default 1000.0
-            Spacecraft mass in kilograms.
-        inertial_frame : Frame | str | None, optional
-            Propagation frame. Must be pseudo-inertial.
-        iers_convention : IERSConventions, optional
-            Convention used when resolving Earth-fixed frames.
-        simple_eop : bool, default True
-            Whether Earth-fixed frame resolution should use simple EOP mode.
-        mu : float | None, optional
-            Gravitational parameter [m^3/s^2]. Defaults to WGS84 Earth ``mu``.
-        position_tolerance_m : float, default 0.1
-            Position tolerance for Orekit integrator tolerance construction.
-        min_step_s, max_step_s, initial_step_s : float
-            DP853 integration step controls [s].
-        gravity_degree, gravity_order : int, default 20
-            Spherical harmonic degree/order for Earth gravity.
-        enable_drag : bool, default False
-            If True, attach an atmospheric drag model.
-        drag_area_m2 : float, default 1.0
-            Cross-sectional area used by the drag model [m^2].
-        drag_cd : float, default 2.2
-            Drag coefficient used by the drag model.
-        solar_activity_strength : {"low", "average", "high"}, default "average"
-            Solar-activity preset used by the drag atmosphere model.
-        enable_third_body : bool, default True
-            If True, attach third-body attraction for the bodies listed in
-            ``third_bodies``.
-        third_bodies : tuple[str, ...], default ("sun", "moon")
-            Named bodies used when ``enable_third_body`` is enabled.
-        enable_solid_tides : bool, default False
-            If True, add solid Earth tides from ``solid_tides_bodies``.
-        solid_tides_bodies : tuple[str, ...], default ("sun", "moon")
-            Bodies that raise solid Earth tides when enabled.
-        enable_ocean_tides : bool, default False
-            If True, add ocean tide gravity corrections.
-        ocean_degree, ocean_order : int, default 8
-            Degree/order used by the ocean tide model.
-        enable_relativity : bool, default False
-            If True, add Schwarzschild relativity.
-        enable_de_sitter : bool, default False
-            If True, add de Sitter relativity.
-        enable_lense_thirring : bool, default False
-            If True, add Lense-Thirring relativity.
-        enable_srp : bool, default False
-            If True, add direct solar-radiation pressure.
-        srp_area_m2 : float, default 1.0
-            Effective SRP cross-sectional area [m^2].
-        srp_cr : float, default 1.2
-            Solar-radiation pressure coefficient.
-        srp_occult_moon : bool, default True
-            If True, include lunar occultation for SRP.
-        enable_erp : bool, default False
-            If True, add Earth rediffused radiation pressure.
-        erp_angular_resolution_deg : float, default 1.0
-            Angular resolution used by the ERP force model [deg].
-
-        Returns
-        -------
-        Orbit
-            New numerical orbit wrapper configured with selected perturbations.
-        """
-
-        _bind_orbit_java()
-        _validate_kepler(float(a), float(e), float(mass))
-
-        if float(min_step_s) <= 0.0 or float(max_step_s) <= 0.0:
-            raise ValueError("min_step_s and max_step_s must be > 0")
-        if float(min_step_s) >= float(max_step_s):
-            raise ValueError("min_step_s must be < max_step_s")
-        if int(gravity_degree) < 0 or int(gravity_order) < 0:
-            raise ValueError("gravity_degree and gravity_order must be >= 0")
-
-        iers = _coerce_iers(iers_convention)
-
-        if inertial_frame is None:
-            inertial_frame = FramesFactory.getGCRF()
-        elif isinstance(inertial_frame, str):
-            inertial_frame = _resolve_named_frame(
-                inertial_frame,
-                iers=iers,
-                simple_eop=bool(simple_eop),
-            )
-
-        if not bool(inertial_frame.isPseudoInertial()):
-            raise ValueError("inertial_frame must be pseudo-inertial")
-
-        from org.orekit.orbits import KeplerianOrbit  # type: ignore
-        from org.orekit.propagation import SpacecraftState  # type: ignore
-        from org.orekit.time import TimeScalesFactory  # type: ignore
-        from org.orekit.utils import Constants  # type: ignore
-
-        mu_val = float(Constants.WGS84_EARTH_MU if mu is None else mu)
-        ae = float(Constants.WGS84_EARTH_EQUATORIAL_RADIUS)
-        date0 = astropy_time_to_orekit_date(
-            epoch,
-            bind_java=_bind_orbit_java,
-            absolute_date_cls=AbsoluteDate,
-            time_scales_factory=TimeScalesFactory,
-        )
-
-        orbit0 = KeplerianOrbit(
-            float(a),
-            float(e),
-            float(i),
-            float(argp),
-            float(raan),
-            float(anomaly),
-            _coerce_position_angle_type(anomaly_type),
-            inertial_frame,
-            date0,
-            mu_val,
-        )
-        state0 = SpacecraftState(orbit0, float(mass))
-
-        propagator = _build_numerical_propagator(
-            initial_orbit=orbit0,
-            initial_state=state0,
-            position_tolerance_m=float(position_tolerance_m),
-            min_step_s=float(min_step_s),
-            max_step_s=float(max_step_s),
-            initial_step_s=float(initial_step_s),
-        )
-
-        itrf = FramesFactory.getITRF(iers, bool(simple_eop))
-        utc = TimeScalesFactory.getUTC()
-        earth_shape = _build_earth_shape(itrf)
-
-        _configure_numerical_force_models(
-            propagator=propagator,
-            itrf=itrf,
-            utc=utc,
-            iers=iers,
-            simple_eop=bool(simple_eop),
-            mu=mu_val,
-            ae=ae,
-            earth_shape=earth_shape,
-            gravity_degree=int(gravity_degree),
-            gravity_order=int(gravity_order),
-            enable_drag=bool(enable_drag),
-            drag_area_m2=float(drag_area_m2),
-            drag_cd=float(drag_cd),
-            solar_activity_strength=solar_activity_strength,
-            enable_third_body=bool(enable_third_body),
-            third_bodies=tuple(third_bodies),
-            enable_solid_tides=bool(enable_solid_tides),
-            solid_tides_bodies=tuple(solid_tides_bodies),
-            enable_ocean_tides=bool(enable_ocean_tides),
-            ocean_degree=int(ocean_degree),
-            ocean_order=int(ocean_order),
-            enable_relativity=bool(enable_relativity),
-            enable_de_sitter=bool(enable_de_sitter),
-            enable_lense_thirring=bool(enable_lense_thirring),
-            enable_srp=bool(enable_srp),
-            srp_area_m2=float(srp_area_m2),
-            srp_cr=float(srp_cr),
-            srp_occult_moon=bool(srp_occult_moon),
-            enable_erp=bool(enable_erp),
-            erp_angular_resolution_deg=float(erp_angular_resolution_deg),
-        )
-
-        orbit = cls(propagator, should_cache=bool(should_cache))
-        orbit._set_frame_resolution_config(iers, bool(simple_eop))
-        return orbit
-
-
-class Orbit(OrbitCreationMixin):
+class Orbit:
     """High-performance vectorized wrapper around a Java Orekit propagator.
 
     This class keeps repeated propagation, frame transforms, attitude
     extraction, orbit-element conversion, and additional-state extraction on
     the Java side so that bulk queries return NumPy arrays with minimal
     Python-Java call overhead.
+
+    Create :class:`Orbit` by wrapping an already-configured Orekit propagator,
+    typically from :mod:`nstk.propagation.propagator_factories`. Common entry
+    points are :func:`nstk.propagation.build_two_body_propagator`,
+    :func:`nstk.propagation.build_j2_j3_j4_propagator`, and
+    :func:`nstk.propagation.build_numerical_propagator`.
 
     Notes
     -----
@@ -1142,8 +491,6 @@ class Orbit(OrbitCreationMixin):
             time_scales_factory=TimeScalesFactory,
         )
         self._frame_cache: dict[str, Any] = {"native": self._native_frame}
-        self._frame_resolution_iers = _iers_default()
-        self._frame_resolution_simple_eop = True
 
     @property
     def epoch_astropy(self) -> Time:
@@ -1267,52 +614,14 @@ class Orbit(OrbitCreationMixin):
         """Discard any cached ephemeris held by the Java bridge."""
         self._bridge.clearCache()
 
-    @classmethod
-    def _from_bridge(
-        cls,
-        bridge: Any,
-        iers: Any | None = None,
-        simple_eop: bool = True,
-    ) -> "Orbit":
-        """Internal constructor from a pre-built Java bridge object."""
-
-        _bind_orbit_java()
-
-        obj = cls.__new__(cls)
-        obj._initialize_from_bridge(bridge)
-        obj._set_frame_resolution_config(iers, simple_eop)
-        return obj
-
-    def _set_frame_resolution_config(
-        self,
-        iers: Any | None = None,
-        simple_eop: bool = True,
-    ) -> None:
-        """Store frame-resolution defaults used by named-frame helpers."""
-
-        self._frame_resolution_iers = _coerce_iers(iers)
-        self._frame_resolution_simple_eop = bool(simple_eop)
-
     def _iers_for_resolution(self):
-        return _coerce_iers(
-            getattr(
-                self,
-                "_frame_resolution_iers",
-                getattr(self, "iers", None),
-            )
-        )
+        return _iers_default()
 
     def _simple_eop_for_resolution(self) -> bool:
-        return bool(
-            getattr(
-                self,
-                "_frame_resolution_simple_eop",
-                getattr(self, "simple_eop", True),
-            )
-        )
+        return True
 
     def _resolve_frame(self, frame: FrameLike) -> SupportsFrame:
-        """Resolve an output frame from Frame object, name string, or ``None``."""
+        """Resolve and cache output frames for repeated vectorized sampling."""
 
         _bind_orbit_java()
 
@@ -2238,119 +1547,3 @@ class Orbit(OrbitCreationMixin):
         from nstk.plotting.orbits import plot_orbits
 
         return plot_orbits(self, **kwargs)
-
-
-if __name__ == "__main__":
-    from time import perf_counter
-
-    epoch = Time("2026-01-01T00:00:00", scale="utc")
-
-    orbit = Orbit.from_kepler_two_body(
-        epoch=epoch,
-        a=7000e3,
-        e=0.001,
-        i=np.deg2rad(53.0),
-        raan=np.deg2rad(20.0),
-        argp=np.deg2rad(15.0),
-        anomaly=np.deg2rad(10.0),
-    )
-
-    # Small sanity check
-    ts_small = Time(
-        epoch.unix + np.array([0.0, 60.0, 120.0], dtype=np.float64),
-        format="unix",
-        scale="utc",
-    )
-    pos, vel, acc = orbit.get_pva(ts_small, frame="gcrf")
-    print("sanity p/v/a shapes:", pos.shape, vel.shape, acc.shape)
-
-    # Speed micro-bench
-    dt_s = np.arange(0, 14 * 86400.0, 30, dtype=np.float64)
-    ts = Time(epoch.unix + dt_s, format="unix", scale="utc")
-
-    # Warmup
-    orbit.get_pv(dt_s[:128], frame="gcrf")
-    orbit.get_geodetic(dt_s[:128])
-    orbit.get_attitude_quat(dt_s[:128], quaternion_convention="scalar_last")
-
-    t0 = perf_counter()
-    p_np, v_np = orbit.get_pv(dt_s, frame="gcrf")
-    t1 = perf_counter()
-
-    t2 = perf_counter()
-    p_t, v_t = orbit.get_pv(ts, frame="gcrf")
-    t3 = perf_counter()
-
-    t4 = perf_counter()
-    geodetic = orbit.get_geodetic(dt_s)
-    t5 = perf_counter()
-
-    t6 = perf_counter()
-    q = orbit.get_attitude_quat(dt_s, quaternion_convention="scalar_last")
-    t7 = perf_counter()
-
-    n = len(dt_s)
-    print(f"get_pv raw ({n} pts): {t1 - t0:.3f} s")
-    print(f"get_pv astropy-time ({n} pts): {t3 - t2:.3f} s")
-    print(f"get_geodetic raw ({n} pts): {t5 - t4:.3f} s")
-    print(f"get_attitude raw ({n} pts): {t7 - t6:.3f} s")
-    print("outputs:", p_np.shape, v_np.shape, p_t.shape, v_t.shape, geodetic.shape, q.shape)
-    # ------------------------------------------------------------------
-    # Benchmark section: analytical vs numerical (DP853 + force models)
-    # ------------------------------------------------------------------
-    print("\n=== Benchmark Section: Two-Body vs Numerical ===")
-
-    bench_dt_s = np.arange(0.0, 2.0 * 86400.0, 60.0, dtype=np.float64)
-    bench_n = bench_dt_s.size
-
-    common = dict(
-        epoch=epoch,
-        a=7000e3,
-        e=0.001,
-        i=np.deg2rad(53.0),
-        raan=np.deg2rad(20.0),
-        argp=np.deg2rad(15.0),
-        anomaly=np.deg2rad(10.0),
-    )
-
-    tb0 = perf_counter()
-    orb_two_body = Orbit.from_kepler_two_body(**common)
-    tb1 = perf_counter()
-
-    orb_two_body.get_pv(bench_dt_s[:64], frame="gcrf")
-    tb2 = perf_counter()
-    r_tb, v_tb = orb_two_body.get_pv(bench_dt_s, frame="gcrf")
-    tb3 = perf_counter()
-
-    num0 = perf_counter()
-    orb_num = Orbit.from_kepler_numerical(
-        **common,
-        gravity_degree=12,
-        gravity_order=12,
-        enable_third_body=True,
-        third_bodies=("sun", "moon"),
-        enable_srp=True,
-        srp_area_m2=1.0,
-        srp_cr=1.2,
-        enable_drag=False,
-    )
-    num1 = perf_counter()
-
-    orb_num.get_pv(bench_dt_s[:64], frame="gcrf")
-    num2 = perf_counter()
-    r_num, v_num = orb_num.get_pv(bench_dt_s, frame="gcrf")
-    num3 = perf_counter()
-
-    print(f"samples: {bench_n}")
-    print(f"two-body build: {tb1 - tb0:.3f} s")
-    print(f"two-body pv query: {tb3 - tb2:.3f} s")
-    print(f"numerical build: {num1 - num0:.3f} s")
-    print(f"numerical pv query: {num3 - num2:.3f} s")
-    print("two-body output:", r_tb.shape, v_tb.shape)
-    print("numerical output:", r_num.shape, v_num.shape)
-
-    # Optional quick consistency indicator at epoch over shared frame.
-    p0_tb, v0_tb = orb_two_body.get_pv(0.0, frame="gcrf")
-    p0_num, v0_num = orb_num.get_pv(0.0, frame="gcrf")
-    print("epoch |dr| (m):", float(np.linalg.norm(p0_tb - p0_num)))
-    print("epoch |dv| (m/s):", float(np.linalg.norm(v0_tb - v0_num)))

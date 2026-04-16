@@ -4,14 +4,17 @@ import numpy as np
 import pytest
 from astropy.time import Time
 
+import nstk._orekit_frames as orekit_frames
 import nstk.propagation.orbit as orbit_module
+import nstk.propagation._propagator_utils as propagator_utils
 import nstk.time_utils as time_utils
-from nstk.propagation.orbit import Orbit
+from nstk.propagation import Orbit, build_two_body_propagator
 
 
 def _make_orbit(*, should_cache: bool = True, inertial_frame: str = "gcrf") -> Orbit:
     epoch = Time("2026-01-01T00:00:00", scale="utc")
-    return Orbit.from_kepler_two_body(
+    return Orbit(
+        build_two_body_propagator(
         epoch=epoch,
         a=7000e3,
         e=0.001,
@@ -20,6 +23,7 @@ def _make_orbit(*, should_cache: bool = True, inertial_frame: str = "gcrf") -> O
         argp=np.deg2rad(15.0),
         anomaly=np.deg2rad(10.0),
         inertial_frame=inertial_frame,
+        ),
         should_cache=should_cache,
     )
 
@@ -42,7 +46,7 @@ def _make_orbit_with_additional_data() -> Orbit:
         np.deg2rad(15.0),
         np.deg2rad(20.0),
         np.deg2rad(10.0),
-        orbit_module._coerce_position_angle_type("mean"),
+        propagator_utils._coerce_position_angle_type("mean"),
         frame,
         orbit_module.astropy_time_to_orekit_date(epoch),
         Constants.WGS84_EARTH_MU,
@@ -321,8 +325,8 @@ def test_orbit_resolve_named_frame_uses_latest_version_when_unspecified() -> Non
     from org.orekit.frames import FramesFactory, Predefined
     from org.orekit.utils import IERSConventions
 
-    latest_iers = orbit_module._latest_iers_convention()
-    latest_itrf = orbit_module._latest_itrf_version()
+    latest_iers = orekit_frames._latest_iers_convention()
+    latest_itrf = orekit_frames._latest_itrf_version()
 
     expected_latest = {
         "itrf": FramesFactory.getITRF(latest_itrf, IERSConventions.IERS_1996, True),

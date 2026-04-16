@@ -2,19 +2,39 @@ from importlib import import_module
 from typing import Any
 
 from nstk.propagation.orbit import Orbit, SampledStates
+from nstk.propagation.propagator_factories import (
+    J2J3J4PropagatorFactory,
+    NumericalPropagatorFactory,
+    PropagatorFactory,
+    TwoBodyPropagatorFactory,
+    build_j2_j3_j4_propagator,
+    build_numerical_propagator,
+    build_two_body_propagator,
+)
 from nstk.propagation.walker import (
+    build_j2_j3_j4_walker_constellation,
     build_numerical_walker_constellation,
     build_two_body_walker_constellation,
     build_walker_constellation,
     build_walker_initial_states,
+    build_walker_propagators,
 )
 
 __all__ = [
     "Orbit",
     "SampledStates",
+    "PropagatorFactory",
+    "TwoBodyPropagatorFactory",
+    "J2J3J4PropagatorFactory",
+    "NumericalPropagatorFactory",
+    "build_two_body_propagator",
+    "build_j2_j3_j4_propagator",
+    "build_numerical_propagator",
     "build_walker_initial_states",
+    "build_walker_propagators",
     "build_walker_constellation",
     "build_two_body_walker_constellation",
+    "build_j2_j3_j4_walker_constellation",
     "build_numerical_walker_constellation",
     "orbit",
 ]
