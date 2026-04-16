@@ -1,16 +1,21 @@
 from importlib import import_module
 from typing import Any
 
-from nstk.propagation.orbit import Orbit
+from nstk.propagation.orbit import Orbit, SampledStates
 from nstk.propagation.walker import (
+    build_numerical_walker_constellation,
+    build_two_body_walker_constellation,
     build_walker_constellation,
     build_walker_initial_states,
 )
 
 __all__ = [
     "Orbit",
+    "SampledStates",
     "build_walker_initial_states",
     "build_walker_constellation",
+    "build_two_body_walker_constellation",
+    "build_numerical_walker_constellation",
     "orbit",
 ]
 

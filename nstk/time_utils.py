@@ -135,6 +135,52 @@ def orekit_date_to_astropy_time(
     )
 
 
+def safe_orekit_date_to_astropy_time(
+    date: Any,
+    fallback: Time,
+    *,
+    bind_java: BindJavaFn | None = None,
+    time_scales_factory: Any | None = None,
+) -> Time:
+    """Convert an Orekit date to Astropy, falling back when conversion fails.
+
+    This is primarily useful for Orekit infinity dates, which Astropy cannot
+    represent directly.
+    """
+
+    try:
+        return orekit_date_to_astropy_time(
+            date,
+            bind_java=bind_java,
+            time_scales_factory=time_scales_factory,
+        )
+    except Exception:
+        return fallback
+
+
+def make_times_astropy(epoch: Time, delta_times_sec: np.ndarray) -> Time:
+    """Build a UTC Astropy time vector from an epoch and second offsets.
+
+    Parameters
+    ----------
+    epoch
+        Reference epoch as a scalar ``astropy.time.Time``.
+    delta_times_sec
+        Scalar or array-like offsets in seconds from ``epoch``.
+
+    Returns
+    -------
+    astropy.time.Time
+        Vectorized sample epochs with shape ``(N,)`` in UTC.
+    """
+
+    return Time(
+        epoch.utc.unix + np.asarray(delta_times_sec, dtype=np.float64),
+        format="unix",
+        scale="utc",
+    )
+
+
 def is_orekit_absolute_date(
     obj: Any,
     *,
@@ -490,7 +536,9 @@ __all__ = [
     "TimedTransformTimeSpec",
     "astropy_time_to_orekit_date",
     "is_orekit_absolute_date",
+    "make_times_astropy",
     "normalize_timed_transform_time_input",
     "normalize_time_to_epoch_seconds",
     "orekit_date_to_astropy_time",
+    "safe_orekit_date_to_astropy_time",
 ]

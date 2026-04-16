@@ -12,6 +12,10 @@ import astropy.units as u
 import jpype
 import numpy as np
 
+from nstk._orekit_frames import (
+    _coerce_iers,
+    _resolve_frame,
+)
 from nstk.time_utils import (
     TimedTransformTimeSpec,
     astropy_time_to_orekit_date,
@@ -26,234 +30,36 @@ from ._timed_rotations_java_bridge import (
 # Lazy-initialized Java bindings
 _RUNTIME_BOUND = False
 _JavaTimedRotationBridge = None
-FramesFactory = None
-ITRFVersion = None
-Predefined = None
-IERSConventions = None
 AbsoluteDate = None
 TimeScalesFactory = None
 
-def _bind_java() -> None:
+
+def _bind_timed_rotations_java() -> None:
+    """Bind timed-rotation Java bridge classes and supporting Orekit types lazily."""
+
     global _RUNTIME_BOUND
-    global _JavaTimedRotationBridge, FramesFactory, ITRFVersion, Predefined, IERSConventions, AbsoluteDate
-    global TimeScalesFactory
+    global _JavaTimedRotationBridge, AbsoluteDate, TimeScalesFactory
 
     if _RUNTIME_BOUND:
         return
 
     from nstk._orekit_runtime import ensure_orekit_runtime
+    import nstk._orekit_frames as _orekit_frames
 
     ensure_orekit_runtime()
+    _orekit_frames._bind_java()
 
-    from org.orekit.frames import FramesFactory as _FramesFactory  # type: ignore
-    from org.orekit.frames import ITRFVersion as _ITRFVersion  # type: ignore
-    from org.orekit.frames import Predefined as _Predefined  # type: ignore
     from org.orekit.time import AbsoluteDate as _AbsoluteDate  # type: ignore
     from org.orekit.time import TimeScalesFactory as _TimeScalesFactory  # type: ignore
-    from org.orekit.utils import IERSConventions as _IERSConventions  # type: ignore
 
-    FramesFactory = _FramesFactory
-    ITRFVersion = _ITRFVersion
-    Predefined = _Predefined
     AbsoluteDate = _AbsoluteDate
     TimeScalesFactory = _TimeScalesFactory
-    IERSConventions = _IERSConventions
     _JavaTimedRotationBridge = get_timed_rotation_bridge_class()
     _RUNTIME_BOUND = True
 
 
-def _normalize_frame_name(name: str) -> str:
-    return str(name).strip().lower().replace("_", "").replace("-", "").replace(" ", "")
-
-
-def _coerce_iers(iers_convention):
-    _bind_java()
-    if iers_convention is None:
-        return _latest_iers_convention()
-    return iers_convention
-
-
-def _resolve_predefined_frame(key: str):
-    _bind_java()
-    for attr in dir(Predefined):
-        if not attr.isupper():
-            continue
-        if _normalize_frame_name(attr) == key:
-            return FramesFactory.getFrame(getattr(Predefined, attr))
-    return None
-
-
-def _supported_iers_suffixes() -> list[str]:
-    _bind_java()
-    return sorted(
-        (
-            attr.removeprefix("IERS_")
-            for attr in dir(IERSConventions)
-            if attr.startswith("IERS_") and attr.removeprefix("IERS_").isdigit()
-        ),
-        key=int,
-    )
-
-
-def _latest_iers_convention():
-    suffixes = _supported_iers_suffixes()
-    if not suffixes:
-        raise RuntimeError("No IERS conventions are available from the Orekit runtime.")
-    return getattr(IERSConventions, f"IERS_{suffixes[-1]}")
-
-
-def _supported_itrf_suffixes() -> list[str]:
-    _bind_java()
-    return sorted(
-        (
-            attr.removeprefix("ITRF_")
-            for attr in dir(ITRFVersion)
-            if attr.startswith("ITRF_") and attr.removeprefix("ITRF_").isdigit()
-        ),
-        key=int,
-    )
-
-
-def _latest_itrf_version():
-    suffixes = _supported_itrf_suffixes()
-    if not suffixes:
-        raise RuntimeError("No ITRF versions are available from the Orekit runtime.")
-    return getattr(ITRFVersion, f"ITRF_{suffixes[-1]}")
-
-
-def _coerce_iers_from_suffix(name: str, suffix: str):
-    _bind_java()
-    attr = f"IERS_{suffix}"
-    convention = getattr(IERSConventions, attr, None)
-    if convention is None:
-        raise ValueError(
-            f"Unsupported IERS convention in frame string: '{name}'. "
-            f"Supported convention suffixes are {', '.join(_supported_iers_suffixes())}."
-        )
-    return convention
-
-
-def _resolve_iers_versioned_frame(name: str, key: str, *, simple_eop: bool):
-    _bind_java()
-
-    prefix_map = {
-        "itrfequinox": lambda iers: FramesFactory.getITRFEquinox(iers, bool(simple_eop)),
-        "itrfcio": lambda iers: FramesFactory.getITRF(iers, bool(simple_eop)),
-        "ecliptic": lambda iers: FramesFactory.getEcliptic(iers),
-        "cirf": lambda iers: FramesFactory.getCIRF(iers, bool(simple_eop)),
-        "gtod": lambda iers: FramesFactory.getGTOD(iers, bool(simple_eop)),
-        "tirf": lambda iers: FramesFactory.getTIRF(iers, bool(simple_eop)),
-        "mod": lambda iers: FramesFactory.getMOD(iers),
-        "tod": lambda iers: FramesFactory.getTOD(iers, bool(simple_eop)),
-    }
-
-    for prefix, factory in prefix_map.items():
-        if not key.startswith(prefix):
-            continue
-        suffix = key[len(prefix) :]
-        if not suffix:
-            return factory(_latest_iers_convention())
-        if suffix.isdigit():
-            return factory(_coerce_iers_from_suffix(name, suffix))
-        continue
-
-    return None
-
-
-def _resolve_itrf_frame(name: str, key: str, *, iers, simple_eop: bool):
-    _bind_java()
-
-    if key == "itrf":
-        return FramesFactory.getITRF(_latest_itrf_version(), iers, bool(simple_eop))
-
-    for prefix in ("itrf", "itrs", "ecef"):
-        if not key.startswith(prefix):
-            continue
-
-        suffix = key[len(prefix) :]
-        if not suffix:
-            return FramesFactory.getITRF(_latest_itrf_version(), iers, bool(simple_eop))
-
-        if suffix.isdigit() and len(suffix) == 4:
-            enum_name = f"ITRF_{suffix}"
-            version = getattr(ITRFVersion, enum_name, None)
-            if version is not None:
-                return FramesFactory.getITRF(version, iers, bool(simple_eop))
-
-            supported_text = ", ".join(_supported_itrf_suffixes())
-            raise ValueError(
-                f"Unsupported ITRF frame string: '{name}'. "
-                f"Supported ITRF versions are: {supported_text}."
-            )
-
-    return None
-
-
-def _resolve_named_frame(name: str, *, iers, simple_eop: bool):
-    _bind_java()
-    key = _normalize_frame_name(name)
-
-    aliases = {
-        "j2000": "eme2000",
-        "gcrs": "gcrf",
-        "itrs": "itrf",
-        "ecef": "itrf",
-        "eci": "gcrf",
-        "veis": "veis1950",
-        "veis50": "veis1950",
-        "meanofdate": "mod",
-        "trueofdate": "tod",
-    }
-    key = aliases.get(key, key)
-
-    predefined_frame = _resolve_predefined_frame(key)
-    if predefined_frame is not None:
-        return predefined_frame
-
-    iers_versioned_frame = _resolve_iers_versioned_frame(
-        name,
-        key,
-        simple_eop=bool(simple_eop),
-    )
-    if iers_versioned_frame is not None:
-        return iers_versioned_frame
-
-    itrf_frame = _resolve_itrf_frame(name, key, iers=iers, simple_eop=bool(simple_eop))
-    if itrf_frame is not None:
-        return itrf_frame
-
-    if key == "gcrf":
-        return FramesFactory.getGCRF()
-    if key == "icrf":
-        return FramesFactory.getICRF()
-    if key == "eme2000":
-        return FramesFactory.getEME2000()
-    if key == "teme":
-        return FramesFactory.getTEME()
-    if key == "mod":
-        return FramesFactory.getMOD(iers)
-    if key == "tod":
-        return FramesFactory.getTOD(iers, bool(simple_eop))
-    if key == "cirf":
-        return FramesFactory.getCIRF(iers, bool(simple_eop))
-    if key == "ecliptic":
-        return FramesFactory.getEcliptic(iers)
-    if key in ("veis1950",):
-        return FramesFactory.getVeis1950()
-    raise ValueError(
-        f"Unsupported frame string: '{name}'. "
-        "Use Orekit Frame objects for custom frames."
-    )
-
-
-def _resolve_frame(frame_like: Any, *, iers, simple_eop: bool):
-    if isinstance(frame_like, str):
-        return _resolve_named_frame(frame_like, iers=iers, simple_eop=bool(simple_eop))
-    return frame_like
-
-
 def _normalize_time_input(time: Any) -> TimedTransformTimeSpec:
-    _bind_java()
+    _bind_timed_rotations_java()
     return normalize_timed_transform_time_input(
         time,
         absolute_date_cls=AbsoluteDate,
@@ -355,9 +161,9 @@ def transform(
         Output shape follows broadcasted input shape with trailing ``(3,)``.
     """
 
-    _bind_java()
+    _bind_timed_rotations_java()
 
-    iers = _coerce_iers(iers_convention)
+    iers = _coerce_iers(iers_convention, when_none="latest")
     from_fr = _resolve_frame(from_frame, iers=iers, simple_eop=bool(simple_eop))
     to_fr = _resolve_frame(to_frame, iers=iers, simple_eop=bool(simple_eop))
 

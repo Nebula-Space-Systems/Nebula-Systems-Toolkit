@@ -268,7 +268,7 @@ def _extract_keplerian_summary(orbit: Any) -> dict[str, str]:
 
 
 def _coerce_orbit_list(orbits: Any) -> list[Any]:
-    if hasattr(orbits, "get_p"):
+    if hasattr(orbits, "get_position") or hasattr(orbits, "get_p"):
         out = [orbits]
     elif isinstance(orbits, Iterable):
         out = list(orbits)
@@ -278,7 +278,7 @@ def _coerce_orbit_list(orbits: Any) -> list[Any]:
     if not out:
         raise ValueError("orbits must contain at least one Orbit")
     for orbit in out:
-        if not hasattr(orbit, "get_p"):
+        if not (hasattr(orbit, "get_position") or hasattr(orbit, "get_p")):
             raise TypeError("all items in orbits must be Orbit-like objects")
     return out
 
@@ -1325,21 +1325,21 @@ def _sample_plot_windows(
         }
 
         if view == "3d":
-            points_km = (
-                np.asarray(orbit.get_p(query_s, frame=_PLOT_3D_FRAME, as_quantity=False), dtype=np.float64)
-                / 1000.0
-            )
+            points_km = np.asarray(
+                orbit.get_position(query_s, frame=_PLOT_3D_FRAME),
+                dtype=np.float64,
+            ) / 1000.0
             if points_km.ndim != 2 or points_km.shape[1] != 3:
-                raise ValueError("orbit.get_p returned an unexpected shape")
+                raise ValueError("orbit.get_position returned an unexpected shape")
             window["points_km"] = points_km
             window["marker_xyz"] = points_km[-1]
         else:
-            lat_deg, lon_deg, alt_m = orbit.get_geodetic(query_s, as_quantity=False)
-            lat_arr = np.asarray(lat_deg, dtype=np.float64)
-            lon_arr = np.asarray(lon_deg, dtype=np.float64)
+            geodetic = np.asarray(orbit.get_geodetic(query_s), dtype=np.float64)
+            lat_arr = geodetic[:, 0]
+            lon_arr = geodetic[:, 1]
             window["lat_deg"] = lat_arr
             window["lon_deg"] = lon_arr
-            window["alt_m"] = np.asarray(alt_m, dtype=np.float64)
+            window["alt_m"] = geodetic[:, 2]
             window["marker_latlon"] = (
                 float(lat_arr[-1]),
                 float(lon_arr[-1]),

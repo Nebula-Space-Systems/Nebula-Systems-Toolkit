@@ -9,6 +9,8 @@ from astropy.time import Time
 import nstk.propagation as propagation
 from nstk.propagation import (
     Orbit,
+    build_numerical_walker_constellation,
+    build_two_body_walker_constellation,
     build_walker_constellation,
     build_walker_initial_states,
 )
@@ -57,9 +59,10 @@ def _attitude_quaternion(state) -> tuple[float, float, float, float]:
     )
 
 
-def test_orbit_build_walker_constellation_defaults_to_full_raan_span_and_phasing_one() -> None:
+def test_two_body_walker_constellation_defaults_to_full_raan_span_and_phasing_one() -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
     seed = Orbit.from_kepler_two_body(
-        epoch=Time("2026-01-01T00:00:00", scale="utc"),
+        epoch=epoch,
         a=7000e3,
         e=0.001,
         i=np.deg2rad(53.0),
@@ -69,7 +72,15 @@ def test_orbit_build_walker_constellation_defaults_to_full_raan_span_and_phasing
         anomaly_type="mean",
     )
 
-    walker = seed.build_walker_constellation(
+    walker = build_two_body_walker_constellation(
+        epoch=epoch,
+        a=7000e3,
+        e=0.001,
+        i=np.deg2rad(53.0),
+        raan=np.deg2rad(20.0),
+        argp=np.deg2rad(15.0),
+        anomaly=np.deg2rad(10.0),
+        anomaly_type="mean",
         total_satellites=6,
         num_planes=3,
         include_seed=True,
@@ -95,8 +106,9 @@ def test_orbit_build_walker_constellation_defaults_to_full_raan_span_and_phasing
 
 
 def test_walker_custom_raan_span_offsets_and_true_anomaly() -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
     seed = Orbit.from_kepler_two_body(
-        epoch=Time("2026-01-01T00:00:00", scale="utc"),
+        epoch=epoch,
         a=7050e3,
         e=0.02,
         i=np.deg2rad(53.0),
@@ -106,14 +118,21 @@ def test_walker_custom_raan_span_offsets_and_true_anomaly() -> None:
         anomaly_type="true",
     )
 
-    walker = seed.build_walker_constellation(
+    walker = build_two_body_walker_constellation(
+        epoch=epoch,
+        a=7050e3,
+        e=0.02,
+        i=np.deg2rad(53.0),
+        raan=np.deg2rad(20.0),
+        argp=np.deg2rad(15.0),
+        anomaly=np.deg2rad(10.0),
+        anomaly_type="true",
         total_satellites=6,
         num_planes=3,
         phasing=2,
         raan_span=math.pi,
         initial_raan_offset=np.deg2rad(15.0),
         initial_anomaly_offset=np.deg2rad(7.5),
-        anomaly_type="true",
         include_seed=False,
     )
     assert len(walker) == 5
@@ -146,8 +165,10 @@ def test_walker_custom_raan_span_offsets_and_true_anomaly() -> None:
 
 
 def test_walker_include_seed_false_and_validation() -> None:
-    seed = Orbit.from_kepler_two_body(
-        epoch=Time("2026-01-01T00:00:00", scale="utc"),
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+
+    walker = build_two_body_walker_constellation(
+        epoch=epoch,
         a=7000e3,
         e=0.001,
         i=np.deg2rad(53.0),
@@ -155,9 +176,6 @@ def test_walker_include_seed_false_and_validation() -> None:
         argp=np.deg2rad(15.0),
         anomaly=np.deg2rad(10.0),
         anomaly_type="mean",
-    )
-
-    walker = seed.build_walker_constellation(
         total_satellites=6,
         num_planes=3,
         phasing=0,
@@ -166,33 +184,76 @@ def test_walker_include_seed_false_and_validation() -> None:
     assert len(walker) == 5
 
     try:
-        _ = seed.build_walker_constellation(total_satellites=5, num_planes=3)
+        _ = build_two_body_walker_constellation(
+            epoch=epoch,
+            a=7000e3,
+            e=0.001,
+            i=np.deg2rad(53.0),
+            raan=np.deg2rad(20.0),
+            argp=np.deg2rad(15.0),
+            anomaly=np.deg2rad(10.0),
+            anomaly_type="mean",
+            total_satellites=5,
+            num_planes=3,
+        )
         assert False, "expected ValueError for non-divisible walker geometry"
     except ValueError:
         pass
 
     with pytest.raises(ValueError, match="<= 2\\*pi"):
-        seed.build_walker_constellation(
+        build_two_body_walker_constellation(
+            epoch=epoch,
+            a=7000e3,
+            e=0.001,
+            i=np.deg2rad(53.0),
+            raan=np.deg2rad(20.0),
+            argp=np.deg2rad(15.0),
+            anomaly=np.deg2rad(10.0),
+            anomaly_type="mean",
             total_satellites=6,
             num_planes=3,
             raan_span=2.1 * math.pi,
         )
 
     with pytest.raises(TypeError, match="unexpected keyword argument 'pattern'"):
-        seed.build_walker_constellation(
+        build_two_body_walker_constellation(
+            epoch=epoch,
+            a=7000e3,
+            e=0.001,
+            i=np.deg2rad(53.0),
+            raan=np.deg2rad(20.0),
+            argp=np.deg2rad(15.0),
+            anomaly=np.deg2rad(10.0),
+            anomaly_type="mean",
             total_satellites=6,
             num_planes=3,
             pattern="star",
         )
 
     with pytest.raises(TypeError, match="integer"):
-        seed.build_walker_constellation(
+        build_two_body_walker_constellation(
+            epoch=epoch,
+            a=7000e3,
+            e=0.001,
+            i=np.deg2rad(53.0),
+            raan=np.deg2rad(20.0),
+            argp=np.deg2rad(15.0),
+            anomaly=np.deg2rad(10.0),
+            anomaly_type="mean",
             total_satellites=True,
             num_planes=3,
         )
 
     with pytest.raises(TypeError, match="constructor"):
-        seed.build_walker_constellation(
+        build_two_body_walker_constellation(
+            epoch=epoch,
+            a=7000e3,
+            e=0.001,
+            i=np.deg2rad(53.0),
+            raan=np.deg2rad(20.0),
+            argp=np.deg2rad(15.0),
+            anomaly=np.deg2rad(10.0),
+            anomaly_type="mean",
             total_satellites=6,
             num_planes=3,
             constructor="numerical",
@@ -200,8 +261,9 @@ def test_walker_include_seed_false_and_validation() -> None:
 
 
 def test_walker_clones_seed_numerical_configuration() -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
     seed = Orbit.from_kepler_numerical(
-        epoch=Time("2026-01-01T00:00:00", scale="utc"),
+        epoch=epoch,
         a=7100e3,
         e=0.002,
         i=np.deg2rad(55.0),
@@ -216,9 +278,22 @@ def test_walker_clones_seed_numerical_configuration() -> None:
         enable_relativity=True,
         enable_srp=True,
     )
-    seed.set_attitude_law("tnw")
 
-    walker = seed.build_walker_constellation(
+    walker = build_numerical_walker_constellation(
+        epoch=epoch,
+        a=7100e3,
+        e=0.002,
+        i=np.deg2rad(55.0),
+        raan=np.deg2rad(30.0),
+        argp=np.deg2rad(25.0),
+        anomaly=np.deg2rad(5.0),
+        anomaly_type="mean",
+        gravity_degree=8,
+        gravity_order=8,
+        enable_drag=False,
+        enable_third_body=True,
+        enable_relativity=True,
+        enable_srp=True,
         total_satellites=4,
         num_planes=2,
         phasing=1,
@@ -236,23 +311,23 @@ def test_walker_clones_seed_numerical_configuration() -> None:
     assert all(_force_model_names(o) == seed_force_models for o in walker)
 
     np.testing.assert_allclose(
-        walker[0].get_p(0.0, frame="native", as_quantity=False),
-        seed.get_p(0.0, frame="native", as_quantity=False),
+        walker[0].get_position(0.0, frame="native"),
+        seed.get_position(0.0, frame="native"),
         atol=1e-6,
     )
     np.testing.assert_allclose(
-        walker[0].get_v(0.0, frame="native", as_quantity=False),
-        seed.get_v(0.0, frame="native", as_quantity=False),
+        walker[0].get_velocity(0.0, frame="native"),
+        seed.get_velocity(0.0, frame="native"),
         atol=1e-6,
     )
     np.testing.assert_allclose(
-        walker[0].get_attitude(0.0),
-        seed.get_attitude(0.0),
+        walker[0].get_attitude_quat(0.0, quaternion_convention="scalar_last"),
+        seed.get_attitude_quat(0.0, quaternion_convention="scalar_last"),
         atol=1e-12,
     )
 
 
-def test_orbit_build_walker_initial_states_convenience_method() -> None:
+def test_build_walker_initial_states_from_orbit_seed() -> None:
     seed = Orbit.from_kepler_two_body(
         epoch=Time("2026-01-01T00:00:00", scale="utc"),
         a=7050e3,
@@ -263,10 +338,10 @@ def test_orbit_build_walker_initial_states_convenience_method() -> None:
         anomaly=np.deg2rad(6.0),
         anomaly_type="mean",
         mass=275.0,
-        attitude="tnw",
     )
 
-    walker_states = seed.build_walker_initial_states(
+    walker_states = build_walker_initial_states(
+        seed,
         total_satellites=6,
         num_planes=3,
         phasing=1,
@@ -310,7 +385,6 @@ def test_build_walker_initial_states_from_spacecraft_state_seed() -> None:
         anomaly=np.deg2rad(6.0),
         anomaly_type="mean",
         mass=275.0,
-        attitude="tnw",
     )
     seed_state = seed_orbit.propagator.getInitialState()
 
@@ -414,7 +488,7 @@ def test_walker_requires_callable_orbit_factory() -> None:
         )
 
 
-def test_walker_requires_orbit_factory_for_generic_orbit_wrappers() -> None:
+def test_build_walker_constellation_requires_orbit_factory() -> None:
     seed = Orbit.from_kepler_two_body(
         epoch=Time("2026-01-01T00:00:00", scale="utc"),
         a=7000e3,
@@ -425,11 +499,9 @@ def test_walker_requires_orbit_factory_for_generic_orbit_wrappers() -> None:
         anomaly=np.deg2rad(10.0),
         anomaly_type="mean",
     )
-    generic_seed = Orbit(seed.propagator, iers=seed.iers, simple_eop=seed.simple_eop)
-
     with pytest.raises(ValueError, match="orbit_factory"):
         build_walker_constellation(
-            generic_seed,
+            seed,
             total_satellites=6,
             num_planes=3,
         )
