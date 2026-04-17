@@ -140,10 +140,13 @@ integration model valid when the provider is attached to an Orekit propagator.
 
 ## Known Limitations
 
-- The provider currently does not use checkpoint caching. Every query
-  integrates from the fixed reference epoch.
-- That is the correct deterministic behavior, but it can be expensive for very
-  long time spans or very dense attitude sampling.
+- The provider can use deterministic checkpoint caching instead of integrating
+  all the way from the fixed reference epoch on every query.
+- The checkpoint lattice is fixed and anchored at the reference epoch, so the
+  evaluation path for a given query depends only on the query time and cache
+  settings, not on previous call order.
+- The default cache spacing is 1 second, which is aimed at dense orbit
+  sampling. For sparse queries, a larger cache step reduces checkpoint buildup.
 - The finite-difference derivative quality depends on the configured finite
   difference step. Too large a step smears sharp ideal-yaw features; too small
   a step can amplify numerical noise and increase runtime.

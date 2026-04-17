@@ -267,10 +267,11 @@ class RateLimitedYawSteeringProvider:
 
     The commanded yaw acceleration uses PD tracking plus ideal feed-forward
     acceleration and is saturated to ``max_yaw_acceleration_rad_s2``. The yaw
-    rate is saturated to ``max_yaw_rate_rad_s``. Because the yaw state is
-    recomputed from the fixed reference epoch on every query, the provider is
-    deterministic and safe for Orekit propagators that request attitudes out of
-    chronological order.
+    rate is saturated to ``max_yaw_rate_rad_s``. Internally, the Java
+    implementation can use a deterministic fixed-grid checkpoint cache, but the
+    computed yaw state still depends only on the fixed reference epoch, initial
+    state, requested date, and control settings, so it remains safe for Orekit
+    propagators that request attitudes out of chronological order.
 
     Parameters
     ----------
@@ -314,6 +315,18 @@ class RateLimitedYawSteeringProvider:
         Centered finite-difference step [s] used to derive ideal yaw-rate and
         yaw-acceleration reference terms from Orekit's ideal ``YawSteering``
         law.
+    enable_cache : bool, default True
+        Whether to enable deterministic fixed-grid checkpoint caching inside
+        the Java provider. When enabled and the provider is bound to a global
+        PV source, yaw integration no longer restarts from ``reference_epoch``
+        on every query.
+    cache_step_s : float, default 1.0
+        Fixed checkpoint spacing [s] used by the deterministic cache lattice
+        when ``enable_cache=True``. Smaller values trade memory and upfront
+        checkpoint generation for faster dense sampling. For roughly 1 Hz
+        attitude sampling, the default ``cache_step_s=1.0`` is usually the
+        right starting point. For sparser queries, increase this value to
+        reduce checkpoint buildup.
     iers_convention : org.orekit.utils.IERSConventions, optional
         IERS convention used only when ``earth_shape`` is omitted and NSTK
         needs to build a default WGS84 Earth ellipsoid.
@@ -340,6 +353,8 @@ class RateLimitedYawSteeringProvider:
     initial_yaw_rad: float = 0.0
     initial_yaw_rate_rad_s: float = 0.0
     finite_difference_step_s: float = 0.25
+    enable_cache: bool = True
+    cache_step_s: float = 1.0
     iers_convention: Any | None = None
     simple_eop: bool = True
     _inertial_frame: Any = field(init=False, repr=False)
@@ -348,6 +363,7 @@ class RateLimitedYawSteeringProvider:
     _earth_shape: Any = field(init=False, repr=False)
     _sun_provider: Any = field(init=False, repr=False)
     _java_provider: Any = field(init=False, repr=False)
+    _bound_provider_cache: dict[int, Any] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Validate inputs and build the underlying Java provider."""
@@ -379,6 +395,8 @@ class RateLimitedYawSteeringProvider:
             or float(self.finite_difference_step_s) <= 0.0
         ):
             raise ValueError("finite_difference_step_s must be finite and > 0")
+        if not np.isfinite(float(self.cache_step_s)) or float(self.cache_step_s) <= 0.0:
+            raise ValueError("cache_step_s must be finite and > 0")
 
         self._inertial_frame = _resolve_inertial_frame(
             self.inertial_frame,
@@ -413,7 +431,10 @@ class RateLimitedYawSteeringProvider:
             float(self.initial_yaw_rad),
             float(self.initial_yaw_rate_rad_s),
             float(self.finite_difference_step_s),
+            bool(self.enable_cache),
+            float(self.cache_step_s),
         )
+        self._bound_provider_cache = {}
 
     @property
     def java(self) -> OrekitAttitudeProvider:
@@ -447,7 +468,12 @@ class RateLimitedYawSteeringProvider:
 
         if pv_provider is None:
             return self._java_provider
-        return self._java_provider.withPVProvider(pv_provider)
+        key = id(pv_provider)
+        bound = self._bound_provider_cache.get(key)
+        if bound is None:
+            bound = self._java_provider.withPVProvider(pv_provider)
+            self._bound_provider_cache[key] = bound
+        return bound
 
     def get_actual_yaw_state(
         self,
@@ -484,8 +510,9 @@ class RateLimitedYawSteeringProvider:
             iers_convention=self.iers_convention,
             simple_eop=bool(self.simple_eop),
         )
+        bound_provider = self.to_orekit(pv_provider=pv_provider)
         return np.asarray(
-            self._java_provider.getTrackedYawState(pv_provider, query_date, query_frame).toArray(),
+            bound_provider.getTrackedYawState(pv_provider, query_date, query_frame).toArray(),
             dtype=np.float64,
         )
 
@@ -524,8 +551,9 @@ class RateLimitedYawSteeringProvider:
             iers_convention=self.iers_convention,
             simple_eop=bool(self.simple_eop),
         )
+        bound_provider = self.to_orekit(pv_provider=pv_provider)
         return np.asarray(
-            self._java_provider.getReferenceYawState(pv_provider, query_date, query_frame).toArray(),
+            bound_provider.getReferenceYawState(pv_provider, query_date, query_frame).toArray(),
             dtype=np.float64,
         )
 

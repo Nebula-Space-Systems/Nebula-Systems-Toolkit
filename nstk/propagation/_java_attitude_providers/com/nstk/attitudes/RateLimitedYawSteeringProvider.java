@@ -1,5 +1,7 @@
 package com.nstk.attitudes;
 
+import java.util.NavigableMap;
+import java.util.TreeMap;
 import java.util.stream.Stream;
 
 import org.hipparchus.CalculusFieldElement;
@@ -9,8 +11,11 @@ import org.hipparchus.geometry.euclidean.threed.RotationConvention;
 import org.hipparchus.geometry.euclidean.threed.Vector3D;
 import org.hipparchus.ode.ODEIntegrator;
 import org.hipparchus.ode.ODEState;
+import org.hipparchus.ode.ODEStateAndDerivative;
 import org.hipparchus.ode.OrdinaryDifferentialEquation;
 import org.hipparchus.ode.nonstiff.DormandPrince853Integrator;
+import org.hipparchus.ode.sampling.ODEStateInterpolator;
+import org.hipparchus.ode.sampling.ODEStepHandler;
 import org.hipparchus.util.FastMath;
 import org.hipparchus.util.MathUtils;
 import org.orekit.attitudes.Attitude;
@@ -78,12 +83,15 @@ import org.orekit.utils.TimeStampedPVCoordinates;
  */
 public class RateLimitedYawSteeringProvider implements AttitudeProvider {
 
-    private static final double DEFAULT_MIN_STEP = 1.0e-12;
-    private static final double DEFAULT_MAX_STEP = 30.0;
-    private static final double[] DEFAULT_ABS_TOL = {1.0e-11, 1.0e-12};
-    private static final double[] DEFAULT_REL_TOL = {1.0e-9, 1.0e-9};
+    private static final double DEFAULT_MIN_STEP = 1.0e-8;
+    private static final double DEFAULT_MAX_STEP = 600.0;
+    private static final double[] DEFAULT_ABS_TOL = {1.0e-7, 1.0e-8};
+    private static final double[] DEFAULT_REL_TOL = {1.0e-6, 1.0e-6};
+    private static final boolean DEFAULT_CACHE_ENABLED = true;
+    private static final double DEFAULT_CACHE_STEP = 1.0;
     private static final double EPS_RATE_LIMIT = 1.0e-12;
     private static final double EPS_AXIS_NORM = 1.0e-15;
+    private static final double EPS_TIME = 1.0e-14;
 
     private final Frame inertialFrame;
     private final BodyShape bodyShape;
@@ -98,8 +106,12 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
     private final double omega0;
     private final double finiteDifferenceStep;
     private final PVCoordinatesProvider trajectoryProvider;
+    private final boolean cacheEnabled;
+    private final double cacheStep;
     private final GroundPointing baseLaw;
     private final YawSteering idealLaw;
+    private final Object checkpointLock;
+    private final NavigableMap<Long, YawStateSnapshot> checkpointCache;
 
     /**
      * Create a deterministic rate-limited yaw-steering provider.
@@ -143,6 +155,58 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
                 psi0,
                 omega0,
                 finiteDifferenceStep,
+                DEFAULT_CACHE_ENABLED,
+                DEFAULT_CACHE_STEP);
+    }
+
+    /**
+     * Create a deterministic rate-limited yaw-steering provider with deterministic checkpoint caching.
+     *
+     * @param inertialFrame pseudo-inertial frame used by the nadir and yaw-steering laws
+     * @param bodyShape central-body shape used by the nadir-pointing base law
+     * @param sunProvider Sun ephemeris provider used by Orekit yaw steering
+     * @param phasingAxis spacecraft body-fixed phasing axis used by Orekit yaw steering
+     * @param maxYawRate maximum allowed yaw-rate magnitude in radians per second
+     * @param maxYawAcceleration maximum allowed yaw-acceleration magnitude in radians per second squared
+     * @param kp proportional gain for yaw-angle tracking
+     * @param kd derivative gain for yaw-rate tracking
+     * @param referenceEpoch fixed integration reference epoch
+     * @param psi0 actual yaw angle at {@code referenceEpoch} in radians
+     * @param omega0 actual yaw rate at {@code referenceEpoch} in radians per second
+     * @param finiteDifferenceStep centered finite-difference step in seconds for reference derivatives
+     * @param cacheEnabled whether deterministic fixed-grid checkpoint caching is enabled
+     * @param cacheStep checkpoint spacing in seconds when caching is enabled
+     */
+    public RateLimitedYawSteeringProvider(
+            final Frame inertialFrame,
+            final BodyShape bodyShape,
+            final ExtendedPositionProvider sunProvider,
+            final Vector3D phasingAxis,
+            final double maxYawRate,
+            final double maxYawAcceleration,
+            final double kp,
+            final double kd,
+            final AbsoluteDate referenceEpoch,
+            final double psi0,
+            final double omega0,
+            final double finiteDifferenceStep,
+            final boolean cacheEnabled,
+            final double cacheStep) {
+        this(
+                inertialFrame,
+                bodyShape,
+                sunProvider,
+                phasingAxis,
+                maxYawRate,
+                maxYawAcceleration,
+                kp,
+                kd,
+                referenceEpoch,
+                psi0,
+                omega0,
+                finiteDifferenceStep,
+                cacheEnabled,
+                cacheStep,
                 null);
     }
 
@@ -159,6 +223,8 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
             final double psi0,
             final double omega0,
             final double finiteDifferenceStep,
+            final boolean cacheEnabled,
+            final double cacheStep,
             final PVCoordinatesProvider trajectoryProvider) {
 
         if (inertialFrame == null) {
@@ -203,6 +269,9 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
         if (!Double.isFinite(finiteDifferenceStep) || finiteDifferenceStep <= 0.0) {
             throw new IllegalArgumentException("finiteDifferenceStep must be finite and > 0");
         }
+        if (!Double.isFinite(cacheStep) || cacheStep <= 0.0) {
+            throw new IllegalArgumentException("cacheStep must be finite and > 0");
+        }
 
         this.inertialFrame = inertialFrame;
         this.bodyShape = bodyShape;
@@ -217,8 +286,12 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
         this.omega0 = omega0;
         this.finiteDifferenceStep = finiteDifferenceStep;
         this.trajectoryProvider = trajectoryProvider;
+        this.cacheEnabled = cacheEnabled;
+        this.cacheStep = cacheStep;
         this.baseLaw = new NadirPointing(inertialFrame, bodyShape);
         this.idealLaw = new YawSteering(inertialFrame, baseLaw, sunProvider, this.phasingAxis);
+        this.checkpointLock = new Object();
+        this.checkpointCache = new TreeMap<>();
     }
 
     /**
@@ -248,6 +321,8 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
                 psi0,
                 omega0,
                 finiteDifferenceStep,
+                cacheEnabled,
+                cacheStep,
                 pvProvider);
     }
 
@@ -299,6 +374,63 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
         return computeReferenceYawState(pvProv, date, frame == null ? inertialFrame : frame);
     }
 
+    /**
+     * Sample body angular-rate or angular-acceleration vectors for a batch of query times.
+     *
+     * <p>This bulk path is intended for vectorized NSTK sampling. It integrates the internal yaw
+     * dynamics deterministically across the requested time set without relying on previous call
+     * order or forcing the generic checkpoint cache to materialize an entire dense lattice up to
+     * the farthest requested time.
+     *
+     * @param pvProv orbit/PV provider used by the underlying Orekit attitude laws
+     * @param queryEpoch epoch relative to which {@code dtSeconds} are expressed
+     * @param dtSeconds requested query times in seconds relative to {@code queryEpoch}
+     * @param frame reference frame used for evaluating the base and ideal attitudes
+     * @param rotationAcceleration if {@code true}, return angular-acceleration vectors;
+     *     otherwise return angular-rate vectors
+     * @return packed XYZ vectors of length {@code 3 * dtSeconds.length}
+     */
+    public double[] sampleBodyAngularVectors(
+            final PVCoordinatesProvider pvProv,
+            final AbsoluteDate queryEpoch,
+            final double[] dtSeconds,
+            final Frame frame,
+            final boolean rotationAcceleration) {
+
+        final int n = dtSeconds == null ? 0 : dtSeconds.length;
+        final double[] out = new double[3 * n];
+        if (n == 0) {
+            return out;
+        }
+
+        final Frame evaluationFrame = frame == null ? inertialFrame : frame;
+        final PVCoordinatesProvider effectivePvProvider = selectPvProvider(pvProv);
+        final double epochOffset = queryEpoch.durationFrom(referenceEpoch);
+        final double[] targetTimes = new double[n];
+
+        for (int i = 0; i < n; i++) {
+            if (!Double.isFinite(dtSeconds[i])) {
+                throw new IllegalArgumentException("query times must be finite");
+            }
+            targetTimes[i] = epochOffset + dtSeconds[i];
+        }
+
+        final YawStateSnapshot[] yawStates = sampleYawStateBatch(effectivePvProvider, evaluationFrame, targetTimes);
+        for (int i = 0; i < n; i++) {
+            final AbsoluteDate date = queryEpoch.shiftedBy(dtSeconds[i]);
+            final Attitude baseAttitude = baseLaw.getAttitude(effectivePvProvider, date, evaluationFrame);
+            final TimeStampedAngularCoordinates actualOrientation =
+                    buildActualOrientation(date, baseAttitude, yawStates[i]);
+            final Vector3D vec =
+                    rotationAcceleration
+                            ? actualOrientation.getRotationAcceleration()
+                            : actualOrientation.getRotationRate();
+            copyVectorOrZero(vec, out, 3 * i);
+        }
+
+        return out;
+    }
+
     @Override
     public Attitude getAttitude(
             final PVCoordinatesProvider pvProv,
@@ -309,17 +441,8 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
         final PVCoordinatesProvider effectivePvProvider = selectPvProvider(pvProv);
         final Attitude baseAttitude = baseLaw.getAttitude(effectivePvProvider, date, evaluationFrame);
         final YawStateSnapshot yawState = integrateYawState(effectivePvProvider, date, evaluationFrame);
-
-        final Rotation yawRotation =
-                new Rotation(Vector3D.PLUS_K, yawState.psi, RotationConvention.FRAME_TRANSFORM);
-        final TimeStampedAngularCoordinates yawOffset = new TimeStampedAngularCoordinates(
-                date,
-                yawRotation,
-                new Vector3D(0.0, 0.0, yawState.omega),
-                new Vector3D(0.0, 0.0, yawState.alpha));
-
         final TimeStampedAngularCoordinates actualOrientation =
-                yawOffset.addOffset(baseAttitude.getOrientation());
+                buildActualOrientation(date, baseAttitude, yawState);
         return new Attitude(evaluationFrame, actualOrientation);
     }
 
@@ -351,12 +474,90 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
             final AbsoluteDate date,
             final Frame frame) {
 
-        final double duration = date.durationFrom(referenceEpoch);
-        final double initialOmega = clampYawRate(omega0);
+        final double targetTime = date.durationFrom(referenceEpoch);
+        if (!canUseCheckpointCache(frame)) {
+            return integrateBetween(
+                    pvProv,
+                    frame,
+                    0.0,
+                    new YawStateSnapshot(psi0, clampYawRate(omega0), Double.NaN),
+                    targetTime);
+        }
 
-        if (duration == 0.0) {
-            final double alpha0 = computeYawAcceleration(pvProv, referenceEpoch, frame, psi0, initialOmega);
-            return new YawStateSnapshot(psi0, initialOmega, alpha0);
+        final long checkpointIndex = selectCheckpointIndex(targetTime);
+        final YawStateSnapshot checkpointState = getOrCreateCheckpoint(pvProv, frame, checkpointIndex);
+        final double checkpointTime = checkpointIndex * cacheStep;
+        return integrateBetween(pvProv, frame, checkpointTime, checkpointState, targetTime);
+    }
+
+    private PVCoordinatesProvider selectPvProvider(final PVCoordinatesProvider callTimeProvider) {
+        return trajectoryProvider != null ? trajectoryProvider : callTimeProvider;
+    }
+
+    private boolean canUseCheckpointCache(final Frame frame) {
+        return cacheEnabled && trajectoryProvider != null && inertialFrame.equals(frame);
+    }
+
+    private long selectCheckpointIndex(final double targetTime) {
+        if (FastMath.abs(targetTime) <= EPS_TIME) {
+            return 0L;
+        }
+        if (targetTime > 0.0) {
+            return (long) FastMath.floor(targetTime / cacheStep);
+        }
+        return (long) FastMath.ceil(targetTime / cacheStep);
+    }
+
+    private YawStateSnapshot getOrCreateCheckpoint(
+            final PVCoordinatesProvider pvProv,
+            final Frame frame,
+            final long targetIndex) {
+
+        synchronized (checkpointLock) {
+            YawStateSnapshot existing = checkpointCache.get(targetIndex);
+            if (existing != null) {
+                return existing;
+            }
+
+            ensureReferenceCheckpoint(pvProv, frame);
+
+            if (targetIndex > 0L) {
+                long currentIndex = checkpointCache.floorKey(targetIndex);
+                YawStateSnapshot currentState = checkpointCache.get(currentIndex);
+                if (currentIndex < targetIndex) {
+                    populateCheckpointRange(pvProv, frame, currentIndex, currentState, targetIndex);
+                }
+                return checkpointCache.get(targetIndex);
+            }
+
+            long currentIndex = checkpointCache.ceilingKey(targetIndex);
+            if (currentIndex > 0L) {
+                currentIndex = 0L;
+            }
+            YawStateSnapshot currentState = checkpointCache.get(currentIndex);
+            if (currentIndex > targetIndex) {
+                populateCheckpointRange(pvProv, frame, currentIndex, currentState, targetIndex);
+            }
+            return checkpointCache.get(targetIndex);
+        }
+    }
+
+    private void ensureReferenceCheckpoint(final PVCoordinatesProvider pvProv, final Frame frame) {
+        if (!checkpointCache.containsKey(0L)) {
+            final double initialOmega = clampYawRate(omega0);
+            checkpointCache.put(0L, new YawStateSnapshot(psi0, initialOmega, Double.NaN));
+        }
+    }
+
+    private YawStateSnapshot integrateBetween(
+            final PVCoordinatesProvider pvProv,
+            final Frame frame,
+            final double startTime,
+            final YawStateSnapshot startState,
+            final double targetTime) {
+
+        if (FastMath.abs(targetTime - startTime) <= EPS_TIME) {
+            return ensureYawAcceleration(pvProv, frame, targetTime, startState);
         }
 
         final YawDynamics dynamics = new YawDynamics(pvProv, frame);
@@ -367,17 +568,15 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
                         DEFAULT_ABS_TOL,
                         DEFAULT_REL_TOL);
 
-        final ODEState initialState = new ODEState(0.0, new double[] {psi0, initialOmega});
-        final ODEState finalState = integrator.integrate(dynamics, initialState, duration);
+        final ODEState initialState = new ODEState(
+                startTime,
+                new double[] {startState.psi, clampYawRate(startState.omega)});
+        final ODEStateAndDerivative finalState = integrator.integrate(dynamics, initialState, targetTime);
 
         final double psi = finalState.getPrimaryState()[0];
         final double omega = clampYawRate(finalState.getPrimaryState()[1]);
-        final double alpha = computeYawAcceleration(pvProv, date, frame, psi, omega);
+        final double alpha = finalState.getPrimaryDerivative()[1];
         return new YawStateSnapshot(psi, omega, alpha);
-    }
-
-    private PVCoordinatesProvider selectPvProvider(final PVCoordinatesProvider callTimeProvider) {
-        return trajectoryProvider != null ? trajectoryProvider : callTimeProvider;
     }
 
     private YawStateSnapshot computeReferenceYawState(
@@ -385,11 +584,159 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
             final AbsoluteDate date,
             final Frame frame) {
 
+        final Attitude baseAttitude = baseLaw.getAttitude(pvProv, date, frame);
+        final Attitude idealAttitude = idealLaw.getAttitude(pvProv, date, frame);
+        final AngularCoordinates relative =
+                idealAttitude.getOrientation().subtractOffset(baseAttitude.getOrientation());
+
+        final double psi = extractYawFromRelativeRotation(relative.getRotation());
+        final Vector3D rotationRate = relative.getRotationRate();
+        final Vector3D rotationAcceleration = relative.getRotationAcceleration();
+
+        if (rotationRate == null || rotationAcceleration == null) {
+            return computeReferenceYawStateFiniteDifference(pvProv, date, frame);
+        }
+
+        final double omega = rotationRate.getZ();
+        final double alpha = rotationAcceleration.getZ();
+        if (!Double.isFinite(omega) || !Double.isFinite(alpha)) {
+            return computeReferenceYawStateFiniteDifference(pvProv, date, frame);
+        }
+
+        return new YawStateSnapshot(psi, omega, alpha);
+    }
+
+    private YawStateSnapshot[] sampleYawStateBatch(
+            final PVCoordinatesProvider pvProv,
+            final Frame frame,
+            final double[] targetTimes) {
+
+        final int n = targetTimes.length;
+        final YawStateSnapshot[] out = new YawStateSnapshot[n];
+        final long[] order = sortIndicesByTime(targetTimes);
+        final YawStateSnapshot referenceState = ensureYawAcceleration(
+                pvProv,
+                frame,
+                0.0,
+                new YawStateSnapshot(psi0, clampYawRate(omega0), Double.NaN));
+        int firstNonNegative = 0;
+        while (firstNonNegative < n && targetTimes[(int) order[firstNonNegative]] < -EPS_TIME) {
+            firstNonNegative++;
+        }
+
+        integrateSortedQuerySegment(
+                pvProv,
+                frame,
+                targetTimes,
+                order,
+                firstNonNegative - 1,
+                -1,
+                -1,
+                referenceState,
+                out);
+        integrateSortedQuerySegment(
+                pvProv,
+                frame,
+                targetTimes,
+                order,
+                firstNonNegative,
+                n,
+                1,
+                referenceState,
+                out);
+
+        return out;
+    }
+
+    private void integrateSortedQuerySegment(
+            final PVCoordinatesProvider pvProv,
+            final Frame frame,
+            final double[] targetTimes,
+            final long[] order,
+            final int startIndex,
+            final int stopIndexExclusive,
+            final int indexStep,
+            final YawStateSnapshot referenceState,
+            final YawStateSnapshot[] out) {
+
+        if (startIndex == stopIndexExclusive) {
+            return;
+        }
+
+        int cursor = startIndex;
+        while (cursor != stopIndexExclusive) {
+            final int idx = (int) order[cursor];
+            if (FastMath.abs(targetTimes[idx]) > EPS_TIME) {
+                break;
+            }
+            out[idx] = referenceState;
+            cursor += indexStep;
+        }
+        if (cursor == stopIndexExclusive) {
+            return;
+        }
+        final int firstCursor = cursor;
+
+        final int lastCursor = stopIndexExclusive - indexStep;
+        final double finalTime = targetTimes[(int) order[lastCursor]];
+        final YawDynamics dynamics = new YawDynamics(pvProv, frame);
+        final ODEIntegrator integrator =
+                new DormandPrince853Integrator(
+                        DEFAULT_MIN_STEP,
+                        FastMath.max(DEFAULT_MAX_STEP, finiteDifferenceStep),
+                        DEFAULT_ABS_TOL,
+                        DEFAULT_REL_TOL);
+
+        integrator.addStepHandler(new ODEStepHandler() {
+            private int nextCursor = firstCursor;
+
+            @Override
+            public void handleStep(final ODEStateInterpolator interpolator) {
+                final double previousTime = interpolator.getPreviousState().getTime();
+                final double currentTime = interpolator.getCurrentState().getTime();
+
+                while (nextCursor != stopIndexExclusive) {
+                    final int idx = (int) order[nextCursor];
+                    final double queryTime = targetTimes[idx];
+                    final boolean withinStep =
+                            indexStep > 0
+                                    ? queryTime >= previousTime - EPS_TIME && queryTime <= currentTime + EPS_TIME
+                                    : queryTime <= previousTime + EPS_TIME && queryTime >= currentTime - EPS_TIME;
+                    if (!withinStep) {
+                        break;
+                    }
+                    out[idx] = snapshotFromOdeState(interpolator.getInterpolatedState(queryTime));
+                    nextCursor += indexStep;
+                }
+            }
+        });
+
+        final ODEState initialState = new ODEState(
+                0.0,
+                new double[] {referenceState.psi, clampYawRate(referenceState.omega)});
+        final ODEStateAndDerivative finalState = integrator.integrate(dynamics, initialState, finalTime);
+
+        int tailCursor = firstCursor;
+        while (tailCursor != stopIndexExclusive) {
+            final int idx = (int) order[tailCursor];
+            if (FastMath.abs(targetTimes[idx] - finalTime) > EPS_TIME) {
+                break;
+            }
+            out[idx] = snapshotFromOdeState(finalState);
+            tailCursor += indexStep;
+        }
+    }
+
+    private YawStateSnapshot computeReferenceYawStateFiniteDifference(
+            final PVCoordinatesProvider pvProv,
+            final AbsoluteDate date,
+            final Frame frame) {
+
         final double h = finiteDifferenceStep;
 
-        final double psiMinus = computeIdealYawAngle(pvProv, date.shiftedBy(-h), frame);
-        final double psi0Value = computeIdealYawAngle(pvProv, date, frame);
-        final double psiPlus = computeIdealYawAngle(pvProv, date.shiftedBy(h), frame);
+        final double psiMinus = computeIdealYawAngleAtDate(pvProv, date.shiftedBy(-h), frame);
+        final double psi0Value = computeIdealYawAngleAtDate(pvProv, date, frame);
+        final double psiPlus = computeIdealYawAngleAtDate(pvProv, date.shiftedBy(h), frame);
 
         final double psiMinusUnwrapped = psi0Value - wrapMinusPiToPi(psi0Value - psiMinus);
         final double psiPlusUnwrapped = psi0Value + wrapMinusPiToPi(psiPlus - psi0Value);
@@ -400,7 +747,7 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
         return new YawStateSnapshot(psi0Value, omega, alpha);
     }
 
-    private double computeIdealYawAngle(
+    private double computeIdealYawAngleAtDate(
             final PVCoordinatesProvider pvProv,
             final AbsoluteDate date,
             final Frame frame) {
@@ -436,6 +783,143 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
 
     private double clampYawRate(final double omega) {
         return clamp(omega, -maxYawRate, maxYawRate);
+    }
+
+    private YawStateSnapshot ensureYawAcceleration(
+            final PVCoordinatesProvider pvProv,
+            final Frame frame,
+            final double time,
+            final YawStateSnapshot state) {
+
+        if (Double.isFinite(state.alpha)) {
+            return state;
+        }
+
+        final AbsoluteDate date = referenceEpoch.shiftedBy(time);
+        final double alpha = computeYawAcceleration(pvProv, date, frame, state.psi, state.omega);
+        return new YawStateSnapshot(state.psi, state.omega, alpha);
+    }
+
+    private void populateCheckpointRange(
+            final PVCoordinatesProvider pvProv,
+            final Frame frame,
+            final long startIndex,
+            final YawStateSnapshot startState,
+            final long targetIndex) {
+
+        if (targetIndex == startIndex) {
+            checkpointCache.put(
+                    startIndex,
+                    ensureYawAcceleration(pvProv, frame, startIndex * cacheStep, startState));
+            return;
+        }
+
+        final double startTime = startIndex * cacheStep;
+        final double targetTime = targetIndex * cacheStep;
+        final long indexStep = targetIndex > startIndex ? 1L : -1L;
+        final double direction = indexStep > 0L ? 1.0 : -1.0;
+
+        final YawDynamics dynamics = new YawDynamics(pvProv, frame);
+        final ODEIntegrator integrator =
+                new DormandPrince853Integrator(
+                        DEFAULT_MIN_STEP,
+                        FastMath.max(DEFAULT_MAX_STEP, finiteDifferenceStep),
+                        DEFAULT_ABS_TOL,
+                        DEFAULT_REL_TOL);
+
+        integrator.addStepHandler(new ODEStepHandler() {
+            private long nextIndex = startIndex + indexStep;
+
+            @Override
+            public void handleStep(final ODEStateInterpolator interpolator) {
+                final double previousTime = interpolator.getPreviousState().getTime();
+                final double currentTime = interpolator.getCurrentState().getTime();
+
+                while ((direction > 0.0 && nextIndex <= targetIndex)
+                        || (direction < 0.0 && nextIndex >= targetIndex)) {
+                    final double checkpointTime = nextIndex * cacheStep;
+                    final boolean withinStep =
+                            direction > 0.0
+                                    ? checkpointTime <= currentTime + EPS_TIME
+                                    : checkpointTime >= currentTime - EPS_TIME;
+                    if (!withinStep) {
+                        break;
+                    }
+
+                    final boolean afterPrevious =
+                            direction > 0.0
+                                    ? checkpointTime >= previousTime - EPS_TIME
+                                    : checkpointTime <= previousTime + EPS_TIME;
+                    if (!afterPrevious) {
+                        break;
+                    }
+
+                    checkpointCache.put(
+                            nextIndex,
+                            snapshotFromOdeState(interpolator.getInterpolatedState(checkpointTime)));
+                    nextIndex += indexStep;
+                }
+            }
+        });
+
+        final ODEState initialState = new ODEState(
+                startTime,
+                new double[] {startState.psi, clampYawRate(startState.omega)});
+        final ODEStateAndDerivative finalState = integrator.integrate(dynamics, initialState, targetTime);
+        checkpointCache.put(targetIndex, snapshotFromOdeState(finalState));
+    }
+
+    private YawStateSnapshot snapshotFromOdeState(final ODEStateAndDerivative state) {
+        return new YawStateSnapshot(
+                state.getPrimaryState()[0],
+                clampYawRate(state.getPrimaryState()[1]),
+                state.getPrimaryDerivative()[1]);
+    }
+
+    private TimeStampedAngularCoordinates buildActualOrientation(
+            final AbsoluteDate date,
+            final Attitude baseAttitude,
+            final YawStateSnapshot yawState) {
+
+        final Rotation yawRotation =
+                new Rotation(Vector3D.PLUS_K, yawState.psi, RotationConvention.FRAME_TRANSFORM);
+        final TimeStampedAngularCoordinates yawOffset = new TimeStampedAngularCoordinates(
+                date,
+                yawRotation,
+                new Vector3D(0.0, 0.0, yawState.omega),
+                new Vector3D(0.0, 0.0, yawState.alpha));
+        return yawOffset.addOffset(baseAttitude.getOrientation());
+    }
+
+    private static long[] sortIndicesByTime(final double[] times) {
+        final int n = times.length;
+        final long[] order = new long[n];
+        for (int i = 0; i < n; i++) {
+            order[i] = i;
+        }
+        for (int i = 1; i < n; i++) {
+            final long key = order[i];
+            final double keyTime = times[(int) key];
+            int j = i - 1;
+            while (j >= 0 && times[(int) order[j]] > keyTime) {
+                order[j + 1] = order[j];
+                j--;
+            }
+            order[j + 1] = key;
+        }
+        return order;
+    }
+
+    private static void copyVectorOrZero(final Vector3D vector, final double[] out, final int offset) {
+        if (vector == null) {
+            out[offset] = 0.0;
+            out[offset + 1] = 0.0;
+            out[offset + 2] = 0.0;
+            return;
+        }
+        out[offset] = vector.getX();
+        out[offset + 1] = vector.getY();
+        out[offset + 2] = vector.getZ();
     }
 
     private static double extractYawFromRelativeRotation(final Rotation relativeRotation) {

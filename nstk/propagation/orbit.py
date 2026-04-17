@@ -647,6 +647,50 @@ class Orbit:
 
         return frame
 
+    def _sample_custom_attitude_vectors(
+        self,
+        dt_s: np.ndarray,
+        *,
+        attitude_reference_frame: SupportsFrame,
+        attitude_spin: bool,
+        attitude_acceleration: bool,
+    ) -> tuple[Optional[np.ndarray], Optional[np.ndarray]] | None:
+        """Sample custom Java attitude vectors without going through the full bridge loop."""
+
+        get_attitude_provider = getattr(self.propagator, "getAttitudeProvider", None)
+        if not callable(get_attitude_provider):
+            return None
+
+        provider = get_attitude_provider()
+        sample_vectors = getattr(provider, "sampleBodyAngularVectors", None)
+        if not callable(sample_vectors):
+            return None
+
+        spin = None
+        accel = None
+        if attitude_spin:
+            spin = _reshape_vectorized_xyz(
+                sample_vectors(
+                    self.propagator,
+                    self._epoch_orekit,
+                    np.asarray(dt_s, dtype=np.float64),
+                    attitude_reference_frame,
+                    False,
+                )
+            )
+        if attitude_acceleration:
+            accel = _reshape_vectorized_xyz(
+                sample_vectors(
+                    self.propagator,
+                    self._epoch_orekit,
+                    np.asarray(dt_s, dtype=np.float64),
+                    attitude_reference_frame,
+                    True,
+                )
+            )
+
+        return spin, accel
+
     def sample(
         self,
         times: TimeLike,
@@ -824,6 +868,50 @@ class Orbit:
 
         if quaternion_convention not in ("scalar_first", "scalar_last"):
             raise ValueError("quaternion_convention must be 'scalar_first' or 'scalar_last'")
+
+        fast_custom_attitude_only = (
+            attitude_requested
+            and not cartesian_requested
+            and not elements_requested
+            and not attitude_quat
+            and not attitude_matrix
+            and not attitude_euler
+            and not mass
+            and not additional_states
+            and not additional_state_derivatives
+        )
+        if fast_custom_attitude_only:
+            custom_vectors = self._sample_custom_attitude_vectors(
+                dt_s,
+                attitude_reference_frame=attitude_target,
+                attitude_spin=bool(attitude_spin),
+                attitude_acceleration=bool(attitude_acceleration),
+            )
+            if custom_vectors is not None:
+                requested_fields: list[str] = []
+                if attitude_spin:
+                    requested_fields.append("attitude_spin_body_rad_s")
+                if attitude_acceleration:
+                    requested_fields.append("attitude_accel_body_rad_s2")
+                spin, accel = custom_vectors
+                return SampledStates(
+                    delta_times_sec=dt_s,
+                    epoch_orekit=self._epoch_orekit,
+                    epoch_astropy=self._epoch,
+                    input_was_scalar=bool(input_was_scalar),
+                    requested_fields=tuple(requested_fields),
+                    cartesian_frame=cartesian_target,
+                    attitude_reference_frame=attitude_target,
+                    elements_frame=elements_target,
+                    quaternion_convention=quaternion_convention,
+                    attitude_euler_sequence=None,
+                    attitude_euler_degrees=None,
+                    anomaly_type=None,
+                    longitude_type=None,
+                    elements_angles_degrees=None,
+                    attitude_spin_body_rad_s=spin,
+                    attitude_accel_body_rad_s2=accel,
+                )
 
         bridge_result = self._bridge.sample(
             dt_s,

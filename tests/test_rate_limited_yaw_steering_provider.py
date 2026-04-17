@@ -6,6 +6,7 @@ from astropy.time import Time
 
 import nstk.propagation.orbit as orbit_module
 from nstk.propagation import (
+    Orbit,
     RateLimitedYawSteeringProvider,
     build_numerical_propagator,
     build_two_body_propagator,
@@ -74,6 +75,8 @@ def _make_seeded_provider(
     kd: float,
     finite_difference_step_s: float,
     initial_yaw_rate_rad_s: float | None = None,
+    enable_cache: bool = True,
+    cache_step_s: float = 10.0,
 ) -> RateLimitedYawSteeringProvider:
     bootstrap = RateLimitedYawSteeringProvider(
         inertial_frame="gcrf",
@@ -83,6 +86,8 @@ def _make_seeded_provider(
         kp=1.0,
         kd=1.0,
         finite_difference_step_s=finite_difference_step_s,
+        enable_cache=enable_cache,
+        cache_step_s=cache_step_s,
     )
     ref0 = bootstrap.get_reference_yaw_state(pv_provider, 0.0)
     omega0 = float(ref0[1] if initial_yaw_rate_rad_s is None else initial_yaw_rate_rad_s)
@@ -97,6 +102,8 @@ def _make_seeded_provider(
         initial_yaw_rad=float(ref0[0]),
         initial_yaw_rate_rad_s=omega0,
         finite_difference_step_s=finite_difference_step_s,
+        enable_cache=enable_cache,
+        cache_step_s=cache_step_s,
     )
 
 
@@ -159,6 +166,41 @@ def test_rate_limited_yaw_provider_matches_ideal_yaw_steering_with_large_limits(
 
         spin_delta = actual.getSpin().subtract(ideal.getSpin())
         assert float(spin_delta.getNorm()) < 5.0e-4
+
+
+def test_rate_limited_yaw_provider_cache_matches_uncached_solution() -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+    raw_propagator = _make_two_body_propagator(epoch)
+
+    cached = _make_seeded_provider(
+        raw_propagator,
+        epoch,
+        max_yaw_rate_rad_s=0.05,
+        max_yaw_acceleration_rad_s2=0.01,
+        kp=0.5,
+        kd=1.5,
+        finite_difference_step_s=0.05,
+        enable_cache=True,
+        cache_step_s=5.0,
+    )
+    uncached = _make_seeded_provider(
+        raw_propagator,
+        epoch,
+        max_yaw_rate_rad_s=0.05,
+        max_yaw_acceleration_rad_s2=0.01,
+        kp=0.5,
+        kd=1.5,
+        finite_difference_step_s=0.05,
+        enable_cache=False,
+    )
+
+    for dt_s in (0.0, 20.0, 60.0, 120.0):
+        np.testing.assert_allclose(
+            cached.get_actual_yaw_state(raw_propagator, dt_s),
+            uncached.get_actual_yaw_state(raw_propagator, dt_s),
+            rtol=0.0,
+            atol=5.0e-6,
+        )
 
 
 def test_rate_limited_yaw_provider_enforces_max_yaw_rate() -> None:
@@ -344,3 +386,51 @@ def test_rate_limited_yaw_provider_can_be_used_with_propagator_builders() -> Non
 
     assert analytical_state.getAttitude() is not None
     assert numerical_state.getAttitude() is not None
+
+
+def test_rate_limited_yaw_provider_bulk_orbit_attitude_vectors_match_propagated_states() -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+    raw_propagator = _make_two_body_propagator(epoch)
+    provider = _make_seeded_provider(
+        raw_propagator,
+        epoch,
+        max_yaw_rate_rad_s=0.05,
+        max_yaw_acceleration_rad_s2=0.01,
+        kp=0.5,
+        kd=1.5,
+        finite_difference_step_s=0.05,
+    )
+
+    propagator = build_two_body_propagator(
+        epoch=epoch,
+        a=7000e3,
+        e=0.001,
+        i=np.deg2rad(53.0),
+        raan=np.deg2rad(20.0),
+        argp=np.deg2rad(15.0),
+        anomaly=np.deg2rad(10.0),
+        inertial_frame="gcrf",
+        attitude_provider=provider,
+    )
+    orbit = Orbit(propagator)
+
+    dt_s = np.array([0.0, 120.0, 30.0, 240.0], dtype=np.float64)
+    sampled = orbit.sample(dt_s, attitude_spin=True, attitude_acceleration=True)
+
+    expected_rate = np.empty((dt_s.size, 3), dtype=np.float64)
+    expected_accel = np.empty((dt_s.size, 3), dtype=np.float64)
+    date0 = propagator.getInitialState().getDate()
+    for i, dt in enumerate(dt_s):
+        state = propagator.propagate(date0.shiftedBy(float(dt)))
+        spin = state.getAttitude().getSpin()
+        accel = state.getAttitude().getRotationAcceleration()
+        expected_rate[i] = [float(spin.getX()), float(spin.getY()), float(spin.getZ())]
+        expected_accel[i] = [float(accel.getX()), float(accel.getY()), float(accel.getZ())]
+
+    np.testing.assert_allclose(sampled.attitude_spin_body_rad_s, expected_rate, rtol=0.0, atol=1.0e-6)
+    np.testing.assert_allclose(
+        sampled.attitude_accel_body_rad_s2,
+        expected_accel,
+        rtol=0.0,
+        atol=1.0e-6,
+    )
