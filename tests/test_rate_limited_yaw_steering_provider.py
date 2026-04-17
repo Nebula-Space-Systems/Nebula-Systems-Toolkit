@@ -434,3 +434,52 @@ def test_rate_limited_yaw_provider_bulk_orbit_attitude_vectors_match_propagated_
         rtol=0.0,
         atol=1.0e-6,
     )
+
+
+def test_mixed_cartesian_and_custom_attitude_vectors_use_custom_sampler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+    raw_propagator = _make_two_body_propagator(epoch)
+    provider = _make_seeded_provider(
+        raw_propagator,
+        epoch,
+        max_yaw_rate_rad_s=0.05,
+        max_yaw_acceleration_rad_s2=0.01,
+        kp=0.5,
+        kd=1.5,
+        finite_difference_step_s=0.05,
+    )
+    propagator = build_two_body_propagator(
+        epoch=epoch,
+        a=7000e3,
+        e=0.001,
+        i=np.deg2rad(53.0),
+        raan=np.deg2rad(20.0),
+        argp=np.deg2rad(15.0),
+        anomaly=np.deg2rad(10.0),
+        inertial_frame="gcrf",
+        attitude_provider=provider,
+    )
+    orbit = Orbit(propagator)
+
+    real_sampler = Orbit._sample_custom_attitude_vectors
+    calls = {"count": 0}
+
+    def _tracking_sampler(self, *args, **kwargs):
+        calls["count"] += 1
+        return real_sampler(self, *args, **kwargs)
+
+    monkeypatch.setattr(Orbit, "_sample_custom_attitude_vectors", _tracking_sampler)
+
+    dt_s = np.array([0.0, 60.0, 120.0], dtype=np.float64)
+    sampled = orbit.sample(dt_s, position=True, attitude_spin=True)
+
+    assert calls["count"] == 1
+    np.testing.assert_allclose(sampled.position_m, orbit.get_position(dt_s), rtol=0.0, atol=1.0e-8)
+    np.testing.assert_allclose(
+        sampled.attitude_spin_body_rad_s,
+        orbit.get_attitude_spin(dt_s),
+        rtol=0.0,
+        atol=1.0e-6,
+    )

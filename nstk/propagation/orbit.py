@@ -691,6 +691,234 @@ class Orbit:
 
         return spin, accel
 
+    def _requested_field_names(
+        self,
+        *,
+        position: bool,
+        velocity: bool,
+        acceleration: bool,
+        attitude_quat: bool,
+        attitude_matrix: bool,
+        attitude_euler: bool,
+        attitude_spin: bool,
+        attitude_acceleration: bool,
+        keplerian: bool,
+        equinoctial: bool,
+        mass: bool,
+        additional_states: Sequence[str],
+        additional_state_derivatives: Sequence[str],
+    ) -> tuple[str, ...]:
+        """Return requested output field names in public API order."""
+
+        requested_fields: list[str] = []
+        if position:
+            requested_fields.append("position_m")
+        if velocity:
+            requested_fields.append("velocity_mps")
+        if acceleration:
+            requested_fields.append("acceleration_mps2")
+        if attitude_quat:
+            requested_fields.append("attitude_quat_ref_to_body")
+        if attitude_matrix:
+            requested_fields.append("attitude_matrix_ref_to_body")
+        if attitude_euler:
+            requested_fields.append("attitude_euler_ref_to_body")
+        if attitude_spin:
+            requested_fields.append("attitude_spin_body_rad_s")
+        if attitude_acceleration:
+            requested_fields.append("attitude_accel_body_rad_s2")
+        if keplerian:
+            requested_fields.extend(
+                [
+                    "semi_major_axis_m",
+                    "eccentricity",
+                    "inclination",
+                    "raan",
+                    "argp",
+                    "anomaly",
+                ]
+            )
+        if equinoctial:
+            requested_fields.extend(
+                [
+                    "equinoctial_a_m",
+                    "equinoctial_ex",
+                    "equinoctial_ey",
+                    "equinoctial_hx",
+                    "equinoctial_hy",
+                    "equinoctial_longitude",
+                ]
+            )
+        if mass:
+            requested_fields.append("mass_kg")
+        if additional_states:
+            requested_fields.append("additional")
+        if additional_state_derivatives:
+            requested_fields.append("additional_derivatives")
+        return tuple(requested_fields)
+
+    def _sample_via_bridge(
+        self,
+        dt_s: np.ndarray,
+        *,
+        input_was_scalar: bool,
+        cartesian_target: Optional[SupportsFrame],
+        position: bool,
+        velocity: bool,
+        acceleration: bool,
+        attitude_target: Optional[SupportsFrame],
+        attitude_quat: bool,
+        attitude_matrix: bool,
+        attitude_euler: bool,
+        attitude_spin: bool,
+        attitude_acceleration: bool,
+        attitude_euler_sequence: str,
+        attitude_euler_degrees: bool,
+        quaternion_convention: QuaternionConvention,
+        elements_target: Optional[SupportsFrame],
+        keplerian: bool,
+        anomaly_type: AngleType,
+        equinoctial: bool,
+        longitude_type: LongitudeType,
+        elements_angles_degrees: bool,
+        mass: bool,
+        additional_states: Sequence[str],
+        additional_state_derivatives: Sequence[str],
+        strict: bool,
+    ) -> SampledStates:
+        """Sample requested outputs through the general Java propagation bridge."""
+
+        bridge_result = self._bridge.sample(
+            dt_s,
+            cartesian_target,
+            bool(position),
+            bool(velocity),
+            bool(acceleration),
+            attitude_target,
+            bool(attitude_quat),
+            bool(attitude_matrix),
+            bool(attitude_euler),
+            bool(attitude_spin),
+            bool(attitude_acceleration),
+            str(attitude_euler_sequence).lower(),
+            bool(attitude_euler_degrees),
+            quaternion_convention == "scalar_last",
+            elements_target,
+            bool(keplerian),
+            _coerce_position_angle_type(anomaly_type),
+            bool(equinoctial),
+            _coerce_position_angle_type(longitude_type),
+            bool(elements_angles_degrees),
+            bool(mass),
+            tuple(str(name) for name in additional_states),
+            tuple(str(name) for name in additional_state_derivatives),
+            bool(strict),
+        )
+
+        return SampledStates(
+            delta_times_sec=dt_s,
+            epoch_orekit=self._epoch_orekit,
+            epoch_astropy=self._epoch,
+            input_was_scalar=bool(input_was_scalar),
+            requested_fields=self._requested_field_names(
+                position=bool(position),
+                velocity=bool(velocity),
+                acceleration=bool(acceleration),
+                attitude_quat=bool(attitude_quat),
+                attitude_matrix=bool(attitude_matrix),
+                attitude_euler=bool(attitude_euler),
+                attitude_spin=bool(attitude_spin),
+                attitude_acceleration=bool(attitude_acceleration),
+                keplerian=bool(keplerian),
+                equinoctial=bool(equinoctial),
+                mass=bool(mass),
+                additional_states=additional_states,
+                additional_state_derivatives=additional_state_derivatives,
+            ),
+            cartesian_frame=cartesian_target,
+            attitude_reference_frame=attitude_target,
+            elements_frame=elements_target,
+            quaternion_convention=quaternion_convention,
+            attitude_euler_sequence=str(attitude_euler_sequence).lower()
+            if attitude_euler
+            else None,
+            attitude_euler_degrees=bool(attitude_euler_degrees) if attitude_euler else None,
+            anomaly_type=str(anomaly_type) if keplerian else None,
+            longitude_type=str(longitude_type) if equinoctial else None,
+            elements_angles_degrees=bool(elements_angles_degrees)
+            if (keplerian or equinoctial)
+            else None,
+            position_m=_reshape_vectorized_xyz(bridge_result.positionM) if position else None,
+            velocity_mps=_reshape_vectorized_xyz(bridge_result.velocityMps) if velocity else None,
+            acceleration_mps2=_reshape_vectorized_xyz(bridge_result.accelerationMps2)
+            if acceleration
+            else None,
+            attitude_quat_ref_to_body=_reshape_vectorized_quat(
+                bridge_result.attitudeQuatRefToBody
+            )
+            if attitude_quat
+            else None,
+            attitude_matrix_ref_to_body=_reshape_vectorized_matrix(
+                bridge_result.attitudeMatrixRefToBody
+            )
+            if attitude_matrix
+            else None,
+            attitude_euler_ref_to_body=_reshape_vectorized_xyz(
+                bridge_result.attitudeEulerRefToBody
+            )
+            if attitude_euler
+            else None,
+            attitude_spin_body_rad_s=_reshape_vectorized_xyz(bridge_result.attitudeSpinBodyRadS)
+            if attitude_spin
+            else None,
+            attitude_accel_body_rad_s2=_reshape_vectorized_xyz(
+                bridge_result.attitudeAccelBodyRadS2
+            )
+            if attitude_acceleration
+            else None,
+            semi_major_axis_m=_reshape_vectorized_scalar(bridge_result.semiMajorAxisM)
+            if keplerian
+            else None,
+            eccentricity=_reshape_vectorized_scalar(bridge_result.eccentricity)
+            if keplerian
+            else None,
+            inclination=_reshape_vectorized_scalar(bridge_result.inclination)
+            if keplerian
+            else None,
+            raan=_reshape_vectorized_scalar(bridge_result.raan) if keplerian else None,
+            argp=_reshape_vectorized_scalar(bridge_result.argp) if keplerian else None,
+            anomaly=_reshape_vectorized_scalar(bridge_result.anomaly) if keplerian else None,
+            equinoctial_a_m=_reshape_vectorized_scalar(bridge_result.equinoctialAM)
+            if equinoctial
+            else None,
+            equinoctial_ex=_reshape_vectorized_scalar(bridge_result.equinoctialEx)
+            if equinoctial
+            else None,
+            equinoctial_ey=_reshape_vectorized_scalar(bridge_result.equinoctialEy)
+            if equinoctial
+            else None,
+            equinoctial_hx=_reshape_vectorized_scalar(bridge_result.equinoctialHx)
+            if equinoctial
+            else None,
+            equinoctial_hy=_reshape_vectorized_scalar(bridge_result.equinoctialHy)
+            if equinoctial
+            else None,
+            equinoctial_longitude=_reshape_vectorized_scalar(bridge_result.equinoctialLongitude)
+            if equinoctial
+            else None,
+            mass_kg=_reshape_vectorized_scalar(bridge_result.massKg) if mass else None,
+            additional=_reshape_additional_payload(
+                bridge_result.additionalNames,
+                bridge_result.additionalValues,
+                bridge_result.additionalWidths,
+            ),
+            additional_derivatives=_reshape_additional_payload(
+                bridge_result.additionalDerivativeNames,
+                bridge_result.additionalDerivativeValues,
+                bridge_result.additionalDerivativeWidths,
+            ),
+        )
+
     def sample(
         self,
         times: TimeLike,
@@ -869,18 +1097,14 @@ class Orbit:
         if quaternion_convention not in ("scalar_first", "scalar_last"):
             raise ValueError("quaternion_convention must be 'scalar_first' or 'scalar_last'")
 
-        fast_custom_attitude_only = (
+        custom_attitude_vector_request = (
             attitude_requested
-            and not cartesian_requested
-            and not elements_requested
             and not attitude_quat
             and not attitude_matrix
             and not attitude_euler
-            and not mass
-            and not additional_states
-            and not additional_state_derivatives
+            and (attitude_spin or attitude_acceleration)
         )
-        if fast_custom_attitude_only:
+        if custom_attitude_vector_request:
             custom_vectors = self._sample_custom_attitude_vectors(
                 dt_s,
                 attitude_reference_frame=attitude_target,
@@ -888,196 +1112,120 @@ class Orbit:
                 attitude_acceleration=bool(attitude_acceleration),
             )
             if custom_vectors is not None:
-                requested_fields: list[str] = []
-                if attitude_spin:
-                    requested_fields.append("attitude_spin_body_rad_s")
-                if attitude_acceleration:
-                    requested_fields.append("attitude_accel_body_rad_s2")
                 spin, accel = custom_vectors
-                return SampledStates(
-                    delta_times_sec=dt_s,
-                    epoch_orekit=self._epoch_orekit,
-                    epoch_astropy=self._epoch,
+                if (
+                    not cartesian_requested
+                    and not elements_requested
+                    and not mass
+                    and not additional_states
+                    and not additional_state_derivatives
+                ):
+                    return SampledStates(
+                        delta_times_sec=dt_s,
+                        epoch_orekit=self._epoch_orekit,
+                        epoch_astropy=self._epoch,
+                        input_was_scalar=bool(input_was_scalar),
+                        requested_fields=self._requested_field_names(
+                            position=False,
+                            velocity=False,
+                            acceleration=False,
+                            attitude_quat=False,
+                            attitude_matrix=False,
+                            attitude_euler=False,
+                            attitude_spin=bool(attitude_spin),
+                            attitude_acceleration=bool(attitude_acceleration),
+                            keplerian=False,
+                            equinoctial=False,
+                            mass=False,
+                            additional_states=(),
+                            additional_state_derivatives=(),
+                        ),
+                        cartesian_frame=cartesian_target,
+                        attitude_reference_frame=attitude_target,
+                        elements_frame=elements_target,
+                        quaternion_convention=quaternion_convention,
+                        attitude_euler_sequence=None,
+                        attitude_euler_degrees=None,
+                        anomaly_type=None,
+                        longitude_type=None,
+                        elements_angles_degrees=None,
+                        attitude_spin_body_rad_s=spin,
+                        attitude_accel_body_rad_s2=accel,
+                    )
+
+                sampled = self._sample_via_bridge(
+                    dt_s,
                     input_was_scalar=bool(input_was_scalar),
-                    requested_fields=tuple(requested_fields),
-                    cartesian_frame=cartesian_target,
-                    attitude_reference_frame=attitude_target,
-                    elements_frame=elements_target,
+                    cartesian_target=cartesian_target,
+                    position=bool(position),
+                    velocity=bool(velocity),
+                    acceleration=bool(acceleration),
+                    attitude_target=attitude_target,
+                    attitude_quat=False,
+                    attitude_matrix=False,
+                    attitude_euler=False,
+                    attitude_spin=False,
+                    attitude_acceleration=False,
+                    attitude_euler_sequence=attitude_euler_sequence,
+                    attitude_euler_degrees=bool(attitude_euler_degrees),
                     quaternion_convention=quaternion_convention,
-                    attitude_euler_sequence=None,
-                    attitude_euler_degrees=None,
-                    anomaly_type=None,
-                    longitude_type=None,
-                    elements_angles_degrees=None,
-                    attitude_spin_body_rad_s=spin,
-                    attitude_accel_body_rad_s2=accel,
+                    elements_target=elements_target,
+                    keplerian=bool(keplerian),
+                    anomaly_type=anomaly_type,
+                    equinoctial=bool(equinoctial),
+                    longitude_type=longitude_type,
+                    elements_angles_degrees=bool(elements_angles_degrees),
+                    mass=bool(mass),
+                    additional_states=additional_states,
+                    additional_state_derivatives=additional_state_derivatives,
+                    strict=bool(strict),
                 )
+                sampled.attitude_spin_body_rad_s = spin
+                sampled.attitude_accel_body_rad_s2 = accel
+                sampled.requested_fields = self._requested_field_names(
+                    position=bool(position),
+                    velocity=bool(velocity),
+                    acceleration=bool(acceleration),
+                    attitude_quat=False,
+                    attitude_matrix=False,
+                    attitude_euler=False,
+                    attitude_spin=bool(attitude_spin),
+                    attitude_acceleration=bool(attitude_acceleration),
+                    keplerian=bool(keplerian),
+                    equinoctial=bool(equinoctial),
+                    mass=bool(mass),
+                    additional_states=additional_states,
+                    additional_state_derivatives=additional_state_derivatives,
+                )
+                sampled.attitude_reference_frame = attitude_target
+                return sampled
 
-        bridge_result = self._bridge.sample(
+        return self._sample_via_bridge(
             dt_s,
-            cartesian_target,
-            bool(position),
-            bool(velocity),
-            bool(acceleration),
-            attitude_target,
-            bool(attitude_quat),
-            bool(attitude_matrix),
-            bool(attitude_euler),
-            bool(attitude_spin),
-            bool(attitude_acceleration),
-            str(attitude_euler_sequence).lower(),
-            bool(attitude_euler_degrees),
-            quaternion_convention == "scalar_last",
-            elements_target,
-            bool(keplerian),
-            _coerce_position_angle_type(anomaly_type),
-            bool(equinoctial),
-            _coerce_position_angle_type(longitude_type),
-            bool(elements_angles_degrees),
-            bool(mass),
-            tuple(str(name) for name in additional_states),
-            tuple(str(name) for name in additional_state_derivatives),
-            bool(strict),
-        )
-
-        requested_fields: list[str] = []
-        if position:
-            requested_fields.append("position_m")
-        if velocity:
-            requested_fields.append("velocity_mps")
-        if acceleration:
-            requested_fields.append("acceleration_mps2")
-        if attitude_quat:
-            requested_fields.append("attitude_quat_ref_to_body")
-        if attitude_matrix:
-            requested_fields.append("attitude_matrix_ref_to_body")
-        if attitude_euler:
-            requested_fields.append("attitude_euler_ref_to_body")
-        if attitude_spin:
-            requested_fields.append("attitude_spin_body_rad_s")
-        if attitude_acceleration:
-            requested_fields.append("attitude_accel_body_rad_s2")
-        if keplerian:
-            requested_fields.extend(
-                [
-                    "semi_major_axis_m",
-                    "eccentricity",
-                    "inclination",
-                    "raan",
-                    "argp",
-                    "anomaly",
-                ]
-            )
-        if equinoctial:
-            requested_fields.extend(
-                [
-                    "equinoctial_a_m",
-                    "equinoctial_ex",
-                    "equinoctial_ey",
-                    "equinoctial_hx",
-                    "equinoctial_hy",
-                    "equinoctial_longitude",
-                ]
-            )
-        if mass:
-            requested_fields.append("mass_kg")
-        if additional_states:
-            requested_fields.append("additional")
-        if additional_state_derivatives:
-            requested_fields.append("additional_derivatives")
-
-        return SampledStates(
-            delta_times_sec=dt_s,
-            epoch_orekit=self._epoch_orekit,
-            epoch_astropy=self._epoch,
             input_was_scalar=bool(input_was_scalar),
-            requested_fields=tuple(requested_fields),
-            cartesian_frame=cartesian_target,
-            attitude_reference_frame=attitude_target,
-            elements_frame=elements_target,
+            cartesian_target=cartesian_target,
+            position=bool(position),
+            velocity=bool(velocity),
+            acceleration=bool(acceleration),
+            attitude_target=attitude_target,
+            attitude_quat=bool(attitude_quat),
+            attitude_matrix=bool(attitude_matrix),
+            attitude_euler=bool(attitude_euler),
+            attitude_spin=bool(attitude_spin),
+            attitude_acceleration=bool(attitude_acceleration),
+            attitude_euler_sequence=attitude_euler_sequence,
+            attitude_euler_degrees=bool(attitude_euler_degrees),
             quaternion_convention=quaternion_convention,
-            attitude_euler_sequence=str(attitude_euler_sequence).lower()
-            if attitude_euler
-            else None,
-            attitude_euler_degrees=bool(attitude_euler_degrees) if attitude_euler else None,
-            anomaly_type=str(anomaly_type) if keplerian else None,
-            longitude_type=str(longitude_type) if equinoctial else None,
-            elements_angles_degrees=bool(elements_angles_degrees) if elements_requested else None,
-            position_m=_reshape_vectorized_xyz(bridge_result.positionM)
-            if position
-            else None,
-            velocity_mps=_reshape_vectorized_xyz(bridge_result.velocityMps)
-            if velocity
-            else None,
-            acceleration_mps2=_reshape_vectorized_xyz(bridge_result.accelerationMps2)
-            if acceleration
-            else None,
-            attitude_quat_ref_to_body=_reshape_vectorized_quat(
-                bridge_result.attitudeQuatRefToBody
-            )
-            if attitude_quat
-            else None,
-            attitude_matrix_ref_to_body=_reshape_vectorized_matrix(
-                bridge_result.attitudeMatrixRefToBody
-            )
-            if attitude_matrix
-            else None,
-            attitude_euler_ref_to_body=_reshape_vectorized_xyz(
-                bridge_result.attitudeEulerRefToBody
-            )
-            if attitude_euler
-            else None,
-            attitude_spin_body_rad_s=_reshape_vectorized_xyz(bridge_result.attitudeSpinBodyRadS)
-            if attitude_spin
-            else None,
-            attitude_accel_body_rad_s2=_reshape_vectorized_xyz(
-                bridge_result.attitudeAccelBodyRadS2
-            )
-            if attitude_acceleration
-            else None,
-            semi_major_axis_m=_reshape_vectorized_scalar(bridge_result.semiMajorAxisM)
-            if keplerian
-            else None,
-            eccentricity=_reshape_vectorized_scalar(bridge_result.eccentricity)
-            if keplerian
-            else None,
-            inclination=_reshape_vectorized_scalar(bridge_result.inclination)
-            if keplerian
-            else None,
-            raan=_reshape_vectorized_scalar(bridge_result.raan) if keplerian else None,
-            argp=_reshape_vectorized_scalar(bridge_result.argp) if keplerian else None,
-            anomaly=_reshape_vectorized_scalar(bridge_result.anomaly) if keplerian else None,
-            equinoctial_a_m=_reshape_vectorized_scalar(bridge_result.equinoctialAM)
-            if equinoctial
-            else None,
-            equinoctial_ex=_reshape_vectorized_scalar(bridge_result.equinoctialEx)
-            if equinoctial
-            else None,
-            equinoctial_ey=_reshape_vectorized_scalar(bridge_result.equinoctialEy)
-            if equinoctial
-            else None,
-            equinoctial_hx=_reshape_vectorized_scalar(bridge_result.equinoctialHx)
-            if equinoctial
-            else None,
-            equinoctial_hy=_reshape_vectorized_scalar(bridge_result.equinoctialHy)
-            if equinoctial
-            else None,
-            equinoctial_longitude=_reshape_vectorized_scalar(
-                bridge_result.equinoctialLongitude
-            )
-            if equinoctial
-            else None,
-            mass_kg=_reshape_vectorized_scalar(bridge_result.massKg) if mass else None,
-            additional=_reshape_additional_payload(
-                bridge_result.additionalNames,
-                bridge_result.additionalValues,
-                bridge_result.additionalWidths,
-            ),
-            additional_derivatives=_reshape_additional_payload(
-                bridge_result.additionalDerivativeNames,
-                bridge_result.additionalDerivativeValues,
-                bridge_result.additionalDerivativeWidths,
-            ),
+            elements_target=elements_target,
+            keplerian=bool(keplerian),
+            anomaly_type=anomaly_type,
+            equinoctial=bool(equinoctial),
+            longitude_type=longitude_type,
+            elements_angles_degrees=bool(elements_angles_degrees),
+            mass=bool(mass),
+            additional_states=additional_states,
+            additional_state_derivatives=additional_state_derivatives,
+            strict=bool(strict),
         )
 
     def get_position(
