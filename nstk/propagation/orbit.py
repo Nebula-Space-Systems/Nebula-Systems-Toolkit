@@ -66,7 +66,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass, field, fields as dataclass_fields
 
-from typing import TYPE_CHECKING, Any, Literal, Optional, Protocol, TypeAlias, Union
+from typing import TYPE_CHECKING, Any, Literal, Optional, Protocol, TypeAlias
 
 import numpy as np
 from astropy.time import Time

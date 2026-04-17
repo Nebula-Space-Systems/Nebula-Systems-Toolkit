@@ -1,0 +1,563 @@
+"""Reusable Orekit attitude-provider builders and wrappers.
+
+This module contains public attitude-law helpers for NSTK propagation
+workflows. It includes both lightweight builders that return raw Orekit
+``AttitudeProvider`` objects and Python wrapper classes around NSTK's custom
+Java attitude providers.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from typing import Any, TYPE_CHECKING
+
+import numpy as np
+from astropy.time import Time
+
+from nstk._orekit_frames import _coerce_iers
+
+from . import orbit as orbit_module
+from ._attitude_provider_java import get_rate_limited_yaw_provider_class
+from ._propagator_utils import _build_earth_shape, _resolve_inertial_frame
+
+if TYPE_CHECKING:
+    from org.hipparchus.geometry.euclidean.threed import Vector3D as OrekitVector3D
+    from org.orekit.attitudes import AttitudeProvider as OrekitAttitudeProvider
+    from org.orekit.bodies import BodyShape as OrekitBodyShape
+    from org.orekit.time import AbsoluteDate as OrekitAbsoluteDate
+else:
+    OrekitVector3D = Any
+    OrekitAttitudeProvider = Any
+    OrekitBodyShape = Any
+    OrekitAbsoluteDate = Any
+
+
+_RUNTIME_BOUND = False
+_JavaRateLimitedYawSteeringProvider = None
+Vector3D = None
+CelestialBodyFactory = None
+AlignedAndConstrained = None
+PredefinedTarget = None
+
+
+def _bind_attitude_provider_java() -> None:
+    """Bind Java classes used by NSTK's attitude-provider wrappers."""
+
+    global _RUNTIME_BOUND
+    global _JavaRateLimitedYawSteeringProvider, Vector3D, CelestialBodyFactory
+    global AlignedAndConstrained, PredefinedTarget
+
+    if _RUNTIME_BOUND:
+        return
+
+    orbit_module._bind_orbit_java()
+
+    from org.hipparchus.geometry.euclidean.threed import Vector3D as _Vector3D  # type: ignore
+    from org.orekit.attitudes import (  # type: ignore
+        AlignedAndConstrained as _AlignedAndConstrained,
+        PredefinedTarget as _PredefinedTarget,
+    )
+    from org.orekit.bodies import CelestialBodyFactory as _CelestialBodyFactory  # type: ignore
+
+    _JavaRateLimitedYawSteeringProvider = get_rate_limited_yaw_provider_class()
+    Vector3D = _Vector3D
+    CelestialBodyFactory = _CelestialBodyFactory
+    AlignedAndConstrained = _AlignedAndConstrained
+    PredefinedTarget = _PredefinedTarget
+    _RUNTIME_BOUND = True
+
+
+def _coerce_absolute_date(value: Time | OrekitAbsoluteDate) -> OrekitAbsoluteDate:
+    """Normalize a scalar time input to an Orekit ``AbsoluteDate``."""
+
+    orbit_module._bind_orbit_java()
+
+    if isinstance(value, Time):
+        if not value.isscalar:
+            raise ValueError("reference_epoch must be a scalar time")
+        return orbit_module.astropy_time_to_orekit_date(
+            value,
+            bind_java=orbit_module._bind_orbit_java,
+            absolute_date_cls=orbit_module.AbsoluteDate,
+            time_scales_factory=orbit_module.TimeScalesFactory,
+        )
+    if isinstance(value, orbit_module.AbsoluteDate):
+        return value
+    raise TypeError("reference_epoch must be an astropy.time.Time scalar or Orekit AbsoluteDate")
+
+
+def _coerce_provider_query_date(
+    value: float | Time | OrekitAbsoluteDate,
+    *,
+    reference_epoch: OrekitAbsoluteDate,
+) -> OrekitAbsoluteDate:
+    """Normalize a diagnostic query date for an attitude-provider wrapper."""
+
+    orbit_module._bind_orbit_java()
+
+    if isinstance(value, (float, int, np.floating, np.integer)):
+        return reference_epoch.shiftedBy(float(value))
+    if isinstance(value, Time):
+        if not value.isscalar:
+            raise ValueError("diagnostic date inputs must be scalar")
+        return orbit_module.astropy_time_to_orekit_date(
+            value,
+            bind_java=orbit_module._bind_orbit_java,
+            absolute_date_cls=orbit_module.AbsoluteDate,
+            time_scales_factory=orbit_module.TimeScalesFactory,
+        )
+    if isinstance(value, orbit_module.AbsoluteDate):
+        return value
+    raise TypeError(
+        "diagnostic date must be a scalar seconds offset from reference_epoch, "
+        "an astropy.time.Time scalar, or an Orekit AbsoluteDate"
+    )
+
+
+def _coerce_vector3d(axis: OrekitVector3D | Sequence[float] | str | None) -> OrekitVector3D:
+    """Normalize a body-axis specification to Orekit ``Vector3D``."""
+
+    _bind_attitude_provider_java()
+
+    if axis is None:
+        return Vector3D.PLUS_I
+    if isinstance(axis, str):
+        key = axis.strip().lower().replace(" ", "").replace("_", "")
+        aliases = {
+            "x": Vector3D.PLUS_I,
+            "+x": Vector3D.PLUS_I,
+            "plusx": Vector3D.PLUS_I,
+            "y": Vector3D.PLUS_J,
+            "+y": Vector3D.PLUS_J,
+            "plusy": Vector3D.PLUS_J,
+            "z": Vector3D.PLUS_K,
+            "+z": Vector3D.PLUS_K,
+            "plusz": Vector3D.PLUS_K,
+            "-x": Vector3D.MINUS_I,
+            "minusx": Vector3D.MINUS_I,
+            "-y": Vector3D.MINUS_J,
+            "minusy": Vector3D.MINUS_J,
+            "-z": Vector3D.MINUS_K,
+            "minusz": Vector3D.MINUS_K,
+        }
+        if key in aliases:
+            return aliases[key]
+        raise ValueError("phasing_axis string must identify one of +/-x, +/-y, or +/-z")
+
+    if hasattr(axis, "getX") and hasattr(axis, "getY") and hasattr(axis, "getZ"):
+        return axis
+
+    arr = np.asarray(axis, dtype=np.float64)
+    if arr.shape != (3,):
+        raise ValueError("phasing_axis must be a length-3 vector")
+    norm = float(np.linalg.norm(arr))
+    if not np.isfinite(norm) or norm <= 0.0:
+        raise ValueError("phasing_axis must be finite and non-zero")
+    return Vector3D(float(arr[0]), float(arr[1]), float(arr[2]))
+
+
+def _coerce_attitude_provider(
+    attitude_provider: Any | None,
+    *,
+    pv_provider: Any | None = None,
+) -> Any | None:
+    """Normalize user attitude-provider inputs to a raw Orekit provider object."""
+
+    if attitude_provider is None:
+        return None
+    if isinstance(attitude_provider, RateLimitedYawSteeringProvider):
+        return attitude_provider.to_orekit(pv_provider=pv_provider)
+    to_orekit = getattr(attitude_provider, "to_orekit", None)
+    if callable(to_orekit):
+        try:
+            return to_orekit(pv_provider=pv_provider)
+        except TypeError:
+            return to_orekit()
+    java_obj = getattr(attitude_provider, "java", None)
+    if java_obj is not None:
+        return java_obj
+    return attitude_provider
+
+
+def build_nadir_sun_constrained_attitude_provider(
+    inertial_frame: orbit_module.FrameLike = None,
+    *,
+    iers_convention: Any | None = None,
+    simple_eop: bool = True,
+    earth_shape: OrekitBodyShape | None = None,
+    sun_provider: Any | None = None,
+) -> OrekitAttitudeProvider:
+    """Build an Orekit nadir-plus-Sun constrained attitude provider.
+
+    This matches the common STK-style "nadir aligned with Sun constraint"
+    attitude law:
+
+    - spacecraft body ``+Z`` points to nadir
+    - spacecraft body ``+X`` points along the local nadir tangent toward the
+      Sun, i.e. the Sun direction projected into the plane orthogonal to nadir
+    - spacecraft body ``+Y`` completes the right-handed triad
+
+    Parameters
+    ----------
+    inertial_frame : Frame | str | None, optional
+        Pseudo-inertial frame used by the attitude law. This should normally
+        match the propagation frame of the propagator that will use the
+        returned provider. ``None`` selects GCRF.
+    iers_convention : org.orekit.utils.IERSConventions, optional
+        IERS convention used when building the default Earth ellipsoid.
+        Ignored when ``earth_shape`` is supplied explicitly.
+    simple_eop : bool, default True
+        Whether the default Earth ellipsoid should use Orekit simple-EOP mode.
+        Ignored when ``earth_shape`` is supplied explicitly.
+    earth_shape : org.orekit.bodies.BodyShape, optional
+        Earth reference shape used for the nadir target. When omitted, a WGS84
+        ellipsoid in ``ITRF(iers_convention, simple_eop)`` is built.
+    sun_provider : org.orekit.utils.ExtendedPositionProvider, optional
+        Sun ephemeris provider used for the Sun constraint. When omitted,
+        Orekit ``CelestialBodyFactory.getSun()`` is used.
+
+    Returns
+    -------
+    org.orekit.attitudes.AttitudeProvider
+        Orekit ``AlignedAndConstrained`` attitude provider implementing the
+        nadir/Sun-constrained body-frame geometry described above.
+    """
+
+    _bind_attitude_provider_java()
+
+    frame = _resolve_inertial_frame(
+        inertial_frame,
+        iers_convention=iers_convention,
+        simple_eop=bool(simple_eop),
+    )
+    iers = _coerce_iers(iers_convention)
+
+    resolved_earth_shape = earth_shape
+    if resolved_earth_shape is None:
+        itrf = orbit_module.FramesFactory.getITRF(iers, bool(simple_eop))
+        resolved_earth_shape = _build_earth_shape(itrf)
+
+    resolved_sun_provider = sun_provider
+    if resolved_sun_provider is None:
+        resolved_sun_provider = CelestialBodyFactory.getSun()
+
+    return AlignedAndConstrained(
+        Vector3D.PLUS_K,
+        PredefinedTarget.NADIR,
+        Vector3D.PLUS_I,
+        PredefinedTarget.SUN,
+        frame,
+        resolved_sun_provider,
+        resolved_earth_shape,
+    )
+
+
+@dataclass(slots=True)
+class RateLimitedYawSteeringProvider:
+    """Deterministic yaw-steering attitude provider with yaw-rate and yaw-acceleration limits.
+
+    The provider uses Orekit's ``NadirPointing`` as its base law and
+    ``YawSteering`` as its ideal reference attitude. The actual commanded yaw
+    tracks the ideal yaw through an internal 2-state yaw ODE integrated from a
+    fixed reference epoch and initial yaw state:
+
+    - ``psi``: actual yaw angle [rad]
+    - ``omega``: actual yaw rate [rad/s]
+
+    The commanded yaw acceleration uses PD tracking plus ideal feed-forward
+    acceleration and is saturated to ``max_yaw_acceleration_rad_s2``. The yaw
+    rate is saturated to ``max_yaw_rate_rad_s``. Because the yaw state is
+    recomputed from the fixed reference epoch on every query, the provider is
+    deterministic and safe for Orekit propagators that request attitudes out of
+    chronological order.
+
+    Parameters
+    ----------
+    inertial_frame : Frame | str | None, optional
+        Pseudo-inertial frame used by the underlying Orekit ``NadirPointing``
+        and ``YawSteering`` laws. This should normally match the propagator's
+        inertial frame. ``None`` selects GCRF.
+    earth_shape : org.orekit.bodies.BodyShape, optional
+        Central-body shape used by the nadir-pointing base law. When omitted, a
+        WGS84 Earth ellipsoid in ``ITRF(iers_convention, simple_eop)`` is
+        created.
+    sun_provider : org.orekit.utils.ExtendedPositionProvider, optional
+        Sun ephemeris provider used by Orekit ``YawSteering``. When omitted,
+        Orekit ``CelestialBodyFactory.getSun()`` is used.
+    phasing_axis : Vector3D | sequence[float] | str | None, optional
+        Spacecraft body-fixed phasing axis used by Orekit ``YawSteering``.
+        Accepts an Orekit ``Vector3D``, a length-3 sequence of floats, or one
+        of ``"x"``, ``"y"``, ``"z"``, ``"-x"``, ``"-y"``, ``"-z"``.
+        ``None`` selects body ``+X``.
+    max_yaw_rate_rad_s : float
+        Maximum allowed yaw-rate magnitude [rad/s].
+    max_yaw_acceleration_rad_s2 : float
+        Maximum allowed yaw-acceleration magnitude [rad/s^2].
+    kp : float
+        Proportional yaw-angle tracking gain. Units are effectively 1/s^2
+        because it multiplies a yaw-angle error [rad] to produce an angular
+        acceleration command [rad/s^2].
+    kd : float
+        Derivative yaw-rate tracking gain. Units are effectively 1/s because it
+        multiplies a yaw-rate error [rad/s] to produce an angular acceleration
+        command [rad/s^2].
+    reference_epoch : astropy.time.Time | AbsoluteDate
+        Fixed reference epoch from which the internal yaw ODE is integrated.
+        This must be a scalar absolute time.
+    initial_yaw_rad : float, default 0.0
+        Actual yaw angle at ``reference_epoch`` [rad] relative to the base
+        nadir attitude.
+    initial_yaw_rate_rad_s : float, default 0.0
+        Actual yaw rate at ``reference_epoch`` [rad/s].
+    finite_difference_step_s : float, default 0.25
+        Centered finite-difference step [s] used to derive ideal yaw-rate and
+        yaw-acceleration reference terms from Orekit's ideal ``YawSteering``
+        law.
+    iers_convention : org.orekit.utils.IERSConventions, optional
+        IERS convention used only when ``earth_shape`` is omitted and NSTK
+        needs to build a default WGS84 Earth ellipsoid.
+    simple_eop : bool, default True
+        Whether default Earth-fixed frame construction should use Orekit
+        simple-EOP mode. Ignored when ``earth_shape`` is supplied explicitly.
+
+    Notes
+    -----
+    Instances of this wrapper can be passed directly to NSTK propagator
+    factories via ``attitude_provider=...``. The factories unwrap the
+    underlying Java ``AttitudeProvider`` automatically.
+    """
+
+    inertial_frame: orbit_module.FrameLike = None
+    earth_shape: OrekitBodyShape | None = None
+    sun_provider: Any | None = None
+    phasing_axis: OrekitVector3D | Sequence[float] | str | None = None
+    max_yaw_rate_rad_s: float = 0.05
+    max_yaw_acceleration_rad_s2: float = 0.01
+    kp: float = 0.05
+    kd: float = 0.25
+    reference_epoch: Time | OrekitAbsoluteDate | None = None
+    initial_yaw_rad: float = 0.0
+    initial_yaw_rate_rad_s: float = 0.0
+    finite_difference_step_s: float = 0.25
+    iers_convention: Any | None = None
+    simple_eop: bool = True
+    _inertial_frame: Any = field(init=False, repr=False)
+    _reference_epoch: Any = field(init=False, repr=False)
+    _phasing_axis: Any = field(init=False, repr=False)
+    _earth_shape: Any = field(init=False, repr=False)
+    _sun_provider: Any = field(init=False, repr=False)
+    _java_provider: Any = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Validate inputs and build the underlying Java provider."""
+
+        _bind_attitude_provider_java()
+
+        if self.reference_epoch is None:
+            raise ValueError("reference_epoch is required")
+
+        if not np.isfinite(float(self.max_yaw_rate_rad_s)) or float(self.max_yaw_rate_rad_s) < 0.0:
+            raise ValueError("max_yaw_rate_rad_s must be finite and >= 0")
+        if (
+            not np.isfinite(float(self.max_yaw_acceleration_rad_s2))
+            or float(self.max_yaw_acceleration_rad_s2) < 0.0
+        ):
+            raise ValueError("max_yaw_acceleration_rad_s2 must be finite and >= 0")
+        if not np.isfinite(float(self.kp)) or float(self.kp) < 0.0:
+            raise ValueError("kp must be finite and >= 0")
+        if not np.isfinite(float(self.kd)) or float(self.kd) < 0.0:
+            raise ValueError("kd must be finite and >= 0")
+        if not np.isfinite(float(self.initial_yaw_rad)):
+            raise ValueError("initial_yaw_rad must be finite")
+        if not np.isfinite(float(self.initial_yaw_rate_rad_s)):
+            raise ValueError("initial_yaw_rate_rad_s must be finite")
+        if abs(float(self.initial_yaw_rate_rad_s)) > float(self.max_yaw_rate_rad_s) + 1.0e-12:
+            raise ValueError("initial_yaw_rate_rad_s magnitude must not exceed max_yaw_rate_rad_s")
+        if (
+            not np.isfinite(float(self.finite_difference_step_s))
+            or float(self.finite_difference_step_s) <= 0.0
+        ):
+            raise ValueError("finite_difference_step_s must be finite and > 0")
+
+        self._inertial_frame = _resolve_inertial_frame(
+            self.inertial_frame,
+            iers_convention=self.iers_convention,
+            simple_eop=bool(self.simple_eop),
+        )
+        self._reference_epoch = _coerce_absolute_date(self.reference_epoch)
+        self._phasing_axis = _coerce_vector3d(self.phasing_axis)
+
+        resolved_earth_shape = self.earth_shape
+        if resolved_earth_shape is None:
+            iers = _coerce_iers(self.iers_convention)
+            itrf = orbit_module.FramesFactory.getITRF(iers, bool(self.simple_eop))
+            resolved_earth_shape = _build_earth_shape(itrf)
+        self._earth_shape = resolved_earth_shape
+
+        resolved_sun_provider = self.sun_provider
+        if resolved_sun_provider is None:
+            resolved_sun_provider = CelestialBodyFactory.getSun()
+        self._sun_provider = resolved_sun_provider
+
+        self._java_provider = _JavaRateLimitedYawSteeringProvider(
+            self._inertial_frame,
+            self._earth_shape,
+            self._sun_provider,
+            self._phasing_axis,
+            float(self.max_yaw_rate_rad_s),
+            float(self.max_yaw_acceleration_rad_s2),
+            float(self.kp),
+            float(self.kd),
+            self._reference_epoch,
+            float(self.initial_yaw_rad),
+            float(self.initial_yaw_rate_rad_s),
+            float(self.finite_difference_step_s),
+        )
+
+    @property
+    def java(self) -> OrekitAttitudeProvider:
+        """Return the underlying Java Orekit ``AttitudeProvider`` instance."""
+
+        return self._java_provider
+
+    @property
+    def reference_epoch_orekit(self) -> OrekitAbsoluteDate:
+        """Return the fixed yaw-integration reference epoch as ``AbsoluteDate``."""
+
+        return self._reference_epoch
+
+    def to_orekit(self, *, pv_provider: Any | None = None) -> OrekitAttitudeProvider:
+        """Return the underlying Java Orekit ``AttitudeProvider``.
+
+        Parameters
+        ----------
+        pv_provider : org.orekit.utils.PVCoordinatesProvider, optional
+            Global PV provider to bind into the returned Java provider for
+            internal fixed-epoch yaw integration. NSTK propagator builders pass
+            the just-built propagator here automatically so the provider can use
+            a global PV source instead of Orekit's per-call local provider.
+
+        Returns
+        -------
+        org.orekit.attitudes.AttitudeProvider
+            Underlying Java attitude provider, optionally rebound to
+            ``pv_provider``.
+        """
+
+        if pv_provider is None:
+            return self._java_provider
+        return self._java_provider.withPVProvider(pv_provider)
+
+    def get_actual_yaw_state(
+        self,
+        pv_provider: Any,
+        date: float | Time | OrekitAbsoluteDate,
+        *,
+        frame: orbit_module.FrameLike = None,
+    ) -> np.ndarray:
+        """Return the tracked yaw state ``[psi, omega, alpha]`` at a requested date.
+
+        Parameters
+        ----------
+        pv_provider : org.orekit.utils.PVCoordinatesProvider
+            Orbit/PV provider used to evaluate the underlying Orekit base and
+            ideal attitude laws.
+        date : float | astropy.time.Time | AbsoluteDate
+            Requested scalar date. A ``float`` is interpreted as seconds since
+            :attr:`reference_epoch_orekit`; an Astropy time or Orekit
+            ``AbsoluteDate`` is interpreted as an absolute date.
+        frame : Frame | str | None, optional
+            Reference frame in which the base and ideal attitudes are evaluated.
+            ``None`` uses the wrapper's inertial frame.
+
+        Returns
+        -------
+        numpy.ndarray
+            Length-3 vector ``[psi, omega, alpha]`` with yaw angle [rad],
+            yaw rate [rad/s], and yaw acceleration [rad/s^2].
+        """
+
+        query_date = _coerce_provider_query_date(date, reference_epoch=self._reference_epoch)
+        query_frame = self._inertial_frame if frame is None else _resolve_inertial_frame(
+            frame,
+            iers_convention=self.iers_convention,
+            simple_eop=bool(self.simple_eop),
+        )
+        return np.asarray(
+            self._java_provider.getTrackedYawState(pv_provider, query_date, query_frame).toArray(),
+            dtype=np.float64,
+        )
+
+    def get_reference_yaw_state(
+        self,
+        pv_provider: Any,
+        date: float | Time | OrekitAbsoluteDate,
+        *,
+        frame: orbit_module.FrameLike = None,
+    ) -> np.ndarray:
+        """Return the ideal reference yaw state ``[psi_ref, omega_ref, alpha_ref]``.
+
+        Parameters
+        ----------
+        pv_provider : org.orekit.utils.PVCoordinatesProvider
+            Orbit/PV provider used to evaluate Orekit's ideal ``YawSteering``
+            law.
+        date : float | astropy.time.Time | AbsoluteDate
+            Requested scalar date. A ``float`` is interpreted as seconds since
+            :attr:`reference_epoch_orekit`; an Astropy time or Orekit
+            ``AbsoluteDate`` is interpreted as an absolute date.
+        frame : Frame | str | None, optional
+            Reference frame in which the base and ideal attitudes are evaluated.
+            ``None`` uses the wrapper's inertial frame.
+
+        Returns
+        -------
+        numpy.ndarray
+            Length-3 vector ``[psi_ref, omega_ref, alpha_ref]`` with reference
+            yaw angle [rad], yaw rate [rad/s], and yaw acceleration [rad/s^2].
+        """
+
+        query_date = _coerce_provider_query_date(date, reference_epoch=self._reference_epoch)
+        query_frame = self._inertial_frame if frame is None else _resolve_inertial_frame(
+            frame,
+            iers_convention=self.iers_convention,
+            simple_eop=bool(self.simple_eop),
+        )
+        return np.asarray(
+            self._java_provider.getReferenceYawState(pv_provider, query_date, query_frame).toArray(),
+            dtype=np.float64,
+        )
+
+    @staticmethod
+    def extract_relative_yaw(base_reference_to_body: Any, target_reference_to_body: Any) -> float:
+        """Extract the relative yaw angle from two reference-to-body rotations.
+
+        Parameters
+        ----------
+        base_reference_to_body : org.hipparchus.geometry.euclidean.threed.Rotation
+            Rotation from the common reference frame into the spacecraft body
+            frame for the base attitude.
+        target_reference_to_body : org.hipparchus.geometry.euclidean.threed.Rotation
+            Rotation from the common reference frame into the spacecraft body
+            frame for the target attitude.
+
+        Returns
+        -------
+        float
+            Relative yaw angle [rad] about the spacecraft body ``+Z`` axis.
+        """
+
+        _bind_attitude_provider_java()
+        return float(
+            _JavaRateLimitedYawSteeringProvider.extractRelativeYaw(
+                base_reference_to_body,
+                target_reference_to_body,
+            )
+        )
+
+
+__all__ = [
+    "RateLimitedYawSteeringProvider",
+    "build_nadir_sun_constrained_attitude_provider",
+]

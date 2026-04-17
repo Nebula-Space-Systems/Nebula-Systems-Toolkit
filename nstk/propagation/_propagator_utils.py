@@ -71,6 +71,33 @@ def _coerce_position_angle_type(anomaly_type: Any):
     raise ValueError("Unsupported anomaly_type")
 
 
+def _resolve_inertial_frame(
+    inertial_frame: Any,
+    *,
+    iers_convention: Any | None,
+    simple_eop: bool,
+):
+    """Resolve and validate a pseudo-inertial propagation frame."""
+
+    _bind_java()
+    iers = _orekit_frames._coerce_iers(iers_convention)
+
+    resolved = inertial_frame
+    if resolved is None:
+        resolved = FramesFactory.getGCRF()
+    elif isinstance(resolved, str):
+        resolved = _orekit_frames._resolve_named_frame(
+            resolved,
+            iers=iers,
+            simple_eop=bool(simple_eop),
+        )
+
+    if not bool(resolved.isPseudoInertial()):
+        raise ValueError("inertial_frame must be pseudo-inertial")
+
+    return resolved
+
+
 def _validate_kepler(a: float, e: float, mass: float) -> None:
     """Validate basic Keplerian constructor inputs."""
 

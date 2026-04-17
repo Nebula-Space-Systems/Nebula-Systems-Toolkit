@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+from . import attitude_providers as attitude_providers
 from . import orbit as orbit
+from .attitude_providers import (
+    RateLimitedYawSteeringProvider as RateLimitedYawSteeringProvider,
+    build_nadir_sun_constrained_attitude_provider as build_nadir_sun_constrained_attitude_provider,
+)
 from .orbit import Orbit as Orbit
 from .orbit import SampledStates as SampledStates
 from .propagator_factories import J2J3J4PropagatorFactory as J2J3J4PropagatorFactory
@@ -24,6 +29,8 @@ __all__ = [
     "TwoBodyPropagatorFactory",
     "J2J3J4PropagatorFactory",
     "NumericalPropagatorFactory",
+    "RateLimitedYawSteeringProvider",
+    "build_nadir_sun_constrained_attitude_provider",
     "build_two_body_propagator",
     "build_j2_j3_j4_propagator",
     "build_numerical_propagator",
@@ -33,5 +40,6 @@ __all__ = [
     "build_two_body_walker_constellation",
     "build_j2_j3_j4_walker_constellation",
     "build_numerical_walker_constellation",
+    "attitude_providers",
     "orbit",
 ]

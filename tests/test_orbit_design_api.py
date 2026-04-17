@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from astropy.time import Time
 
+import nstk.propagation.orbit as orbit_module
 from nstk.propagation import (
     NumericalPropagatorFactory,
     Orbit,
     TwoBodyPropagatorFactory,
+    build_nadir_sun_constrained_attitude_provider,
     build_j2_j3_j4_propagator,
     build_numerical_propagator,
     build_two_body_propagator,
@@ -213,6 +216,76 @@ def test_state_based_factory_classes_cover_old_constructor_behavior() -> None:
 
     assert str(two_body.__class__.__name__) == "org.orekit.propagation.analytical.KeplerianPropagator"
     assert str(numerical.__class__.__name__) == "org.orekit.propagation.numerical.NumericalPropagator"
+
+
+def test_nadir_sun_constrained_attitude_provider_matches_expected_axes() -> None:
+    orbit_module._bind_orbit_java()
+
+    from org.hipparchus.geometry.euclidean.threed import Vector3D
+    from org.orekit.attitudes import PredefinedTarget  # type: ignore
+    from org.orekit.bodies import CelestialBodyFactory  # type: ignore
+
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+    provider = build_nadir_sun_constrained_attitude_provider(inertial_frame="gcrf")
+    propagator = build_two_body_propagator(
+        epoch=epoch,
+        a=7000e3,
+        e=0.001,
+        i=np.deg2rad(53.0),
+        raan=np.deg2rad(20.0),
+        argp=np.deg2rad(15.0),
+        anomaly=np.deg2rad(10.0),
+        inertial_frame="gcrf",
+        attitude_provider=provider,
+    )
+
+    frame = orbit_module.FramesFactory.getGCRF()
+    earth = orbit_module.WGS84_ELLIPSOID
+    sun = CelestialBodyFactory.getSun()
+    state = propagator.propagate(propagator.getInitialState().getDate().shiftedBy(120.0))
+    pv = state.getPVCoordinates(frame)
+
+    nadir_dir = PredefinedTarget.NADIR.getTargetDirection(sun, earth, pv, frame).normalize()
+    sun_dir = PredefinedTarget.SUN.getTargetDirection(sun, earth, pv, frame).normalize()
+    sun_tangent_dir = sun_dir.subtract(
+        nadir_dir.scalarMultiply(sun_dir.dotProduct(nadir_dir))
+    ).normalize()
+
+    rotation = state.getAttitude().getRotation()
+    body_x_in_ref = rotation.applyInverseTo(Vector3D.PLUS_I).normalize()
+    body_y_in_ref = rotation.applyInverseTo(Vector3D.PLUS_J).normalize()
+    body_z_in_ref = rotation.applyInverseTo(Vector3D.PLUS_K).normalize()
+
+    assert body_z_in_ref.dotProduct(nadir_dir) == pytest.approx(1.0, abs=1.0e-12)
+    assert body_x_in_ref.dotProduct(sun_tangent_dir) == pytest.approx(1.0, abs=1.0e-12)
+    assert body_x_in_ref.dotProduct(body_z_in_ref) == pytest.approx(0.0, abs=1.0e-12)
+    assert (
+        body_x_in_ref.crossProduct(body_y_in_ref).normalize().dotProduct(body_z_in_ref)
+        == pytest.approx(1.0, abs=1.0e-12)
+    )
+
+
+def test_nadir_sun_constrained_attitude_provider_can_be_used_with_numerical_builder() -> None:
+    provider = build_nadir_sun_constrained_attitude_provider(inertial_frame="gcrf")
+    propagator = build_numerical_propagator(
+        epoch=Time("2026-01-01T00:00:00", scale="utc"),
+        a=7000e3,
+        e=0.001,
+        i=np.deg2rad(53.0),
+        raan=np.deg2rad(20.0),
+        argp=np.deg2rad(15.0),
+        anomaly=np.deg2rad(10.0),
+        inertial_frame="gcrf",
+        attitude_provider=provider,
+        gravity_degree=8,
+        gravity_order=8,
+        enable_drag=False,
+        enable_third_body=False,
+        enable_srp=False,
+    )
+
+    state = propagator.propagate(propagator.getInitialState().getDate().shiftedBy(60.0))
+    assert state.getAttitude() is not None
 
 
 def test_orbit_default_attitude_quaternions_are_available() -> None:

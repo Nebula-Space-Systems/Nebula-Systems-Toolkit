@@ -14,19 +14,23 @@ from typing import Any, Protocol, TYPE_CHECKING
 
 from astropy.time import Time
 
-from nstk._orekit_frames import _coerce_iers, _resolve_named_frame
+from nstk._orekit_frames import _coerce_iers
 
 from . import orbit as orbit_module
+from .attitude_providers import RateLimitedYawSteeringProvider, _coerce_attitude_provider
 from ._propagator_utils import (
     _build_earth_shape,
     _build_numerical_propagator,
     _coerce_position_angle_type,
     _configure_numerical_force_models,
+    _resolve_inertial_frame,
     _validate_kepler,
 )
 
 if TYPE_CHECKING:
     from org.orekit.propagation import Propagator as OrekitPropagator
+else:
+    OrekitPropagator = Any
 
 
 class PropagatorFactory(Protocol):
@@ -43,13 +47,16 @@ def _apply_attitude_provider(
     propagator: Any,
     inertial_frame: orbit_module.SupportsFrame,
     attitude_provider: Any | None,
+    *,
+    pv_provider: Any | None = None,
 ) -> None:
     """Attach an attitude provider, defaulting to VVLH when none is supplied."""
 
     orbit_module._bind_orbit_java()
+    resolved_provider = _coerce_attitude_provider(attitude_provider, pv_provider=pv_provider)
 
-    if attitude_provider is not None:
-        propagator.setAttitudeProvider(attitude_provider)
+    if resolved_provider is not None:
+        propagator.setAttitudeProvider(resolved_provider)
         return
 
     from org.orekit.attitudes import LofOffset  # type: ignore
@@ -58,31 +65,35 @@ def _apply_attitude_provider(
     propagator.setAttitudeProvider(LofOffset(inertial_frame, LOFType.VVLH))
 
 
-def _resolve_inertial_frame(
-    inertial_frame: orbit_module.FrameLike,
-    *,
-    iers_convention: Any | None,
-    simple_eop: bool,
-) -> orbit_module.SupportsFrame:
-    """Resolve and validate a pseudo-inertial propagation frame."""
+def _build_eckstein_hechler_propagator(
+    initial_state: orbit_module.SupportsSpacecraftState,
+) -> OrekitPropagator:
+    """Create an ``EcksteinHechlerPropagator`` from ``initial_state``."""
 
     orbit_module._bind_orbit_java()
-    iers = _coerce_iers(iers_convention)
 
-    resolved = inertial_frame
-    if resolved is None:
-        resolved = orbit_module.FramesFactory.getGCRF()
-    elif isinstance(resolved, str):
-        resolved = _resolve_named_frame(
-            resolved,
-            iers=iers,
-            simple_eop=bool(simple_eop),
-        )
+    from org.orekit.forces.gravity.potential import GravityFieldFactory  # type: ignore
+    from org.orekit.propagation.analytical import EcksteinHechlerPropagator  # type: ignore
 
-    if not bool(resolved.isPseudoInertial()):
-        raise ValueError("inertial_frame must be pseudo-inertial")
+    inertial_frame = initial_state.getOrbit().getFrame()
+    if not bool(inertial_frame.isPseudoInertial()):
+        raise ValueError("initial_state orbit frame must be pseudo-inertial")
 
-    return resolved
+    provider = GravityFieldFactory.getUnnormalizedProvider(6, 0)
+    harmonics = provider.onDate(initial_state.getDate())
+    propagator = EcksteinHechlerPropagator(
+        initial_state.getOrbit(),
+        float(initial_state.getMass()),
+        float(provider.getAe()),
+        float(provider.getMu()),
+        float(harmonics.getUnnormalizedCnm(2, 0)),
+        float(harmonics.getUnnormalizedCnm(3, 0)),
+        float(harmonics.getUnnormalizedCnm(4, 0)),
+        0.0,
+        0.0,
+    )
+    propagator.resetInitialState(initial_state)
+    return propagator
 
 
 def _build_keplerian_state(
@@ -151,7 +162,9 @@ class TwoBodyPropagatorFactory:
     attitude_provider : org.orekit.attitudes.AttitudeProvider, optional
         Attitude provider to attach to each built propagator. When omitted, the
         factory applies a default VVLH attitude provider in the state's orbit
-        frame.
+        frame. Use
+        :func:`nstk.propagation.attitude_providers.build_nadir_sun_constrained_attitude_provider`
+        for a STK-style nadir-aligned, Sun-constrained provider.
     """
 
     attitude_provider: Any | None = None
@@ -167,8 +180,18 @@ class TwoBodyPropagatorFactory:
         )
         propagator = bridge.getPropagator()
 
-        if self.attitude_provider is not None:
-            propagator.setAttitudeProvider(self.attitude_provider)
+        pv_provider = None
+        if isinstance(self.attitude_provider, RateLimitedYawSteeringProvider):
+            pv_provider = orbit_module._JavaOrbitPropagationBridge.fromSpacecraftState(
+                initial_state,
+                False,
+            ).getPropagator()
+        _apply_attitude_provider(
+            propagator,
+            initial_state.getFrame(),
+            self.attitude_provider,
+            pv_provider=pv_provider,
+        )
 
         return propagator
 
@@ -189,7 +212,9 @@ class J2J3J4PropagatorFactory:
     attitude_provider : org.orekit.attitudes.AttitudeProvider, optional
         Attitude provider to attach to each built propagator. When omitted, the
         factory applies a default VVLH attitude provider in the state's orbit
-        frame.
+        frame. Use
+        :func:`nstk.propagation.attitude_providers.build_nadir_sun_constrained_attitude_provider`
+        for a STK-style nadir-aligned, Sun-constrained provider.
     """
 
     attitude_provider: Any | None = None
@@ -197,30 +222,17 @@ class J2J3J4PropagatorFactory:
     def __call__(self, initial_state: orbit_module.SupportsSpacecraftState) -> OrekitPropagator:
         """Create an ``EcksteinHechlerPropagator`` from ``initial_state``."""
 
-        orbit_module._bind_orbit_java()
-
-        from org.orekit.forces.gravity.potential import GravityFieldFactory  # type: ignore
-        from org.orekit.propagation.analytical import EcksteinHechlerPropagator  # type: ignore
-
         inertial_frame = initial_state.getOrbit().getFrame()
-        if not bool(inertial_frame.isPseudoInertial()):
-            raise ValueError("initial_state orbit frame must be pseudo-inertial")
-
-        provider = GravityFieldFactory.getUnnormalizedProvider(6, 0)
-        harmonics = provider.onDate(initial_state.getDate())
-        propagator = EcksteinHechlerPropagator(
-            initial_state.getOrbit(),
-            float(initial_state.getMass()),
-            float(provider.getAe()),
-            float(provider.getMu()),
-            float(harmonics.getUnnormalizedCnm(2, 0)),
-            float(harmonics.getUnnormalizedCnm(3, 0)),
-            float(harmonics.getUnnormalizedCnm(4, 0)),
-            0.0,
-            0.0,
+        propagator = _build_eckstein_hechler_propagator(initial_state)
+        pv_provider = None
+        if isinstance(self.attitude_provider, RateLimitedYawSteeringProvider):
+            pv_provider = _build_eckstein_hechler_propagator(initial_state)
+        _apply_attitude_provider(
+            propagator,
+            inertial_frame,
+            self.attitude_provider,
+            pv_provider=pv_provider,
         )
-        propagator.resetInitialState(initial_state)
-        _apply_attitude_provider(propagator, inertial_frame, self.attitude_provider)
         return propagator
 
 
@@ -243,7 +255,9 @@ class NumericalPropagatorFactory:
     attitude_provider : org.orekit.attitudes.AttitudeProvider, optional
         Attitude provider to attach to each built propagator. When omitted, the
         factory applies a default VVLH attitude provider in the state's orbit
-        frame.
+        frame. Use
+        :func:`nstk.propagation.attitude_providers.build_nadir_sun_constrained_attitude_provider`
+        for a STK-style nadir-aligned, Sun-constrained provider.
     mu : float | None, optional
         Central-body gravitational parameter in m^3/s^2. When omitted, the
         initial state's orbit ``mu`` value is reused.
@@ -325,8 +339,11 @@ class NumericalPropagatorFactory:
     enable_erp: bool = False
     erp_angular_resolution_deg: float = 1.0
 
-    def __call__(self, initial_state: orbit_module.SupportsSpacecraftState) -> OrekitPropagator:
-        """Create a configured ``NumericalPropagator`` from ``initial_state``."""
+    def _build_core_propagator(
+        self,
+        initial_state: orbit_module.SupportsSpacecraftState,
+    ) -> tuple[OrekitPropagator, orbit_module.SupportsFrame]:
+        """Build the numerical propagator core without applying a custom attitude provider."""
 
         orbit_module._bind_orbit_java()
 
@@ -393,7 +410,21 @@ class NumericalPropagatorFactory:
             enable_erp=bool(self.enable_erp),
             erp_angular_resolution_deg=float(self.erp_angular_resolution_deg),
         )
-        _apply_attitude_provider(propagator, inertial_frame, self.attitude_provider)
+        return propagator, inertial_frame
+
+    def __call__(self, initial_state: orbit_module.SupportsSpacecraftState) -> OrekitPropagator:
+        """Create a configured ``NumericalPropagator`` from ``initial_state``."""
+
+        propagator, inertial_frame = self._build_core_propagator(initial_state)
+        pv_provider = None
+        if isinstance(self.attitude_provider, RateLimitedYawSteeringProvider):
+            pv_provider, _ = self._build_core_propagator(initial_state)
+        _apply_attitude_provider(
+            propagator,
+            inertial_frame,
+            self.attitude_provider,
+            pv_provider=pv_provider,
+        )
         return propagator
 
 
@@ -435,7 +466,9 @@ def build_two_body_propagator(
         Whether Earth-fixed frame parsing should use Orekit simple-EOP mode.
     attitude_provider : org.orekit.attitudes.AttitudeProvider, optional
         Attitude provider to attach to the propagator. When omitted, a default
-        VVLH provider is applied.
+        VVLH provider is applied. Use
+        :func:`nstk.propagation.attitude_providers.build_nadir_sun_constrained_attitude_provider`
+        for a STK-style nadir-aligned, Sun-constrained provider.
 
     Returns
     -------
@@ -501,7 +534,9 @@ def build_j2_j3_j4_propagator(
         Whether Earth-fixed frame parsing should use Orekit simple-EOP mode.
     attitude_provider : org.orekit.attitudes.AttitudeProvider, optional
         Attitude provider to attach to the propagator. When omitted, a default
-        VVLH provider is applied.
+        VVLH provider is applied. Use
+        :func:`nstk.propagation.attitude_providers.build_nadir_sun_constrained_attitude_provider`
+        for a STK-style nadir-aligned, Sun-constrained provider.
 
     Returns
     -------
@@ -589,7 +624,9 @@ def build_numerical_propagator(
         Whether Earth-fixed frame resolution should use Orekit simple-EOP mode.
     attitude_provider : org.orekit.attitudes.AttitudeProvider, optional
         Attitude provider to attach to the propagator. When omitted, a default
-        VVLH provider is applied.
+        VVLH provider is applied. Use
+        :func:`nstk.propagation.attitude_providers.build_nadir_sun_constrained_attitude_provider`
+        for a STK-style nadir-aligned, Sun-constrained provider.
     mu : float | None, optional
         Central-body gravitational parameter [m^3/s^2]. Defaults to WGS84
         Earth ``mu``.

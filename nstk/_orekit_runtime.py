@@ -120,13 +120,17 @@ def ensure_orekit_runtime(*, data_path: Optional[str] = None) -> None:
         from nstk.propagation._orbit_propagation_bridge import (
             prepare_orbit_propagation_bridge_classpath,
         )
+        from nstk.propagation._attitude_provider_java import (
+            prepare_attitude_providers_classpath,
+        )
         from nstk.transforms._timed_rotations_java_bridge import (
             prepare_timed_rotations_bridge_classpath,
         )
 
         cp_orbit = prepare_orbit_propagation_bridge_classpath()
+        cp_attitude = prepare_attitude_providers_classpath()
         cp_timed = prepare_timed_rotations_bridge_classpath()
-        classpaths = _unique_classpaths(cp_orbit, cp_timed)
+        classpaths = _unique_classpaths(cp_orbit, cp_attitude, cp_timed)
 
         # Ensure bridge classpaths are visible even when JVM was already started.
         if jpype.isJVMStarted():
