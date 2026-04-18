@@ -7,3 +7,4 @@ deprecated/
 
 test_access_duration.py
 test_propagate.py
+*.log
