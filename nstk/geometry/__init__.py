@@ -1,13 +1,6 @@
 from nstk.geometry.ellipsoid_los import (
     los_clear_ellipsoid,
-    los_clear_ellipsoid_many_to_many,
-    los_clear_ellipsoid_many_to_many_oriented,
-    los_clear_ellipsoid_one_to_many,
-    los_clear_ellipsoid_one_to_many_oriented,
     los_clear_ellipsoid_oriented,
-    los_clear_wgs84_ecef,
-    los_clear_wgs84_ecef_many_to_many,
-    los_clear_wgs84_ecef_one_to_many,
 )
 from nstk.geometry.fast_sun_position import (
     gmst_angle,
@@ -17,11 +10,6 @@ from nstk.geometry.fast_sun_position import (
 )
 from nstk.geometry.spherical_los import (
     los_clear_sphere,
-    los_clear_sphere_ecef,
-    los_clear_sphere_ecef_many_to_many,
-    los_clear_sphere_ecef_one_to_many,
-    los_clear_sphere_many_to_many,
-    los_clear_sphere_one_to_many,
 )
 from nstk.geometry.terrain import (
     RasterMask,
@@ -40,20 +28,8 @@ from nstk.geometry.terrain import (
 
 __all__ = [
     "los_clear_ellipsoid",
-    "los_clear_ellipsoid_many_to_many",
-    "los_clear_ellipsoid_many_to_many_oriented",
-    "los_clear_ellipsoid_one_to_many",
-    "los_clear_ellipsoid_one_to_many_oriented",
     "los_clear_ellipsoid_oriented",
-    "los_clear_wgs84_ecef",
-    "los_clear_wgs84_ecef_many_to_many",
-    "los_clear_wgs84_ecef_one_to_many",
     "los_clear_sphere",
-    "los_clear_sphere_many_to_many",
-    "los_clear_sphere_one_to_many",
-    "los_clear_sphere_ecef",
-    "los_clear_sphere_ecef_many_to_many",
-    "los_clear_sphere_ecef_one_to_many",
     "julian_date",
     "sun_position_eci",
     "sun_position_ecef",
@@ -71,4 +47,3 @@ __all__ = [
     "compute_viewshed",
     "compute_viewshed_masked",
 ]
-

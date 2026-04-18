@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 import numpy as np
+from numba import njit
 
-from nstk.geometry.spherical_los import (
-    los_clear_sphere,
-    los_clear_sphere_many_to_many,
-    los_clear_sphere_one_to_many,
-)
+from nstk.geometry.spherical_los import los_clear_sphere
 
 
 def _random_outside_sphere(n: int, radius: float, seed: int = 0) -> np.ndarray:
@@ -62,7 +59,7 @@ def test_spherical_los_many_to_many_matches_scalar() -> None:
     observers = _random_outside_sphere(13, radius, seed=1)
     targets = _random_outside_sphere(19, radius, seed=2)
 
-    got = los_clear_sphere_many_to_many(observers, targets, radius)
+    got = los_clear_sphere(observers, targets, radius)
     ref = np.empty((observers.shape[0], targets.shape[0]), dtype=np.bool_)
     for i in range(observers.shape[0]):
         for j in range(targets.shape[0]):
@@ -77,8 +74,60 @@ def test_spherical_los_one_to_many_matches_many_to_many_row() -> None:
     observers = _random_outside_sphere(7, radius, seed=9)
     targets = _random_outside_sphere(41, radius, seed=10)
 
-    row = los_clear_sphere_one_to_many(observers[0], targets, radius)
-    mat = los_clear_sphere_many_to_many(observers[:1], targets, radius)
+    row = los_clear_sphere(observers[0], targets, radius)
+    mat = los_clear_sphere(observers[:1], targets, radius)
 
     assert row.dtype == np.bool_
     np.testing.assert_array_equal(row, mat[0])
+
+
+def test_spherical_los_many_to_one_matches_many_to_many_column() -> None:
+    radius = 6_371_000.0
+    observers = _random_outside_sphere(11, radius, seed=21)
+    targets = _random_outside_sphere(5, radius, seed=22)
+
+    col = los_clear_sphere(observers, targets[0], radius)
+    mat = los_clear_sphere(observers, targets[:1], radius)
+
+    assert col.dtype == np.bool_
+    np.testing.assert_array_equal(col, mat[:, 0])
+
+
+def test_spherical_los_unified_interface_works_inside_njit() -> None:
+    radius = 6_371_000.0
+    observer = np.array([radius + 4.0e5, 0.0, 0.0], dtype=np.float64)
+    target = np.array([0.0, radius + 5.0e5, 0.0], dtype=np.float64)
+    observers = _random_outside_sphere(8, radius, seed=30)
+    targets = _random_outside_sphere(9, radius, seed=31)
+
+    @njit(cache=True)
+    def los_clear_sphere_scalar_jit(observer_pos, target_pos, sphere_radius, cx, cy, cz):
+        return los_clear_sphere(observer_pos, target_pos, sphere_radius, cx, cy, cz)
+
+    @njit(cache=True)
+    def los_clear_sphere_row_jit(observer_pos, targets_pos, sphere_radius):
+        return los_clear_sphere(observer_pos, targets_pos, sphere_radius)
+
+    @njit(cache=True)
+    def los_clear_sphere_col_jit(observers_pos, target_pos, sphere_radius):
+        return los_clear_sphere(observers_pos, target_pos, sphere_radius)
+
+    @njit(cache=True)
+    def los_clear_sphere_mat_jit(observers_pos, targets_pos, sphere_radius):
+        return los_clear_sphere(observers_pos, targets_pos, sphere_radius)
+
+    expected_scalar = los_clear_sphere(observer, target, 2.0, 1.0, -2.0, 0.5)
+    got_scalar = los_clear_sphere_scalar_jit(observer, target, 2.0, 1.0, -2.0, 0.5)
+    assert bool(got_scalar) == bool(expected_scalar)
+
+    expected_row = los_clear_sphere(observer, targets, radius)
+    got_row = los_clear_sphere_row_jit(observer, targets, radius)
+    np.testing.assert_array_equal(got_row, expected_row)
+
+    expected_col = los_clear_sphere(observers, target, radius)
+    got_col = los_clear_sphere_col_jit(observers, target, radius)
+    np.testing.assert_array_equal(got_col, expected_col)
+
+    expected_mat = los_clear_sphere(observers, targets, radius)
+    got_mat = los_clear_sphere_mat_jit(observers, targets, radius)
+    np.testing.assert_array_equal(got_mat, expected_mat)
