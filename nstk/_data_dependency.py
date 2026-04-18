@@ -9,7 +9,7 @@ _MISSING_NSTK_DATA_MESSAGE = (
     "Nebula Space Toolkit's offline data package 'nstk-data' is not installed. "
     "Install it in the same Python environment as nstk with "
     "'python -m pip install nstk-data', or pass an explicit local data path via "
-    "nstk.set_orekit_data_path(...) or the relevant initializer."
+    "nstk.initialize(...), nstk.set_orekit_data_path(...), or the relevant initializer."
 )
 
 

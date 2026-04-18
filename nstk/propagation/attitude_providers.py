@@ -116,7 +116,7 @@ def _coerce_provider_query_date(
 
 
 def _coerce_vector3d(axis: OrekitVector3D | Sequence[float] | str | None) -> OrekitVector3D:
-    """Normalize a body-axis specification to Orekit ``Vector3D``."""
+    """Normalize a body-axis specification to a unit Orekit ``Vector3D``."""
 
     _bind_attitude_provider_java()
 
@@ -146,7 +146,10 @@ def _coerce_vector3d(axis: OrekitVector3D | Sequence[float] | str | None) -> Ore
         raise ValueError("phasing_axis string must identify one of +/-x, +/-y, or +/-z")
 
     if hasattr(axis, "getX") and hasattr(axis, "getY") and hasattr(axis, "getZ"):
-        return axis
+        norm = float(axis.getNorm())
+        if not np.isfinite(norm) or norm <= 0.0:
+            raise ValueError("phasing_axis must be finite and non-zero")
+        return axis.normalize()
 
     arr = np.asarray(axis, dtype=np.float64)
     if arr.shape != (3,):
@@ -154,6 +157,7 @@ def _coerce_vector3d(axis: OrekitVector3D | Sequence[float] | str | None) -> Ore
     norm = float(np.linalg.norm(arr))
     if not np.isfinite(norm) or norm <= 0.0:
         raise ValueError("phasing_axis must be finite and non-zero")
+    arr = arr / norm
     return Vector3D(float(arr[0]), float(arr[1]), float(arr[2]))
 
 
@@ -180,7 +184,7 @@ def _coerce_attitude_provider(
     return attitude_provider
 
 
-def build_nadir_sun_constrained_attitude_provider(
+def build_ideal_nadir_sun_constrained_attitude_provider(
     inertial_frame: orbit_module.FrameLike = None,
     *,
     iers_convention: Any | None = None,
@@ -188,10 +192,12 @@ def build_nadir_sun_constrained_attitude_provider(
     earth_shape: OrekitBodyShape | None = None,
     sun_provider: Any | None = None,
 ) -> OrekitAttitudeProvider:
-    """Build an Orekit nadir-plus-Sun constrained attitude provider.
+    """Build the ideal geometric Orekit nadir-plus-Sun constrained attitude law.
 
-    This matches the common STK-style "nadir aligned with Sun constraint"
-    attitude law:
+    This returns Orekit ``AlignedAndConstrained`` and therefore represents the
+    unrestricted geometric attitude law itself, not NSTK's rate-limited yaw
+    controller. It matches the common STK-style "nadir aligned with Sun
+    constraint" geometry:
 
     - spacecraft body ``+Z`` points to nadir
     - spacecraft body ``+X`` points along the local nadir tangent toward the
@@ -220,7 +226,7 @@ def build_nadir_sun_constrained_attitude_provider(
     Returns
     -------
     org.orekit.attitudes.AttitudeProvider
-        Orekit ``AlignedAndConstrained`` attitude provider implementing the
+        Orekit ``AlignedAndConstrained`` provider implementing the ideal
         nadir/Sun-constrained body-frame geometry described above.
     """
 
@@ -250,6 +256,32 @@ def build_nadir_sun_constrained_attitude_provider(
         frame,
         resolved_sun_provider,
         resolved_earth_shape,
+    )
+
+
+def build_nadir_sun_constrained_attitude_provider(
+    inertial_frame: orbit_module.FrameLike = None,
+    *,
+    iers_convention: Any | None = None,
+    simple_eop: bool = True,
+    earth_shape: OrekitBodyShape | None = None,
+    sun_provider: Any | None = None,
+) -> OrekitAttitudeProvider:
+    """Build the ideal geometric nadir-plus-Sun constrained Orekit attitude law.
+
+    This compatibility helper returns the same unrestricted geometric
+    ``AlignedAndConstrained`` provider as
+    :func:`build_ideal_nadir_sun_constrained_attitude_provider`. It does not
+    apply NSTK's rate-limited yaw controller. For the rate-limited controller,
+    use :class:`RateLimitedYawSteeringProvider`.
+    """
+
+    return build_ideal_nadir_sun_constrained_attitude_provider(
+        inertial_frame,
+        iers_convention=iers_convention,
+        simple_eop=simple_eop,
+        earth_shape=earth_shape,
+        sun_provider=sun_provider,
     )
 
 
@@ -290,7 +322,8 @@ class RateLimitedYawSteeringProvider:
         Spacecraft body-fixed phasing axis used by Orekit ``YawSteering``.
         Accepts an Orekit ``Vector3D``, a length-3 sequence of floats, or one
         of ``"x"``, ``"y"``, ``"z"``, ``"-x"``, ``"-y"``, ``"-z"``.
-        ``None`` selects body ``+X``.
+        The wrapper normalizes any non-zero user-supplied vector before
+        building the Java provider. ``None`` selects body ``+X``.
     max_yaw_rate_rad_s : float
         Maximum allowed yaw-rate magnitude [rad/s].
     max_yaw_acceleration_rad_s2 : float
@@ -339,6 +372,10 @@ class RateLimitedYawSteeringProvider:
     Instances of this wrapper can be passed directly to NSTK propagator
     factories via ``attitude_provider=...``. The factories unwrap the
     underlying Java ``AttitudeProvider`` automatically.
+
+    This class implements NSTK's deterministic rate-limited yaw controller.
+    If you instead want the ideal unrestricted geometric nadir/Sun law, use
+    :func:`build_ideal_nadir_sun_constrained_attitude_provider`.
     """
 
     inertial_frame: orbit_module.FrameLike = None
@@ -587,5 +624,6 @@ class RateLimitedYawSteeringProvider:
 
 __all__ = [
     "RateLimitedYawSteeringProvider",
+    "build_ideal_nadir_sun_constrained_attitude_provider",
     "build_nadir_sun_constrained_attitude_provider",
 ]

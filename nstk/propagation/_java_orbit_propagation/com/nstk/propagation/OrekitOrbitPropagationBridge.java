@@ -325,6 +325,88 @@ public final class OrekitOrbitPropagationBridge {
         return new PVBatchResult(out.p, out.v);
     }
 
+    /**
+     * Query one position vector using the bridge's orbit/PV-only path.
+     *
+     * <p>This method intentionally avoids the generic state-sampling pipeline so callers such as
+     * custom attitude providers can read trajectory history without re-entering full
+     * {@link SpacecraftState} / attitude evaluation.
+     *
+     * @param dtSeconds requested time in seconds since the bridge epoch
+     * @param outputFrame requested output frame, or {@code null} for the native frame
+     * @param strict whether failures should raise ({@code true}) or return {@code null}
+     * @return packed XYZ position vector in meters, or {@code null} when {@code strict == false}
+     *     and the query fails
+     */
+    public synchronized double[] queryOrbitOnlyPosition(
+            final double dtSeconds,
+            final Frame outputFrame,
+            final boolean strict) {
+        try {
+            return packVector(queryOrbitOnlyPVCoordinates(dtSeconds, outputFrame).getPosition());
+        } catch (Exception exc) {
+            if (strict) {
+                throw new IllegalArgumentException("Failed to query orbit-only position", exc);
+            }
+            return null;
+        }
+    }
+
+    /**
+     * Query one velocity vector using the bridge's orbit/PV-only path.
+     *
+     * <p>This method intentionally avoids the generic state-sampling pipeline so callers such as
+     * custom attitude providers can read trajectory history without re-entering full
+     * {@link SpacecraftState} / attitude evaluation.
+     *
+     * @param dtSeconds requested time in seconds since the bridge epoch
+     * @param outputFrame requested output frame, or {@code null} for the native frame
+     * @param strict whether failures should raise ({@code true}) or return {@code null}
+     * @return packed XYZ velocity vector in meters per second, or {@code null} when
+     *     {@code strict == false} and the query fails
+     */
+    public synchronized double[] queryOrbitOnlyVelocity(
+            final double dtSeconds,
+            final Frame outputFrame,
+            final boolean strict) {
+        try {
+            return packVector(queryOrbitOnlyPVCoordinates(dtSeconds, outputFrame).getVelocity());
+        } catch (Exception exc) {
+            if (strict) {
+                throw new IllegalArgumentException("Failed to query orbit-only velocity", exc);
+            }
+            return null;
+        }
+    }
+
+    /**
+     * Query one position/velocity pair using the bridge's orbit/PV-only path.
+     *
+     * <p>This method intentionally avoids the generic state-sampling pipeline so callers such as
+     * custom attitude providers can read trajectory history without re-entering full
+     * {@link SpacecraftState} / attitude evaluation.
+     *
+     * @param dtSeconds requested time in seconds since the bridge epoch
+     * @param outputFrame requested output frame, or {@code null} for the native frame
+     * @param strict whether failures should raise ({@code true}) or return {@code null}
+     * @return packed XYZ position/velocity vectors, or {@code null} when {@code strict == false}
+     *     and the query fails
+     */
+    public synchronized PVBatchResult queryOrbitOnlyPV(
+            final double dtSeconds,
+            final Frame outputFrame,
+            final boolean strict) {
+        try {
+            final PVCoordinates pv = queryOrbitOnlyPVCoordinates(dtSeconds, outputFrame);
+            return new PVBatchResult(packVector(pv.getPosition()), packVector(pv.getVelocity()));
+        } catch (Exception exc) {
+            if (strict) {
+                throw new IllegalArgumentException("Failed to query orbit-only position/velocity", exc);
+            }
+            return null;
+        }
+    }
+
     public synchronized PVABatchResult queryPVA(final double[] dtSeconds, final Frame outputFrame) {
         final StateBatchResult out = queryState(dtSeconds, outputFrame, true, true, true);
         return new PVABatchResult(out.p, out.v, out.a);
@@ -888,6 +970,17 @@ public final class OrekitOrbitPropagationBridge {
                 : propagator.getPVCoordinates(absT, targetFrame);
     }
 
+    private PVCoordinates queryOrbitOnlyPVCoordinates(final double dtSeconds, final Frame outputFrame) {
+        if (!Double.isFinite(dtSeconds)) {
+            throw new IllegalArgumentException("query time must be finite");
+        }
+        final Frame target = outputFrame == null ? nativeFrame : outputFrame;
+        final AbsoluteDate absT = epoch.shiftedBy(dtSeconds);
+        return isAnalyticalOrbitFastPathEligible()
+                ? propagateOrbitDirect(absT).getPVCoordinates(target)
+                : getPVCoordinatesAt(absT, target);
+    }
+
     private boolean isAnalyticalOrbitFastPathEligible() {
         return propagator instanceof KeplerianPropagator || propagator instanceof EcksteinHechlerPropagator;
     }
@@ -1290,6 +1383,13 @@ public final class OrekitOrbitPropagationBridge {
             return;
         }
         copyVector(vec, out, offset);
+    }
+
+    private static double[] packVector(final Vector3D vec) {
+        if (vec == null) {
+            return null;
+        }
+        return new double[] {vec.getX(), vec.getY(), vec.getZ()};
     }
 
     private static void fillNaN(final double[] out, final int offset, final int width) {

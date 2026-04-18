@@ -33,8 +33,9 @@ def _initialize_default_runtime() -> None:
     except Exception as exc:
         raise RuntimeError(
             "Unable to initialize Orekit runtime automatically. "
-            "If you need a custom Orekit data directory, call "
-            "nstk.set_orekit_data_path(...) before using Nebula Space Toolkit time helpers."
+            "If you need eager setup or a custom Orekit data directory, call "
+            "nstk.initialize(...) or nstk.set_orekit_data_path(...) before using "
+            "Nebula Space Toolkit time helpers."
         ) from exc
 
 

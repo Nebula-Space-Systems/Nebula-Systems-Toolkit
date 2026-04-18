@@ -4,6 +4,7 @@ from . import attitude_providers as attitude_providers
 from . import orbit as orbit
 from .attitude_providers import (
     RateLimitedYawSteeringProvider as RateLimitedYawSteeringProvider,
+    build_ideal_nadir_sun_constrained_attitude_provider as build_ideal_nadir_sun_constrained_attitude_provider,
     build_nadir_sun_constrained_attitude_provider as build_nadir_sun_constrained_attitude_provider,
 )
 from .orbit import Orbit as Orbit
@@ -30,6 +31,7 @@ __all__ = [
     "J2J3J4PropagatorFactory",
     "NumericalPropagatorFactory",
     "RateLimitedYawSteeringProvider",
+    "build_ideal_nadir_sun_constrained_attitude_provider",
     "build_nadir_sun_constrained_attitude_provider",
     "build_two_body_propagator",
     "build_j2_j3_j4_propagator",

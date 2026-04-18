@@ -163,8 +163,10 @@ class TwoBodyPropagatorFactory:
         Attitude provider to attach to each built propagator. When omitted, the
         factory applies a default VVLH attitude provider in the state's orbit
         frame. Use
-        :func:`nstk.propagation.attitude_providers.build_nadir_sun_constrained_attitude_provider`
-        for a STK-style nadir-aligned, Sun-constrained provider.
+        :func:`nstk.propagation.attitude_providers.build_ideal_nadir_sun_constrained_attitude_provider`
+        for the ideal STK-style nadir-aligned, Sun-constrained geometric law,
+        or :class:`nstk.propagation.RateLimitedYawSteeringProvider` for the
+        rate-limited controller.
     """
 
     attitude_provider: Any | None = None
@@ -213,8 +215,10 @@ class J2J3J4PropagatorFactory:
         Attitude provider to attach to each built propagator. When omitted, the
         factory applies a default VVLH attitude provider in the state's orbit
         frame. Use
-        :func:`nstk.propagation.attitude_providers.build_nadir_sun_constrained_attitude_provider`
-        for a STK-style nadir-aligned, Sun-constrained provider.
+        :func:`nstk.propagation.attitude_providers.build_ideal_nadir_sun_constrained_attitude_provider`
+        for the ideal STK-style nadir-aligned, Sun-constrained geometric law,
+        or :class:`nstk.propagation.RateLimitedYawSteeringProvider` for the
+        rate-limited controller.
     """
 
     attitude_provider: Any | None = None
@@ -256,8 +260,10 @@ class NumericalPropagatorFactory:
         Attitude provider to attach to each built propagator. When omitted, the
         factory applies a default VVLH attitude provider in the state's orbit
         frame. Use
-        :func:`nstk.propagation.attitude_providers.build_nadir_sun_constrained_attitude_provider`
-        for a STK-style nadir-aligned, Sun-constrained provider.
+        :func:`nstk.propagation.attitude_providers.build_ideal_nadir_sun_constrained_attitude_provider`
+        for the ideal STK-style nadir-aligned, Sun-constrained geometric law,
+        or :class:`nstk.propagation.RateLimitedYawSteeringProvider` for the
+        rate-limited controller.
     mu : float | None, optional
         Central-body gravitational parameter in m^3/s^2. When omitted, the
         initial state's orbit ``mu`` value is reused.
@@ -467,8 +473,10 @@ def build_two_body_propagator(
     attitude_provider : org.orekit.attitudes.AttitudeProvider, optional
         Attitude provider to attach to the propagator. When omitted, a default
         VVLH provider is applied. Use
-        :func:`nstk.propagation.attitude_providers.build_nadir_sun_constrained_attitude_provider`
-        for a STK-style nadir-aligned, Sun-constrained provider.
+        :func:`nstk.propagation.attitude_providers.build_ideal_nadir_sun_constrained_attitude_provider`
+        for the ideal STK-style nadir-aligned, Sun-constrained geometric law,
+        or :class:`nstk.propagation.RateLimitedYawSteeringProvider` for the
+        rate-limited controller.
 
     Returns
     -------
@@ -535,8 +543,10 @@ def build_j2_j3_j4_propagator(
     attitude_provider : org.orekit.attitudes.AttitudeProvider, optional
         Attitude provider to attach to the propagator. When omitted, a default
         VVLH provider is applied. Use
-        :func:`nstk.propagation.attitude_providers.build_nadir_sun_constrained_attitude_provider`
-        for a STK-style nadir-aligned, Sun-constrained provider.
+        :func:`nstk.propagation.attitude_providers.build_ideal_nadir_sun_constrained_attitude_provider`
+        for the ideal STK-style nadir-aligned, Sun-constrained geometric law,
+        or :class:`nstk.propagation.RateLimitedYawSteeringProvider` for the
+        rate-limited controller.
 
     Returns
     -------
@@ -625,8 +635,10 @@ def build_numerical_propagator(
     attitude_provider : org.orekit.attitudes.AttitudeProvider, optional
         Attitude provider to attach to the propagator. When omitted, a default
         VVLH provider is applied. Use
-        :func:`nstk.propagation.attitude_providers.build_nadir_sun_constrained_attitude_provider`
-        for a STK-style nadir-aligned, Sun-constrained provider.
+        :func:`nstk.propagation.attitude_providers.build_ideal_nadir_sun_constrained_attitude_provider`
+        for the ideal STK-style nadir-aligned, Sun-constrained geometric law,
+        or :class:`nstk.propagation.RateLimitedYawSteeringProvider` for the
+        rate-limited controller.
     mu : float | None, optional
         Central-body gravitational parameter [m^3/s^2]. Defaults to WGS84
         Earth ``mu``.

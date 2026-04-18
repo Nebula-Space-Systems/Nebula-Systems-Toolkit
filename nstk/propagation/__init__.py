@@ -4,6 +4,7 @@ from typing import Any
 from nstk.propagation.orbit import Orbit, SampledStates
 from nstk.propagation.attitude_providers import (
     RateLimitedYawSteeringProvider,
+    build_ideal_nadir_sun_constrained_attitude_provider,
     build_nadir_sun_constrained_attitude_provider,
 )
 from nstk.propagation.propagator_factories import (
@@ -32,6 +33,7 @@ __all__ = [
     "J2J3J4PropagatorFactory",
     "NumericalPropagatorFactory",
     "RateLimitedYawSteeringProvider",
+    "build_ideal_nadir_sun_constrained_attitude_provider",
     "build_nadir_sun_constrained_attitude_provider",
     "build_two_body_propagator",
     "build_j2_j3_j4_propagator",

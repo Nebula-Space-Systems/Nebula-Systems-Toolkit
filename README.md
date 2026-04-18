@@ -84,32 +84,53 @@ to be managed independently.
 Orekit-backed features initialize lazily on first use. Most users do not need
 to do anything beyond installing the appropriate extra.
 
-If you want to use a custom Orekit data directory instead of the bundled data
-package, configure it before first use:
+If you want one simple top-level setup call for Orekit plus NSTK's bundled
+offline Cartopy assets, initialize the runtime once near the top of your
+script or notebook:
 
 ```python
 import nstk
 
-nstk.set_orekit_data_path("/path/to/orekit-data")
+nstk.initialize()
 ```
 
-If you prefer eager initialization, you can explicitly initialize the runtime:
+For fully offline-friendly workflows, disable Astropy IERS downloads and relax
+its IERS age checks through the same entry point:
 
 ```python
 import nstk
 
-nstk.initialize_orekit()
+nstk.initialize(offline=True)
 ```
+
+If you want to use custom data directories instead of the bundled
+`nstk-data` package, pass them explicitly:
+
+```python
+import nstk
+
+nstk.initialize(
+    orekit_data_path="/path/to/orekit-data",
+    cartopy_data_path="/path/to/cartopy-data",
+)
+```
+
+For Orekit-only advanced workflows, the lower-level helpers
+`nstk.initialize_orekit(...)` and `nstk.set_orekit_data_path(...)` remain
+available.
 
 ## Minimal Example
 
 The example below shows a simple Orekit-backed orbit workflow:
 
 ```python
-from astropy.time import Time
-from nstk.propagation import Orbit
+import nstk
+nstk.initialize()
 
-orbit = Orbit.from_kepler_two_body(
+from astropy.time import Time
+from nstk.propagation import Orbit, build_two_body_propagator
+
+propagator = build_two_body_propagator(
     epoch=Time("2026-01-01T00:00:00", scale="utc"),
     a=7000e3,
     e=0.001,
@@ -118,9 +139,11 @@ orbit = Orbit.from_kepler_two_body(
     argp=0.2,
     anomaly=0.3,
     anomaly_type="mean",
+    inertial_frame="gcrf",
 )
+orbit = Orbit(propagator)
 
-position_m = orbit.get_p(0.0, frame="gcrf", as_quantity=False)
+position_m = orbit.get_position(0.0, frame="gcrf")
 print(position_m)
 ```
 
@@ -141,7 +164,9 @@ Supported local-orbital attitude names include:
   local orbital frames
 
 You can also pass an Orekit `LOFType`, a prebuilt Orekit `AttitudeProvider`,
-or a callable accepted by `Orbit.set_attitude_law(...)`.
+or one of NSTK's attitude-provider helpers through `attitude_provider=` on a
+propagator factory, and later swap the installed provider with
+`Orbit.set_attitude_provider(...)`.
 
 ## Examples
 

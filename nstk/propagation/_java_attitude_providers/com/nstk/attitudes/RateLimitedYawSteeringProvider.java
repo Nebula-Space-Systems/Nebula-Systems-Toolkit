@@ -21,11 +21,13 @@ import org.hipparchus.util.MathUtils;
 import org.orekit.attitudes.Attitude;
 import org.orekit.attitudes.AttitudeProvider;
 import org.orekit.attitudes.FieldAttitude;
+import org.orekit.attitudes.FrameAlignedProvider;
 import org.orekit.attitudes.GroundPointing;
 import org.orekit.attitudes.NadirPointing;
 import org.orekit.attitudes.YawSteering;
 import org.orekit.bodies.BodyShape;
 import org.orekit.frames.Frame;
+import org.orekit.propagation.Propagator;
 import org.orekit.propagation.events.EventDetector;
 import org.orekit.propagation.events.FieldEventDetector;
 import org.orekit.time.AbsoluteDate;
@@ -61,6 +63,16 @@ import org.orekit.utils.TimeStampedPVCoordinates;
  * alpha_cmd = clamp(alpha_raw, -maxYawAcceleration, +maxYawAcceleration)
  * </pre>
  *
+ * <p>Yaw is defined as the relative rotation from the base nadir-pointing attitude into the actual
+ * body attitude about the spacecraft body +Z axis. All rotations handled here use Orekit's usual
+ * convention of mapping the reference frame into the body frame. The output attitude is therefore
+ * reconstructed by composing:
+ *
+ * <ol>
+ *   <li>the base nadir attitude, expressed as a reference-to-body rotation, and</li>
+ *   <li>a yaw-only body-fixed offset about +Z, applied on top of that base attitude.</li>
+ * </ol>
+ *
  * <p>If the current yaw rate already lies on a configured limit and the commanded acceleration
  * would push the yaw rate farther outside that bound, the acceleration command is forced to zero.
  *
@@ -75,11 +87,13 @@ import org.orekit.utils.TimeStampedPVCoordinates;
  *   <li>the controller and limit settings.</li>
  * </ul>
  *
- * <p>Reference yaw, yaw rate, and yaw acceleration are derived from the ideal Orekit
- * {@link YawSteering} law using centered finite differences. The relative yaw is extracted from
- * the relative rotation between the base nadir attitude and ideal yaw-steered attitude. The output
- * attitude is reconstructed by composing the base attitude with a yaw-only angular offset about
- * the spacecraft body +Z axis using Orekit {@link AngularCoordinates} composition.
+ * <p>Reference yaw is extracted from the relative rotation between the base nadir attitude and the
+ * ideal Orekit {@link YawSteering} attitude. Reference yaw rate and yaw acceleration are taken
+ * from the relative angular coordinates only when that relative motion is consistent with a pure
+ * yaw offset about body +Z. Otherwise the provider falls back to centered finite differences of
+ * the extracted scalar yaw angle. The output attitude is reconstructed by composing the base
+ * attitude with a yaw-only angular offset about the spacecraft body +Z axis using Orekit
+ * {@link AngularCoordinates} composition.
  */
 public class RateLimitedYawSteeringProvider implements AttitudeProvider {
 
@@ -92,6 +106,8 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
     private static final double EPS_RATE_LIMIT = 1.0e-12;
     private static final double EPS_AXIS_NORM = 1.0e-15;
     private static final double EPS_TIME = 1.0e-14;
+    private static final double EPS_PURE_YAW_ROTATION = 1.0e-10;
+    private static final double EPS_PURE_YAW_COMPONENT = 1.0e-10;
 
     private final Frame inertialFrame;
     private final BodyShape bodyShape;
@@ -285,11 +301,11 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
         this.psi0 = psi0;
         this.omega0 = omega0;
         this.finiteDifferenceStep = finiteDifferenceStep;
-        this.trajectoryProvider = trajectoryProvider;
-        this.cacheEnabled = cacheEnabled;
-        this.cacheStep = cacheStep;
         this.baseLaw = new NadirPointing(inertialFrame, bodyShape);
         this.idealLaw = new YawSteering(inertialFrame, baseLaw, sunProvider, this.phasingAxis);
+        this.trajectoryProvider = sanitizeTrajectoryProvider(trajectoryProvider);
+        this.cacheEnabled = cacheEnabled;
+        this.cacheStep = cacheStep;
         this.checkpointLock = new Object();
         this.checkpointCache = new TreeMap<>();
     }
@@ -452,6 +468,10 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
             final FieldAbsoluteDate<T> date,
             final Frame frame) {
 
+        // The field overload intentionally reuses the deterministic regular-date implementation.
+        // This keeps one authoritative yaw-integration path and avoids duplicating the controller
+        // logic in field arithmetic. The field PV provider is bridged to a regular PV provider and
+        // the resulting regular Attitude is then wrapped back into a FieldAttitude.
         final FieldToRegularPVProvider<T> regularProvider =
                 new FieldToRegularPVProvider<>(pvProv, date.getField());
         final Attitude attitude = getAttitude(selectPvProvider(regularProvider), date.toAbsoluteDate(), frame);
@@ -492,6 +512,13 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
 
     private PVCoordinatesProvider selectPvProvider(final PVCoordinatesProvider callTimeProvider) {
         return trajectoryProvider != null ? trajectoryProvider : callTimeProvider;
+    }
+
+    private PVCoordinatesProvider sanitizeTrajectoryProvider(final PVCoordinatesProvider provider) {
+        if (provider instanceof Propagator) {
+            return new NonRecursivePropagatorPVProvider((Propagator) provider, inertialFrame);
+        }
+        return provider;
     }
 
     private boolean canUseCheckpointCache(final Frame frame) {
@@ -596,6 +623,9 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
         if (rotationRate == null || rotationAcceleration == null) {
             return computeReferenceYawStateFiniteDifference(pvProv, date, frame);
         }
+        if (!isPureYawRelativeState(relative, psi, rotationRate, rotationAcceleration)) {
+            return computeReferenceYawStateFiniteDifference(pvProv, date, frame);
+        }
 
         final double omega = rotationRate.getZ();
         final double alpha = rotationAcceleration.getZ();
@@ -604,6 +634,28 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
         }
 
         return new YawStateSnapshot(psi, omega, alpha);
+    }
+
+    private boolean isPureYawRelativeState(
+            final AngularCoordinates relative,
+            final double psi,
+            final Vector3D rotationRate,
+            final Vector3D rotationAcceleration) {
+
+        final Rotation expectedYaw =
+                new Rotation(Vector3D.PLUS_K, psi, RotationConvention.FRAME_TRANSFORM);
+        final double rotationError = rotationDistance(relative.getRotation(), expectedYaw);
+        if (rotationError > EPS_PURE_YAW_ROTATION) {
+            return false;
+        }
+
+        final double rateLateral = FastMath.hypot(rotationRate.getX(), rotationRate.getY());
+        final double accelLateral =
+                FastMath.hypot(rotationAcceleration.getX(), rotationAcceleration.getY());
+        final double rateScale = FastMath.max(1.0, rotationRate.getNorm());
+        final double accelScale = FastMath.max(1.0, rotationAcceleration.getNorm());
+        return rateLateral <= EPS_PURE_YAW_COMPONENT * rateScale
+                && accelLateral <= EPS_PURE_YAW_COMPONENT * accelScale;
     }
 
     private YawStateSnapshot[] sampleYawStateBatch(
@@ -785,6 +837,14 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
         return clamp(omega, -maxYawRate, maxYawRate);
     }
 
+    private double computeYawRateDerivative(final double rawOmega, final double alphaCommand) {
+        if ((rawOmega >= maxYawRate - EPS_RATE_LIMIT && alphaCommand > 0.0)
+                || (rawOmega <= -maxYawRate + EPS_RATE_LIMIT && alphaCommand < 0.0)) {
+            return 0.0;
+        }
+        return alphaCommand;
+    }
+
     private YawStateSnapshot ensureYawAcceleration(
             final PVCoordinatesProvider pvProv,
             final Frame frame,
@@ -881,6 +941,9 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
             final Attitude baseAttitude,
             final YawStateSnapshot yawState) {
 
+        // baseAttitude and the returned orientation both map the same reference frame into the
+        // spacecraft body frame. The yaw offset is therefore a body-fixed rotation applied on top
+        // of the base attitude, with positive yaw defined about body +Z.
         final Rotation yawRotation =
                 new Rotation(Vector3D.PLUS_K, yawState.psi, RotationConvention.FRAME_TRANSFORM);
         final TimeStampedAngularCoordinates yawOffset = new TimeStampedAngularCoordinates(
@@ -922,7 +985,14 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
         out[offset + 2] = vector.getZ();
     }
 
+    private static double rotationDistance(final Rotation a, final Rotation b) {
+        return FastMath.abs(a.applyInverseTo(b).getAngle());
+    }
+
     private static double extractYawFromRelativeRotation(final Rotation relativeRotation) {
+        // relativeRotation maps the base-attitude frame into the target-attitude frame. For a
+        // pure positive body +Z yaw offset, the body +X axis rotates toward +Y in the base frame,
+        // so the azimuth of body +X in the base-frame XY plane is the signed yaw angle.
         final Vector3D bodyXInBase = relativeRotation.applyInverseTo(Vector3D.PLUS_I);
         return FastMath.atan2(bodyXInBase.getY(), bodyXInBase.getX());
     }
@@ -975,10 +1045,12 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
         public double[] computeDerivatives(final double t, final double[] state) {
             final AbsoluteDate date = referenceEpoch.shiftedBy(t);
             final double psi = state[0];
-            final double omega = state[1];
-            final double psiDot = clampYawRate(omega);
+            final double rawOmega = state[1];
+            final double omega = clampYawRate(rawOmega);
             final double alpha = computeYawAcceleration(pvProv, date, frame, psi, omega);
-            return new double[] {psiDot, alpha};
+            final double psiDot = omega;
+            final double omegaDot = computeYawRateDerivative(rawOmega, alpha);
+            return new double[] {psiDot, omegaDot};
         }
     }
 
@@ -1000,6 +1072,32 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
             final TimeStampedFieldPVCoordinates<T> pv =
                     delegate.getPVCoordinates(new FieldAbsoluteDate<>(field, date), frame);
             return pv.toTimeStampedPVCoordinates();
+        }
+    }
+
+    private static final class NonRecursivePropagatorPVProvider implements PVCoordinatesProvider {
+
+        private final Propagator propagator;
+        private final AttitudeProvider recursionSafeAttitudeProvider;
+
+        private NonRecursivePropagatorPVProvider(
+                final Propagator propagator,
+                final Frame inertialFrame) {
+            this.propagator = propagator;
+            this.recursionSafeAttitudeProvider = new FrameAlignedProvider(inertialFrame);
+        }
+
+        @Override
+        public TimeStampedPVCoordinates getPVCoordinates(final AbsoluteDate date, final Frame frame) {
+            synchronized (propagator) {
+                final AttitudeProvider originalProvider = propagator.getAttitudeProvider();
+                propagator.setAttitudeProvider(recursionSafeAttitudeProvider);
+                try {
+                    return propagator.propagate(date).getPVCoordinates(frame);
+                } finally {
+                    propagator.setAttitudeProvider(originalProvider);
+                }
+            }
         }
     }
 }

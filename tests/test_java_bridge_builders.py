@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import tomllib
 import warnings
 
 from nstk import _orekit_runtime
@@ -117,3 +118,16 @@ def test_attitude_provider_bridge_loads_java_class(monkeypatch) -> None:
 
     assert result == f"class:{attitude_bridge.JAVA_RATE_LIMITED_YAW_PROVIDER_CLASS}"
     assert calls == [attitude_bridge.JAVA_RATE_LIMITED_YAW_PROVIDER_CLASS]
+
+
+def test_pyproject_force_includes_all_prebuilt_java_bridges() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    pyproject = tomllib.loads((repo_root / "pyproject.toml").read_text())
+    force_include = pyproject["tool"]["hatch"]["build"]["targets"]["wheel"]["force-include"]
+
+    assert (
+        "nstk/propagation/_java_orbit_propagation/OrekitOrbitPropagationBridge.jar"
+        in force_include
+    )
+    assert "nstk/propagation/_java_attitude_providers/NSTKAttitudeProviders.jar" in force_include
+    assert "nstk/transforms/java_timed_rotations/TimedRotationBridge.jar" in force_include

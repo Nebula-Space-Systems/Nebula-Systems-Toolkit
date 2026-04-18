@@ -58,8 +58,17 @@ At each internal ODE evaluation time, the provider computes:
 - `omega_ref`: ideal yaw rate
 - `alpha_ref`: ideal yaw acceleration
 
-The ideal yaw-rate and yaw-acceleration terms are derived with centered finite
-differences from the ideal Orekit `YawSteering` law.
+The implementation first forms the relative angular coordinates between:
+
+- the base nadir-pointing attitude
+- the ideal Orekit `YawSteering` attitude
+
+If that relative motion is consistent with a pure yaw offset about body `+Z`,
+the implementation uses the relative `Z` angular-rate and angular-acceleration
+components directly.
+
+If it is not sufficiently pure-yaw, the implementation falls back to centered
+finite differences of the extracted scalar yaw angle.
 
 The commanded yaw acceleration uses PD tracking with feed-forward reference
 acceleration:
@@ -81,9 +90,16 @@ psi_dot   = omega
 omega_dot = alpha_cmd
 ```
 
-The implementation clamps the effective yaw rate used in `psi_dot`, and clamps
-the returned final yaw rate after integration as a defensive guard against
-numerical overshoot.
+The implementation uses a projected saturated yaw-rate dynamics formulation:
+
+- `psi_dot` always uses the projected bounded yaw rate
+- outward acceleration is suppressed when the current yaw rate is already on
+  the configured limit
+- returned yaw states clamp the reported yaw rate as a defensive guard against
+  numerical overshoot
+
+This avoids depending on an inconsistent hidden overspeed state when the
+controller is operating on a saturation boundary.
 
 ## Relative Yaw Extraction
 
@@ -100,8 +116,12 @@ The relative yaw angle is extracted from the relative rotation by mapping the
 body `+X` axis into the base-attitude frame and taking its azimuth in the
 base-frame XY plane.
 
-NSTK includes tests that explicitly verify the sign convention for positive and
-negative yaw.
+NSTK includes tests that explicitly verify:
+
+- positive and negative yaw sign
+- reconstruction from extracted yaw for non-identity base attitudes
+- zero-offset reconstruction
+- ideal-yaw reconstruction consistency against Orekit `YawSteering`
 
 ## Attitude Reconstruction
 
@@ -147,9 +167,10 @@ integration model valid when the provider is attached to an Orekit propagator.
   settings, not on previous call order.
 - The default cache spacing is 1 second, which is aimed at dense orbit
   sampling. For sparse queries, a larger cache step reduces checkpoint buildup.
-- The finite-difference derivative quality depends on the configured finite
-  difference step. Too large a step smears sharp ideal-yaw features; too small
-  a step can amplify numerical noise and increase runtime.
+- When the implementation falls back to finite-difference reference
+  derivatives, their quality depends on the configured finite difference step.
+  Too large a step smears sharp ideal-yaw features; too small a step can
+  amplify numerical noise and increase runtime.
 
 ## Recommended Tuning
 

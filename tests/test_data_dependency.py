@@ -32,6 +32,6 @@ def test_missing_data_dependency_raises_helpful_error(monkeypatch) -> None:
 
     with pytest.raises(
         ModuleNotFoundError,
-        match=r"nstk-data|pip install nstk-data|set_orekit_data_path",
+        match=r"nstk-data|pip install nstk-data|initialize|set_orekit_data_path",
     ):
         _data_dependency.get_installed_orekit_data_dir()

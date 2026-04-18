@@ -108,6 +108,8 @@ TimeScalesFactory = None
 AbsoluteDate = None
 IERSConventions = None
 OneAxisEllipsoid = None
+Vector3D = None
+TimeStampedPVCoordinates = None
 
 # Lazily built WGS84 ellipsoid in ITRF/IERS2010/simpleEOP
 _WGS84_ELLIPSOID_CACHE = None
@@ -172,6 +174,15 @@ class SampledStates:
     outputs have shape ``(N, 3)``, quaternion outputs ``(N, 4)``, rotation
     matrices ``(N, 3, 3)``, and scalar outputs ``(N,)``. The Astropy time
     axis is constructed lazily on first access to :attr:`times_astropy`.
+
+    Attitude metadata
+    -----------------
+    ``attitude_reference_frame`` records the reference frame used for attitude
+    orientation outputs such as quaternions, rotation matrices, and Euler
+    angles. It does not change the frame of
+    :attr:`attitude_spin_body_rad_s` or
+    :attr:`attitude_accel_body_rad_s2`; those angular vectors are always
+    expressed in the spacecraft body frame.
     """
 
     delta_times_sec: np.ndarray
@@ -295,6 +306,7 @@ def _bind_orbit_java() -> None:
     global _JavaOrbitPropagationBridge
     global FramesFactory, TimeScalesFactory
     global AbsoluteDate, IERSConventions, OneAxisEllipsoid
+    global Vector3D, TimeStampedPVCoordinates
 
     if _RUNTIME_BOUND:
         return
@@ -305,14 +317,18 @@ def _bind_orbit_java() -> None:
     _orekit_frames._bind_java()
 
     from org.orekit.bodies import OneAxisEllipsoid as _OneAxisEllipsoid
+    from org.orekit.utils import TimeStampedPVCoordinates as _TimeStampedPVCoordinates
     from org.orekit.time import AbsoluteDate as _AbsoluteDate
     from org.orekit.time import TimeScalesFactory as _TimeScalesFactory
+    from org.hipparchus.geometry.euclidean.threed import Vector3D as _Vector3D
 
     FramesFactory = _orekit_frames.FramesFactory
     TimeScalesFactory = _TimeScalesFactory
     AbsoluteDate = _AbsoluteDate
     IERSConventions = _orekit_frames.IERSConventions
     OneAxisEllipsoid = _OneAxisEllipsoid
+    Vector3D = _Vector3D
+    TimeStampedPVCoordinates = _TimeStampedPVCoordinates
 
     _JavaOrbitPropagationBridge = get_orbit_propagation_bridge_class()
     _RUNTIME_BOUND = True
@@ -423,6 +439,182 @@ def _build_reference_ellipsoid(
         f,
         FramesFactory.getITRF(iers, bool(simple_eop)),
     )
+
+
+def _reshape_orbit_only_xyz(values: Any, *, field_name: str) -> Optional[np.ndarray]:
+    """Normalize one orbit-only XYZ vector returned by the bridge."""
+
+    if values is None:
+        return None
+    arr = np.asarray(values, dtype=np.float64).reshape(-1)
+    if arr.size != 3:
+        raise ValueError(
+            f"Bridge {field_name} must return exactly 3 values for one sample, got {arr.size}."
+        )
+    return arr
+
+
+def _call_bridge_orbit_only_vector(
+    bridge: Any,
+    *,
+    method_name: str,
+    legacy_method_name: str,
+    dt_s: float,
+    frame: Any,
+    strict: bool,
+) -> Optional[np.ndarray]:
+    """Call the bridge orbit-only vector method, with legacy fallback if unavailable.
+
+    The preferred path must avoid the generic state-sampling pipeline so custom
+    attitude providers can read trajectory history without re-entering full
+    state/attitude evaluation. The legacy fallback is kept only so older
+    prebuilt bridge artifacts remain usable until the Java bridge is rebuilt.
+    """
+
+    method = getattr(bridge, method_name, None)
+    if callable(method):
+        try:
+            return _reshape_orbit_only_xyz(
+                method(float(dt_s), frame, bool(strict)),
+                field_name=method_name,
+            )
+        except Exception:
+            if strict:
+                raise
+            return None
+
+    legacy_method = getattr(bridge, legacy_method_name, None)
+    if not callable(legacy_method):
+        raise AttributeError(
+            f"Bridge does not expose {method_name}() or compatibility fallback {legacy_method_name}()."
+        )
+    try:
+        return _reshape_orbit_only_xyz(
+            legacy_method(np.asarray([float(dt_s)], dtype=np.float64), frame),
+            field_name=legacy_method_name,
+        )
+    except Exception:
+        if strict:
+            raise
+        return None
+
+
+def _call_bridge_orbit_only_pv(
+    bridge: Any,
+    *,
+    dt_s: float,
+    frame: Any,
+    strict: bool,
+) -> Optional[tuple[np.ndarray, np.ndarray]]:
+    """Call the bridge orbit-only position/velocity method, with legacy fallback if unavailable."""
+
+    method = getattr(bridge, "queryOrbitOnlyPV", None)
+    if callable(method):
+        try:
+            pv = method(float(dt_s), frame, bool(strict))
+            if pv is None:
+                return None
+            position = _reshape_orbit_only_xyz(pv.p, field_name="queryOrbitOnlyPV.position")
+            velocity = _reshape_orbit_only_xyz(pv.v, field_name="queryOrbitOnlyPV.velocity")
+            return position, velocity
+        except Exception:
+            if strict:
+                raise
+            return None
+
+    position = _call_bridge_orbit_only_vector(
+        bridge,
+        method_name="queryOrbitOnlyPosition",
+        legacy_method_name="queryPosition",
+        dt_s=dt_s,
+        frame=frame,
+        strict=strict,
+    )
+    if position is None:
+        return None
+    velocity = _call_bridge_orbit_only_vector(
+        bridge,
+        method_name="queryOrbitOnlyVelocity",
+        legacy_method_name="queryVelocity",
+        dt_s=dt_s,
+        frame=frame,
+        strict=strict,
+    )
+    if velocity is None:
+        return None
+    return position, velocity
+
+
+def _build_bridge_pv_provider_proxy(orbit: "Orbit") -> Any:
+    """Create a JPype ``PVCoordinatesProvider`` backed by this orbit's bridge.
+
+    The proxy must use orbit-only bridge PV methods rather than the generic
+    state-sampling paths. Routing through generic state sampling can recurse
+    back into full attitude evaluation, which is exactly what this proxy is
+    meant to avoid for custom attitude providers.
+    """
+
+    _bind_orbit_java()
+
+    import jpype
+
+    bridge = orbit._bridge
+    epoch = orbit._epoch_orekit
+
+    @jpype.JImplements("org.orekit.utils.PVCoordinatesProvider")
+    class _BridgePVProviderProxy:
+        def _query_orbit_only_position(self, date: Any, frame: Any, *, strict: bool = True) -> Any:
+            dt_s = float(date.durationFrom(epoch))
+            return _call_bridge_orbit_only_vector(
+                bridge,
+                method_name="queryOrbitOnlyPosition",
+                legacy_method_name="queryPosition",
+                dt_s=dt_s,
+                frame=frame,
+                strict=strict,
+            )
+
+        def _query_orbit_only_velocity(self, date: Any, frame: Any, *, strict: bool = True) -> Any:
+            dt_s = float(date.durationFrom(epoch))
+            return _call_bridge_orbit_only_vector(
+                bridge,
+                method_name="queryOrbitOnlyVelocity",
+                legacy_method_name="queryVelocity",
+                dt_s=dt_s,
+                frame=frame,
+                strict=strict,
+            )
+
+        def _query_orbit_only_pv(self, date: Any, frame: Any, *, strict: bool = True) -> Any:
+            dt_s = float(date.durationFrom(epoch))
+            return _call_bridge_orbit_only_pv(
+                bridge,
+                dt_s=dt_s,
+                frame=frame,
+                strict=strict,
+            )
+
+        @jpype.JOverride
+        def getPVCoordinates(self, date: Any, frame: Any) -> Any:
+            pv = self._query_orbit_only_pv(date, frame, strict=True)
+            position, velocity = pv
+            return TimeStampedPVCoordinates(
+                date,
+                Vector3D(float(position[0]), float(position[1]), float(position[2])),
+                Vector3D(float(velocity[0]), float(velocity[1]), float(velocity[2])),
+            )
+
+        @jpype.JOverride
+        def getPosition(self, date: Any, frame: Any) -> Any:
+            position = self._query_orbit_only_position(date, frame, strict=True)
+            return Vector3D(float(position[0]), float(position[1]), float(position[2]))
+
+        @jpype.JOverride
+        def getVelocity(self, date: Any, frame: Any) -> Any:
+            velocity = self._query_orbit_only_velocity(date, frame, strict=True)
+            return Vector3D(float(velocity[0]), float(velocity[1]), float(velocity[2]))
+
+    return _BridgePVProviderProxy()
 
 class Orbit:
     """High-performance vectorized wrapper around a Java Orekit propagator.
@@ -614,6 +806,59 @@ class Orbit:
         """Discard any cached ephemeris held by the Java bridge."""
         self._bridge.clearCache()
 
+    def set_attitude_provider(self, attitude_provider: Any) -> None:
+        """Install a new attitude provider on the wrapped Orekit propagator.
+
+        Parameters
+        ----------
+        attitude_provider
+            Either a raw Orekit ``AttitudeProvider`` or an NSTK wrapper object
+            exposing ``to_orekit(...)``. Wrapper providers are converted by
+            calling ``to_orekit(pv_provider=self.propagator)`` so deterministic
+            NSTK providers can bind to this orbit's propagator as their global
+            PV source. Custom providers that expose ``withPVProvider(...)`` may
+            then be rebound internally to a bridge-backed PV source so the
+            installed provider can evaluate PV history without recursing
+            through the same propagator attitude call stack.
+
+        Notes
+        -----
+        Updating the provider delegates through the Java bridge, which
+        automatically invalidates any cached ephemeris. Callers do not need to
+        invoke :meth:`clear_cache` manually after using this method.
+        """
+
+        if attitude_provider is None:
+            raise ValueError("attitude_provider must not be None")
+
+        raw_provider = attitude_provider
+        to_orekit = getattr(attitude_provider, "to_orekit", None)
+        if callable(to_orekit):
+            raw_provider = to_orekit(pv_provider=self.propagator)
+            with_pv_provider = getattr(raw_provider, "withPVProvider", None)
+            if callable(with_pv_provider):
+                if not hasattr(self, "_bridge_pv_provider_proxy"):
+                    self._bridge_pv_provider_proxy = _build_bridge_pv_provider_proxy(self)
+                raw_provider = with_pv_provider(self._bridge_pv_provider_proxy)
+
+        self._bridge.setAttitudeProvider(raw_provider)
+
+    def get_attitude_provider(self) -> Any:
+        """Return the currently installed raw Orekit attitude provider.
+
+        Returns
+        -------
+        object
+            Raw Orekit ``AttitudeProvider`` held by the underlying propagator.
+            This is the installed Java provider object, not necessarily the
+            original NSTK wrapper instance that created it.
+        """
+
+        get_attitude_provider = getattr(self.propagator, "getAttitudeProvider", None)
+        if not callable(get_attitude_provider):
+            raise AttributeError("wrapped propagator does not expose getAttitudeProvider()")
+        return get_attitude_provider()
+
     def _iers_for_resolution(self):
         return _iers_default()
 
@@ -666,27 +911,41 @@ class Orbit:
         if not callable(sample_vectors):
             return None
 
+        n_times = int(np.asarray(dt_s, dtype=np.float64).reshape(-1).shape[0])
+
+        def _validate_and_reshape(flat: Any, *, field_name: str) -> np.ndarray:
+            arr = np.asarray(flat, dtype=np.float64).reshape(-1)
+            expected = 3 * n_times
+            if arr.size != expected:
+                raise ValueError(
+                    f"Custom attitude provider returned {arr.size} values for "
+                    f"{field_name}, expected exactly {expected} for {n_times} samples."
+                )
+            return arr.reshape(-1, 3)
+
         spin = None
         accel = None
         if attitude_spin:
-            spin = _reshape_vectorized_xyz(
+            spin = _validate_and_reshape(
                 sample_vectors(
                     self.propagator,
                     self._epoch_orekit,
                     np.asarray(dt_s, dtype=np.float64),
                     attitude_reference_frame,
                     False,
-                )
+                ),
+                field_name="attitude spin",
             )
         if attitude_acceleration:
-            accel = _reshape_vectorized_xyz(
+            accel = _validate_and_reshape(
                 sample_vectors(
                     self.propagator,
                     self._epoch_orekit,
                     np.asarray(dt_s, dtype=np.float64),
                     attitude_reference_frame,
                     True,
-                )
+                ),
+                field_name="attitude acceleration",
             )
 
         return spin, accel
@@ -976,9 +1235,13 @@ class Orbit:
             shape ``(N, 3)`` in meters per second squared.
 
         attitude_reference_frame
-            Reference frame from which attitude is expressed. Quaternion,
-            matrix, and Euler outputs describe the rotation from this frame
-            into the spacecraft body frame. ``None`` uses :attr:`native_frame`.
+            Reference frame from which attitude orientation is expressed.
+            Quaternion, matrix, and Euler outputs describe the rotation from
+            this frame into the spacecraft body frame. ``None`` uses
+            :attr:`native_frame`. This setting does not change the frame of
+            :attr:`SampledStates.attitude_spin_body_rad_s` or
+            :attr:`SampledStates.attitude_accel_body_rad_s2`, which are always
+            body-frame angular vectors.
         attitude
             Convenience flag equivalent to requesting both
             ``attitude_quat=True`` and ``attitude_spin=True``.
@@ -1103,6 +1366,11 @@ class Orbit:
             and not attitude_matrix
             and not attitude_euler
             and (attitude_spin or attitude_acceleration)
+            and not cartesian_requested
+            and not elements_requested
+            and not mass
+            and not additional_states
+            and not additional_state_derivatives
         )
         if custom_attitude_vector_request:
             custom_vectors = self._sample_custom_attitude_vectors(
@@ -1113,92 +1381,38 @@ class Orbit:
             )
             if custom_vectors is not None:
                 spin, accel = custom_vectors
-                if (
-                    not cartesian_requested
-                    and not elements_requested
-                    and not mass
-                    and not additional_states
-                    and not additional_state_derivatives
-                ):
-                    return SampledStates(
-                        delta_times_sec=dt_s,
-                        epoch_orekit=self._epoch_orekit,
-                        epoch_astropy=self._epoch,
-                        input_was_scalar=bool(input_was_scalar),
-                        requested_fields=self._requested_field_names(
-                            position=False,
-                            velocity=False,
-                            acceleration=False,
-                            attitude_quat=False,
-                            attitude_matrix=False,
-                            attitude_euler=False,
-                            attitude_spin=bool(attitude_spin),
-                            attitude_acceleration=bool(attitude_acceleration),
-                            keplerian=False,
-                            equinoctial=False,
-                            mass=False,
-                            additional_states=(),
-                            additional_state_derivatives=(),
-                        ),
-                        cartesian_frame=cartesian_target,
-                        attitude_reference_frame=attitude_target,
-                        elements_frame=elements_target,
-                        quaternion_convention=quaternion_convention,
-                        attitude_euler_sequence=None,
-                        attitude_euler_degrees=None,
-                        anomaly_type=None,
-                        longitude_type=None,
-                        elements_angles_degrees=None,
-                        attitude_spin_body_rad_s=spin,
-                        attitude_accel_body_rad_s2=accel,
-                    )
-
-                sampled = self._sample_via_bridge(
-                    dt_s,
+                return SampledStates(
+                    delta_times_sec=dt_s,
+                    epoch_orekit=self._epoch_orekit,
+                    epoch_astropy=self._epoch,
                     input_was_scalar=bool(input_was_scalar),
-                    cartesian_target=cartesian_target,
-                    position=bool(position),
-                    velocity=bool(velocity),
-                    acceleration=bool(acceleration),
-                    attitude_target=attitude_target,
-                    attitude_quat=False,
-                    attitude_matrix=False,
-                    attitude_euler=False,
-                    attitude_spin=False,
-                    attitude_acceleration=False,
-                    attitude_euler_sequence=attitude_euler_sequence,
-                    attitude_euler_degrees=bool(attitude_euler_degrees),
+                    requested_fields=self._requested_field_names(
+                        position=False,
+                        velocity=False,
+                        acceleration=False,
+                        attitude_quat=False,
+                        attitude_matrix=False,
+                        attitude_euler=False,
+                        attitude_spin=bool(attitude_spin),
+                        attitude_acceleration=bool(attitude_acceleration),
+                        keplerian=False,
+                        equinoctial=False,
+                        mass=False,
+                        additional_states=(),
+                        additional_state_derivatives=(),
+                    ),
+                    cartesian_frame=cartesian_target,
+                    attitude_reference_frame=attitude_target,
+                    elements_frame=elements_target,
                     quaternion_convention=quaternion_convention,
-                    elements_target=elements_target,
-                    keplerian=bool(keplerian),
-                    anomaly_type=anomaly_type,
-                    equinoctial=bool(equinoctial),
-                    longitude_type=longitude_type,
-                    elements_angles_degrees=bool(elements_angles_degrees),
-                    mass=bool(mass),
-                    additional_states=additional_states,
-                    additional_state_derivatives=additional_state_derivatives,
-                    strict=bool(strict),
+                    attitude_euler_sequence=None,
+                    attitude_euler_degrees=None,
+                    anomaly_type=None,
+                    longitude_type=None,
+                    elements_angles_degrees=None,
+                    attitude_spin_body_rad_s=spin,
+                    attitude_accel_body_rad_s2=accel,
                 )
-                sampled.attitude_spin_body_rad_s = spin
-                sampled.attitude_accel_body_rad_s2 = accel
-                sampled.requested_fields = self._requested_field_names(
-                    position=bool(position),
-                    velocity=bool(velocity),
-                    acceleration=bool(acceleration),
-                    attitude_quat=False,
-                    attitude_matrix=False,
-                    attitude_euler=False,
-                    attitude_spin=bool(attitude_spin),
-                    attitude_acceleration=bool(attitude_acceleration),
-                    keplerian=bool(keplerian),
-                    equinoctial=bool(equinoctial),
-                    mass=bool(mass),
-                    additional_states=additional_states,
-                    additional_state_derivatives=additional_state_derivatives,
-                )
-                sampled.attitude_reference_frame = attitude_target
-                return sampled
 
         return self._sample_via_bridge(
             dt_s,
@@ -1472,7 +1686,10 @@ class Orbit:
             Time input accepted by :meth:`sample`.
         reference_frame
             Attitude reference frame used for the underlying attitude
-            evaluation. ``None`` uses :attr:`native_frame`.
+            evaluation. ``None`` uses :attr:`native_frame`. This affects the
+            evaluated orientation internally but does not change the returned
+            vector frame: the output angular-rate vectors are always expressed
+            in the spacecraft body frame.
 
         Returns
         -------
@@ -1500,7 +1717,10 @@ class Orbit:
             Time input accepted by :meth:`sample`.
         reference_frame
             Attitude reference frame used for the underlying attitude
-            evaluation. ``None`` uses :attr:`native_frame`.
+            evaluation. ``None`` uses :attr:`native_frame`. This affects the
+            evaluated orientation internally but does not change the returned
+            vector frame: the output angular-acceleration vectors are always
+            expressed in the spacecraft body frame.
 
         Returns
         -------

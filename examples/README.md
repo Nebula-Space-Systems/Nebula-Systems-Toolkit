@@ -16,8 +16,19 @@ kernel:
 .venv\Scripts\python.exe -m pip install nstk-data
 ```
 
-If you prefer to manage Orekit data yourself, call
-`nstk.set_orekit_data_path(...)` before using Orekit-backed examples.
+At the top of each Orekit-backed notebook, prefer:
+
+```python
+import nstk
+
+nstk.initialize(offline=True)
+```
+
+That eagerly prepares Orekit plus NSTK's bundled offline Cartopy data from
+`nstk-data` and disables Astropy IERS network fetches for notebook sessions.
+If you prefer to manage the data paths yourself, call
+`nstk.initialize(orekit_data_path=..., cartopy_data_path=..., offline=True)`
+instead.
 
 If you see `ModuleNotFoundError: No module named 'nstk'` while running a
 notebook from this `examples/` folder, restart the kernel after install.
@@ -25,9 +36,10 @@ notebook from this `examples/` folder, restart the kernel after install.
 Use these notebooks in order:
 
 1. `01_orbit_usage.ipynb`
-   - Build analytical and numerical orbits
-   - Query state vectors and geodetic outputs
+   - Build a propagator, wrap it with `Orbit`, and start sampling immediately
+   - Query vectorized state, attitude, and geodetic outputs
    - Use different time input types
+   - Swap attitude providers directly on `Orbit`
 
 2. `02_transforms_usage.ipynb`
    - Geodetic, ECEF, ENU, AER transforms
@@ -35,8 +47,9 @@ Use these notebooks in order:
    - Timed Orekit frame transforms with `transform(...)`
 
 3. `03_walker_constellation.ipynb`
-   - Build Walker constellations from seed `Orbit` objects with explicit RAAN spans, offsets, and anomaly controls
-   - Use two-body and numerical member construction
+   - Build Walker constellations with the module-level Walker builders
+   - Use two-body and numerical member construction paths
+   - Drop to `build_walker_initial_states(...)` and `build_walker_constellation(...)` for custom factories
 
 4. `04_coverage.ipynb`
    - Use the new `IntervalCoverage` object API
@@ -52,9 +65,9 @@ Use these notebooks in order:
    - Drop to `MapConfig` only when you need exact renderer-level control
 
 6. `06_attitude.ipynb`
-   - Understand NSTK orbit attitude defaults and naming conventions
-   - Compare `vvlh`, `lvlh_ccsds`, `lvlh`, `qsw`, and other Orekit LOFs
-   - Configure attitudes with strings, `LOFType`, mappings, providers, and callables
+   - Understand the current propagator-first attitude workflow
+   - Use raw Orekit providers and NSTK attitude-provider helpers
+   - Swap providers with `Orbit.set_attitude_provider(...)`
    - Query quaternions, body-frame angular rates, and angular accelerations
 
 These notebooks are the canonical examples for the repository.

@@ -49,6 +49,7 @@ def test_transform_broadcasts_scalar_state_over_time_array() -> None:
 
 def test_transform_namespace_exports_only_new_timed_api() -> None:
     assert callable(transforms.transform)
+    assert callable(nstk.initialize)
     assert callable(nstk.initialize_orekit)
     assert callable(nstk.set_orekit_data_path)
     assert not hasattr(transforms, "initialize_timed_rotations")

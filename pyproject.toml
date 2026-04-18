@@ -67,6 +67,7 @@ packages = ["nstk"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "nstk/propagation/_java_orbit_propagation/OrekitOrbitPropagationBridge.jar" = "nstk/propagation/_java_orbit_propagation/OrekitOrbitPropagationBridge.jar"
+"nstk/propagation/_java_attitude_providers/NSTKAttitudeProviders.jar" = "nstk/propagation/_java_attitude_providers/NSTKAttitudeProviders.jar"
 "nstk/transforms/java_timed_rotations/TimedRotationBridge.jar" = "nstk/transforms/java_timed_rotations/TimedRotationBridge.jar"
 
 [tool.hatch.build.targets.sdist]
