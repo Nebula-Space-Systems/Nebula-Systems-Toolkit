@@ -5,6 +5,8 @@ The public ``los_clear_sphere`` interface accepts either one point with shape
 ``(3,)`` or a stack of points with shape ``(N, 3)`` for each endpoint input.
 It returns a scalar, a 1D boolean array, or a 2D boolean matrix based on the
 input combination, and the same forms work inside ``@numba.njit`` callers.
+Pairwise row-by-row comparisons are available via
+``los_clear_sphere_pairwise``.
 """
 
 from __future__ import annotations
@@ -136,6 +138,31 @@ def _los_sphere_many_to_many_origin(
 
 
 @njit(cache=True, parallel=True)
+def _los_sphere_pairwise_origin(
+    observers_pos: np.ndarray,
+    targets_pos: np.ndarray,
+    radius_sq: float,
+) -> np.ndarray:
+    _validate_nx3_points(observers_pos)
+    _validate_nx3_points(targets_pos)
+    n = observers_pos.shape[0]
+    if targets_pos.shape[0] != n:
+        raise ValueError("observer_pos and target_pos must have the same number of rows")
+    out = np.empty(n, dtype=np.bool_)
+    for i in prange(n):
+        out[i] = _los_clear_components_sphere(
+            observers_pos[i, 0],
+            observers_pos[i, 1],
+            observers_pos[i, 2],
+            targets_pos[i, 0],
+            targets_pos[i, 1],
+            targets_pos[i, 2],
+            radius_sq,
+        )
+    return out
+
+
+@njit(cache=True, parallel=True)
 def _los_sphere_many_to_many_offset(
     observers_pos: np.ndarray,
     targets_pos: np.ndarray,
@@ -163,6 +190,20 @@ def _los_sphere_many_to_many_offset(
                 radius_sq,
             )
     return out
+
+
+@njit(cache=True)
+def _los_sphere_pairwise_offset(
+    observers_pos: np.ndarray,
+    targets_pos: np.ndarray,
+    radius_sq: float,
+    cx: float,
+    cy: float,
+    cz: float,
+) -> np.ndarray:
+    observers_shifted = _shift_points(observers_pos, cx, cy, cz)
+    targets_shifted = _shift_points(targets_pos, cx, cy, cz)
+    return _los_sphere_pairwise_origin(observers_shifted, targets_shifted, radius_sq)
 
 
 @njit(cache=True, parallel=True)
@@ -325,6 +366,32 @@ def _los_clear_sphere_points_to_points(
     )
 
 
+@njit(cache=True)
+def _los_clear_sphere_points_pairwise(
+    observers_pos: np.ndarray,
+    targets_pos: np.ndarray,
+    sphere_radius: float,
+    sphere_center_x: float,
+    sphere_center_y: float,
+    sphere_center_z: float,
+) -> np.ndarray:
+    _validate_nx3_points(observers_pos)
+    _validate_nx3_points(targets_pos)
+    _validate_sphere_radius(sphere_radius)
+
+    radius_sq = sphere_radius * sphere_radius
+    if sphere_center_x == 0.0 and sphere_center_y == 0.0 and sphere_center_z == 0.0:
+        return _los_sphere_pairwise_origin(observers_pos, targets_pos, radius_sq)
+    return _los_sphere_pairwise_offset(
+        observers_pos,
+        targets_pos,
+        radius_sq,
+        sphere_center_x,
+        sphere_center_y,
+        sphere_center_z,
+    )
+
+
 def los_clear_sphere(
     observer_pos: np.ndarray,
     target_pos: np.ndarray,
@@ -405,6 +472,49 @@ def los_clear_sphere(
         sphere_center_x,
         sphere_center_y,
         sphere_center_z,
+    )
+
+
+def los_clear_sphere_pairwise(
+    observer_pos: np.ndarray,
+    target_pos: np.ndarray,
+    sphere_radius: float,
+    sphere_center_x: float = 0.0,
+    sphere_center_y: float = 0.0,
+    sphere_center_z: float = 0.0,
+) -> bool | np.ndarray:
+    """Check pairwise line-of-sight for equal-length endpoint stacks.
+
+    Accepted input forms
+    --------------------
+    - ``los_clear_sphere_pairwise(observer_pos, target_pos, radius)`` returns ``bool``
+    - ``los_clear_sphere_pairwise(observers_pos, targets_pos, radius)`` returns ``(N,)``
+    """
+
+    observer_arr = _as_point_input(observer_pos, "observer_pos")
+    target_arr = _as_point_input(target_pos, "target_pos")
+
+    if observer_arr.ndim == 1 and target_arr.ndim == 1:
+        return _los_clear_sphere_scalar(
+            observer_arr,
+            target_arr,
+            sphere_radius,
+            sphere_center_x,
+            sphere_center_y,
+            sphere_center_z,
+        )
+    if observer_arr.ndim == 2 and target_arr.ndim == 2:
+        return _los_clear_sphere_points_pairwise(
+            observer_arr,
+            target_arr,
+            sphere_radius,
+            sphere_center_x,
+            sphere_center_y,
+            sphere_center_z,
+        )
+    raise ValueError(
+        "pairwise LOS requires observer_pos and target_pos to both be shape (3,) "
+        "or both be shape (N, 3)"
     )
 
 
@@ -512,6 +622,69 @@ def _ol_los_clear_sphere(
     return None
 
 
+@numba_overload(los_clear_sphere_pairwise)
+def _ol_los_clear_sphere_pairwise(
+    observer_pos,
+    target_pos,
+    sphere_radius,
+    sphere_center_x=0.0,
+    sphere_center_y=0.0,
+    sphere_center_z=0.0,
+):
+    centers_ok = (
+        (is_numba_scalar(sphere_center_x) or is_numba_absent(sphere_center_x))
+        and (is_numba_scalar(sphere_center_y) or is_numba_absent(sphere_center_y))
+        and (is_numba_scalar(sphere_center_z) or is_numba_absent(sphere_center_z))
+    )
+    if not is_numba_scalar(sphere_radius) or not centers_ok:
+        return None
+
+    if is_numba_array1d(observer_pos) and is_numba_array1d(target_pos):
+
+        def impl(
+            observer_pos,
+            target_pos,
+            sphere_radius,
+            sphere_center_x=0.0,
+            sphere_center_y=0.0,
+            sphere_center_z=0.0,
+        ):
+            return _los_clear_sphere_scalar(
+                observer_pos,
+                target_pos,
+                sphere_radius,
+                sphere_center_x,
+                sphere_center_y,
+                sphere_center_z,
+            )
+
+        return impl
+
+    if is_numba_array2d(observer_pos) and is_numba_array2d(target_pos):
+
+        def impl(
+            observer_pos,
+            target_pos,
+            sphere_radius,
+            sphere_center_x=0.0,
+            sphere_center_y=0.0,
+            sphere_center_z=0.0,
+        ):
+            return _los_clear_sphere_points_pairwise(
+                observer_pos,
+                target_pos,
+                sphere_radius,
+                sphere_center_x,
+                sphere_center_y,
+                sphere_center_z,
+            )
+
+        return impl
+
+    return None
+
+
 __all__ = [
     "los_clear_sphere",
+    "los_clear_sphere_pairwise",
 ]

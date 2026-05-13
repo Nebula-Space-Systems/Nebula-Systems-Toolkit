@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from numba import njit
 
-from nstk.geometry.spherical_los import los_clear_sphere
+from nstk.geometry.spherical_los import los_clear_sphere, los_clear_sphere_pairwise
 
 
 def _random_outside_sphere(n: int, radius: float, seed: int = 0) -> np.ndarray:
@@ -69,6 +70,24 @@ def test_spherical_los_many_to_many_matches_scalar() -> None:
     np.testing.assert_array_equal(got, ref)
 
 
+def test_spherical_los_pairwise_matches_many_to_many_diagonal() -> None:
+    radius = 6_371_000.0
+    observers = _random_outside_sphere(13, radius, seed=101)
+    targets = _random_outside_sphere(13, radius, seed=102)
+
+    pair = los_clear_sphere_pairwise(observers, targets, radius)
+    mat = los_clear_sphere(observers, targets, radius)
+    np.testing.assert_array_equal(pair, np.diag(mat))
+
+
+def test_spherical_los_pairwise_rejects_mismatched_row_counts() -> None:
+    radius = 6_371_000.0
+    observers = _random_outside_sphere(7, radius, seed=110)
+    targets = _random_outside_sphere(9, radius, seed=111)
+    with pytest.raises(ValueError, match="same number of rows"):
+        los_clear_sphere_pairwise(observers, targets, radius)
+
+
 def test_spherical_los_one_to_many_matches_many_to_many_row() -> None:
     radius = 6_371_000.0
     observers = _random_outside_sphere(7, radius, seed=9)
@@ -116,6 +135,10 @@ def test_spherical_los_unified_interface_works_inside_njit() -> None:
     def los_clear_sphere_mat_jit(observers_pos, targets_pos, sphere_radius):
         return los_clear_sphere(observers_pos, targets_pos, sphere_radius)
 
+    @njit(cache=True)
+    def los_clear_sphere_pair_jit(observers_pos, targets_pos, sphere_radius):
+        return los_clear_sphere_pairwise(observers_pos, targets_pos, sphere_radius)
+
     expected_scalar = los_clear_sphere(observer, target, 2.0, 1.0, -2.0, 0.5)
     got_scalar = los_clear_sphere_scalar_jit(observer, target, 2.0, 1.0, -2.0, 0.5)
     assert bool(got_scalar) == bool(expected_scalar)
@@ -131,3 +154,7 @@ def test_spherical_los_unified_interface_works_inside_njit() -> None:
     expected_mat = los_clear_sphere(observers, targets, radius)
     got_mat = los_clear_sphere_mat_jit(observers, targets, radius)
     np.testing.assert_array_equal(got_mat, expected_mat)
+
+    expected_pair = los_clear_sphere_pairwise(observers, targets[:8], radius)
+    got_pair = los_clear_sphere_pair_jit(observers, targets[:8], radius)
+    np.testing.assert_array_equal(got_pair, expected_pair)

@@ -1,6 +1,8 @@
 from nstk.geometry.ellipsoid_los import (
     los_clear_ellipsoid,
+    los_clear_ellipsoid_pairwise,
     los_clear_ellipsoid_oriented,
+    los_clear_ellipsoid_oriented_pairwise,
 )
 from nstk.geometry.fast_sun_position import (
     gmst_angle,
@@ -10,6 +12,7 @@ from nstk.geometry.fast_sun_position import (
 )
 from nstk.geometry.spherical_los import (
     los_clear_sphere,
+    los_clear_sphere_pairwise,
 )
 from nstk.geometry.terrain import (
     RasterMask,
@@ -28,8 +31,11 @@ from nstk.geometry.terrain import (
 
 __all__ = [
     "los_clear_ellipsoid",
+    "los_clear_ellipsoid_pairwise",
     "los_clear_ellipsoid_oriented",
+    "los_clear_ellipsoid_oriented_pairwise",
     "los_clear_sphere",
+    "los_clear_sphere_pairwise",
     "julian_date",
     "sun_position_eci",
     "sun_position_ecef",

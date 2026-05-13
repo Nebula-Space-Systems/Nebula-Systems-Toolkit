@@ -5,7 +5,9 @@ The public ``los_clear_ellipsoid`` and ``los_clear_ellipsoid_oriented``
 interfaces accept either one point with shape ``(3,)`` or a stack of points
 with shape ``(N, 3)`` for each endpoint input. They return a scalar, a 1D
 boolean array, or a 2D boolean matrix based on the input combination, and the
-same forms work inside ``@numba.njit`` callers.
+same forms work inside ``@numba.njit`` callers. Pairwise row-by-row variants
+are available via ``los_clear_ellipsoid_pairwise`` and
+``los_clear_ellipsoid_oriented_pairwise``.
 """
 
 from __future__ import annotations
@@ -256,6 +258,35 @@ def _los_many_to_many_body(
 
 
 @njit(cache=True, parallel=True)
+def _los_pairwise_body(
+    observers_body: np.ndarray,
+    targets_body: np.ndarray,
+    inv_a2: float,
+    inv_b2: float,
+    inv_c2: float,
+) -> np.ndarray:
+    _validate_nx3_points(observers_body)
+    _validate_nx3_points(targets_body)
+    n = observers_body.shape[0]
+    if targets_body.shape[0] != n:
+        raise ValueError("observer_pos and target_pos must have the same number of rows")
+    out = np.empty(n, dtype=np.bool_)
+    for i in prange(n):
+        out[i] = _los_clear_components_ellipsoid_axis_aligned(
+            observers_body[i, 0],
+            observers_body[i, 1],
+            observers_body[i, 2],
+            targets_body[i, 0],
+            targets_body[i, 1],
+            targets_body[i, 2],
+            inv_a2,
+            inv_b2,
+            inv_c2,
+        )
+    return out
+
+
+@njit(cache=True, parallel=True)
 def _los_one_to_many_body(
     ox: float,
     oy: float,
@@ -314,6 +345,22 @@ def _los_many_to_many_offset(
                 inv_c2,
             )
     return out
+
+
+@njit(cache=True)
+def _los_pairwise_offset(
+    observers_pos: np.ndarray,
+    targets_pos: np.ndarray,
+    inv_a2: float,
+    inv_b2: float,
+    inv_c2: float,
+    center_x: float,
+    center_y: float,
+    center_z: float,
+) -> np.ndarray:
+    observers_shifted = _shift_points(observers_pos, center_x, center_y, center_z)
+    targets_shifted = _shift_points(targets_pos, center_x, center_y, center_z)
+    return _los_pairwise_body(observers_shifted, targets_shifted, inv_a2, inv_b2, inv_c2)
 
 
 @njit(cache=True)
@@ -451,6 +498,34 @@ def _los_clear_ellipsoid_points_to_points(
     if center_x == 0.0 and center_y == 0.0 and center_z == 0.0:
         return _los_many_to_many_body(observers_pos, targets_pos, inv_a2, inv_b2, inv_c2)
     return _los_many_to_many_offset(
+        observers_pos,
+        targets_pos,
+        inv_a2,
+        inv_b2,
+        inv_c2,
+        center_x,
+        center_y,
+        center_z,
+    )
+
+
+@njit(cache=True)
+def _los_clear_ellipsoid_points_pairwise(
+    observers_pos: np.ndarray,
+    targets_pos: np.ndarray,
+    inv_a2: float,
+    inv_b2: float,
+    inv_c2: float,
+    center_x: float,
+    center_y: float,
+    center_z: float,
+) -> np.ndarray:
+    _validate_nx3_points(observers_pos)
+    _validate_nx3_points(targets_pos)
+
+    if center_x == 0.0 and center_y == 0.0 and center_z == 0.0:
+        return _los_pairwise_body(observers_pos, targets_pos, inv_a2, inv_b2, inv_c2)
+    return _los_pairwise_offset(
         observers_pos,
         targets_pos,
         inv_a2,
@@ -723,6 +798,153 @@ def _ol_los_clear_ellipsoid(
     return None
 
 
+def los_clear_ellipsoid_pairwise(
+    observer_pos: np.ndarray,
+    target_pos: np.ndarray,
+    semi_axis_a: float,
+    semi_axis_b: float,
+    semi_axis_c: float,
+    center_x: float = 0.0,
+    center_y: float = 0.0,
+    center_z: float = 0.0,
+) -> bool | np.ndarray:
+    """Check pairwise line-of-sight for equal-length endpoint stacks.
+
+    Accepted input forms
+    --------------------
+    - ``los_clear_ellipsoid_pairwise(observer_pos, target_pos, a, b, c)`` returns ``bool``
+    - ``los_clear_ellipsoid_pairwise(observers_pos, targets_pos, a, b, c)`` returns ``(N,)``
+
+    Notes
+    -----
+    This function performs row-wise pairing for 2D inputs, i.e. observer ``i``
+    is checked against target ``i``. For all-to-all matrices, use
+    :func:`los_clear_ellipsoid`.
+    """
+
+    observer_arr = _as_point_input(observer_pos, "observer_pos")
+    target_arr = _as_point_input(target_pos, "target_pos")
+    inv_a2, inv_b2, inv_c2 = _inverse_axis_squares(
+        semi_axis_a,
+        semi_axis_b,
+        semi_axis_c,
+    )
+
+    if observer_arr.ndim == 1 and target_arr.ndim == 1:
+        return _los_clear_ellipsoid_scalar(
+            observer_arr,
+            target_arr,
+            inv_a2,
+            inv_b2,
+            inv_c2,
+            center_x,
+            center_y,
+            center_z,
+        )
+    if observer_arr.ndim == 2 and target_arr.ndim == 2:
+        return _los_clear_ellipsoid_points_pairwise(
+            observer_arr,
+            target_arr,
+            inv_a2,
+            inv_b2,
+            inv_c2,
+            center_x,
+            center_y,
+            center_z,
+        )
+    raise ValueError(
+        "pairwise LOS requires observer_pos and target_pos to both be shape (3,) "
+        "or both be shape (N, 3)"
+    )
+
+
+@numba_overload(los_clear_ellipsoid_pairwise)
+def _ol_los_clear_ellipsoid_pairwise(
+    observer_pos,
+    target_pos,
+    semi_axis_a,
+    semi_axis_b,
+    semi_axis_c,
+    center_x=0.0,
+    center_y=0.0,
+    center_z=0.0,
+):
+    centers_ok = (
+        (is_numba_scalar(center_x) or is_numba_absent(center_x))
+        and (is_numba_scalar(center_y) or is_numba_absent(center_y))
+        and (is_numba_scalar(center_z) or is_numba_absent(center_z))
+    )
+    axes_ok = (
+        is_numba_scalar(semi_axis_a)
+        and is_numba_scalar(semi_axis_b)
+        and is_numba_scalar(semi_axis_c)
+    )
+    if not axes_ok or not centers_ok:
+        return None
+
+    if is_numba_array1d(observer_pos) and is_numba_array1d(target_pos):
+
+        def impl(
+            observer_pos,
+            target_pos,
+            semi_axis_a,
+            semi_axis_b,
+            semi_axis_c,
+            center_x=0.0,
+            center_y=0.0,
+            center_z=0.0,
+        ):
+            inv_a2, inv_b2, inv_c2 = _inverse_axis_squares(
+                semi_axis_a,
+                semi_axis_b,
+                semi_axis_c,
+            )
+            return _los_clear_ellipsoid_scalar(
+                observer_pos,
+                target_pos,
+                inv_a2,
+                inv_b2,
+                inv_c2,
+                center_x,
+                center_y,
+                center_z,
+            )
+
+        return impl
+
+    if is_numba_array2d(observer_pos) and is_numba_array2d(target_pos):
+
+        def impl(
+            observer_pos,
+            target_pos,
+            semi_axis_a,
+            semi_axis_b,
+            semi_axis_c,
+            center_x=0.0,
+            center_y=0.0,
+            center_z=0.0,
+        ):
+            inv_a2, inv_b2, inv_c2 = _inverse_axis_squares(
+                semi_axis_a,
+                semi_axis_b,
+                semi_axis_c,
+            )
+            return _los_clear_ellipsoid_points_pairwise(
+                observer_pos,
+                target_pos,
+                inv_a2,
+                inv_b2,
+                inv_c2,
+                center_x,
+                center_y,
+                center_z,
+            )
+
+        return impl
+
+    return None
+
+
 @njit(cache=True)
 def _los_clear_ellipsoid_oriented_scalar(
     observer_pos: np.ndarray,
@@ -901,6 +1123,51 @@ def _los_clear_ellipsoid_oriented_points_to_points(
     return _los_many_to_many_body(observers_body, targets_body, inv_a2, inv_b2, inv_c2)
 
 
+@njit(cache=True)
+def _los_clear_ellipsoid_oriented_points_pairwise(
+    observers_pos: np.ndarray,
+    targets_pos: np.ndarray,
+    inv_a2: float,
+    inv_b2: float,
+    inv_c2: float,
+    orientation_ellipsoid_to_frame: np.ndarray,
+    center_x: float,
+    center_y: float,
+    center_z: float,
+) -> np.ndarray:
+    _validate_nx3_points(observers_pos)
+    _validate_nx3_points(targets_pos)
+    _validate_orientation_matrix(orientation_ellipsoid_to_frame)
+
+    if _is_identity_orientation(orientation_ellipsoid_to_frame):
+        return _los_clear_ellipsoid_points_pairwise(
+            observers_pos,
+            targets_pos,
+            inv_a2,
+            inv_b2,
+            inv_c2,
+            center_x,
+            center_y,
+            center_z,
+        )
+
+    observers_body = _transform_points_to_body(
+        observers_pos,
+        center_x,
+        center_y,
+        center_z,
+        orientation_ellipsoid_to_frame,
+    )
+    targets_body = _transform_points_to_body(
+        targets_pos,
+        center_x,
+        center_y,
+        center_z,
+        orientation_ellipsoid_to_frame,
+    )
+    return _los_pairwise_body(observers_body, targets_body, inv_a2, inv_b2, inv_c2)
+
+
 def los_clear_ellipsoid_oriented(
     observer_pos: np.ndarray,
     target_pos: np.ndarray,
@@ -1006,6 +1273,64 @@ def los_clear_ellipsoid_oriented(
         center_x,
         center_y,
         center_z,
+    )
+
+
+def los_clear_ellipsoid_oriented_pairwise(
+    observer_pos: np.ndarray,
+    target_pos: np.ndarray,
+    semi_axis_a: float,
+    semi_axis_b: float,
+    semi_axis_c: float,
+    orientation_ellipsoid_to_frame: np.ndarray,
+    center_x: float = 0.0,
+    center_y: float = 0.0,
+    center_z: float = 0.0,
+) -> bool | np.ndarray:
+    """Check pairwise line-of-sight for equal-length endpoint stacks on an oriented ellipsoid.
+
+    Accepted input forms
+    --------------------
+    - ``los_clear_ellipsoid_oriented_pairwise(observer_pos, target_pos, ...)`` returns ``bool``
+    - ``los_clear_ellipsoid_oriented_pairwise(observers_pos, targets_pos, ...)`` returns ``(N,)``
+    """
+
+    observer_arr = _as_point_input(observer_pos, "observer_pos")
+    target_arr = _as_point_input(target_pos, "target_pos")
+    orientation_arr = _as_orientation_matrix(orientation_ellipsoid_to_frame)
+    inv_a2, inv_b2, inv_c2 = _inverse_axis_squares(
+        semi_axis_a,
+        semi_axis_b,
+        semi_axis_c,
+    )
+
+    if observer_arr.ndim == 1 and target_arr.ndim == 1:
+        return _los_clear_ellipsoid_oriented_scalar(
+            observer_arr,
+            target_arr,
+            inv_a2,
+            inv_b2,
+            inv_c2,
+            orientation_arr,
+            center_x,
+            center_y,
+            center_z,
+        )
+    if observer_arr.ndim == 2 and target_arr.ndim == 2:
+        return _los_clear_ellipsoid_oriented_points_pairwise(
+            observer_arr,
+            target_arr,
+            inv_a2,
+            inv_b2,
+            inv_c2,
+            orientation_arr,
+            center_x,
+            center_y,
+            center_z,
+        )
+    raise ValueError(
+        "pairwise LOS requires observer_pos and target_pos to both be shape (3,) "
+        "or both be shape (N, 3)"
     )
 
 
@@ -1165,7 +1490,101 @@ def _ol_los_clear_ellipsoid_oriented(
     return None
 
 
+@numba_overload(los_clear_ellipsoid_oriented_pairwise)
+def _ol_los_clear_ellipsoid_oriented_pairwise(
+    observer_pos,
+    target_pos,
+    semi_axis_a,
+    semi_axis_b,
+    semi_axis_c,
+    orientation_ellipsoid_to_frame,
+    center_x=0.0,
+    center_y=0.0,
+    center_z=0.0,
+):
+    centers_ok = (
+        (is_numba_scalar(center_x) or is_numba_absent(center_x))
+        and (is_numba_scalar(center_y) or is_numba_absent(center_y))
+        and (is_numba_scalar(center_z) or is_numba_absent(center_z))
+    )
+    axes_ok = (
+        is_numba_scalar(semi_axis_a)
+        and is_numba_scalar(semi_axis_b)
+        and is_numba_scalar(semi_axis_c)
+    )
+    if not axes_ok or not centers_ok or not is_numba_array2d(orientation_ellipsoid_to_frame):
+        return None
+
+    if is_numba_array1d(observer_pos) and is_numba_array1d(target_pos):
+
+        def impl(
+            observer_pos,
+            target_pos,
+            semi_axis_a,
+            semi_axis_b,
+            semi_axis_c,
+            orientation_ellipsoid_to_frame,
+            center_x=0.0,
+            center_y=0.0,
+            center_z=0.0,
+        ):
+            inv_a2, inv_b2, inv_c2 = _inverse_axis_squares(
+                semi_axis_a,
+                semi_axis_b,
+                semi_axis_c,
+            )
+            return _los_clear_ellipsoid_oriented_scalar(
+                observer_pos,
+                target_pos,
+                inv_a2,
+                inv_b2,
+                inv_c2,
+                orientation_ellipsoid_to_frame,
+                center_x,
+                center_y,
+                center_z,
+            )
+
+        return impl
+
+    if is_numba_array2d(observer_pos) and is_numba_array2d(target_pos):
+
+        def impl(
+            observer_pos,
+            target_pos,
+            semi_axis_a,
+            semi_axis_b,
+            semi_axis_c,
+            orientation_ellipsoid_to_frame,
+            center_x=0.0,
+            center_y=0.0,
+            center_z=0.0,
+        ):
+            inv_a2, inv_b2, inv_c2 = _inverse_axis_squares(
+                semi_axis_a,
+                semi_axis_b,
+                semi_axis_c,
+            )
+            return _los_clear_ellipsoid_oriented_points_pairwise(
+                observer_pos,
+                target_pos,
+                inv_a2,
+                inv_b2,
+                inv_c2,
+                orientation_ellipsoid_to_frame,
+                center_x,
+                center_y,
+                center_z,
+            )
+
+        return impl
+
+    return None
+
+
 __all__ = [
     "los_clear_ellipsoid",
+    "los_clear_ellipsoid_pairwise",
     "los_clear_ellipsoid_oriented",
+    "los_clear_ellipsoid_oriented_pairwise",
 ]

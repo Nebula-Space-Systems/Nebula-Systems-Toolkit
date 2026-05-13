@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 from numba import njit
 
 from nstk.geometry.ellipsoid_los import (
     los_clear_ellipsoid,
+    los_clear_ellipsoid_pairwise,
     los_clear_ellipsoid_oriented,
+    los_clear_ellipsoid_oriented_pairwise,
 )
 from nstk.transforms.constants import WGS84_A, WGS84_B
 
@@ -54,6 +57,22 @@ def test_los_many_to_many_matches_scalar() -> None:
 
     assert got.dtype == np.bool_
     np.testing.assert_array_equal(got, ref)
+
+
+def test_los_pairwise_matches_many_to_many_diagonal() -> None:
+    observers = _random_outside_earth(16, seed=101)
+    targets = _random_outside_earth(16, seed=102)
+
+    pair = los_clear_ellipsoid_pairwise(observers, targets, WGS84_A, WGS84_A, WGS84_B)
+    mat = los_clear_ellipsoid(observers, targets, WGS84_A, WGS84_A, WGS84_B)
+    np.testing.assert_array_equal(pair, np.diag(mat))
+
+
+def test_los_pairwise_rejects_mismatched_row_counts() -> None:
+    observers = _random_outside_earth(7, seed=103)
+    targets = _random_outside_earth(9, seed=104)
+    with pytest.raises(ValueError, match="same number of rows"):
+        los_clear_ellipsoid_pairwise(observers, targets, WGS84_A, WGS84_A, WGS84_B)
 
 
 def test_los_one_to_many_matches_many_to_many_row() -> None:
@@ -151,6 +170,19 @@ def test_general_ellipsoid_oriented_vectorized_matches_scalar() -> None:
     row = los_clear_ellipsoid_oriented(observers[0], targets, a, b, c, r_z45, 1.0, 2.0, -1.0)
     np.testing.assert_array_equal(row, got[0])
 
+    pair = los_clear_ellipsoid_oriented_pairwise(
+        observers,
+        targets[: observers.shape[0]],
+        a,
+        b,
+        c,
+        r_z45,
+        1.0,
+        2.0,
+        -1.0,
+    )
+    np.testing.assert_array_equal(pair, np.diag(got[:, : observers.shape[0]]))
+
 
 def test_general_ellipsoid_many_to_one_matches_many_to_many_column() -> None:
     rng = np.random.default_rng(987)
@@ -242,6 +274,22 @@ def test_ellipsoid_unified_interfaces_work_inside_njit() -> None:
         return los_clear_ellipsoid(observers_pos, targets_pos, semi_axis_a, semi_axis_b, semi_axis_c)
 
     @njit(cache=True)
+    def los_clear_ellipsoid_pair_jit(
+        observers_pos,
+        targets_pos,
+        semi_axis_a,
+        semi_axis_b,
+        semi_axis_c,
+    ):
+        return los_clear_ellipsoid_pairwise(
+            observers_pos,
+            targets_pos,
+            semi_axis_a,
+            semi_axis_b,
+            semi_axis_c,
+        )
+
+    @njit(cache=True)
     def los_clear_ellipsoid_oriented_mat_jit(
         observers_pos,
         targets_pos,
@@ -249,8 +297,26 @@ def test_ellipsoid_unified_interfaces_work_inside_njit() -> None:
         semi_axis_b,
         semi_axis_c,
         orientation_ellipsoid_to_frame,
-    ):
+        ):
         return los_clear_ellipsoid_oriented(
+            observers_pos,
+            targets_pos,
+            semi_axis_a,
+            semi_axis_b,
+            semi_axis_c,
+            orientation_ellipsoid_to_frame,
+        )
+
+    @njit(cache=True)
+    def los_clear_ellipsoid_oriented_pair_jit(
+        observers_pos,
+        targets_pos,
+        semi_axis_a,
+        semi_axis_b,
+        semi_axis_c,
+        orientation_ellipsoid_to_frame,
+    ):
+        return los_clear_ellipsoid_oriented_pairwise(
             observers_pos,
             targets_pos,
             semi_axis_a,
@@ -275,6 +341,28 @@ def test_ellipsoid_unified_interfaces_work_inside_njit() -> None:
     got_mat = los_clear_ellipsoid_mat_jit(observers, targets, 4.0, 3.0, 2.0)
     np.testing.assert_array_equal(got_mat, expected_mat)
 
+    expected_pair = los_clear_ellipsoid_pairwise(observers, targets[:8], 4.0, 3.0, 2.0)
+    got_pair = los_clear_ellipsoid_pair_jit(observers, targets[:8], 4.0, 3.0, 2.0)
+    np.testing.assert_array_equal(got_pair, expected_pair)
+
     expected_oriented = los_clear_ellipsoid_oriented(observers, targets, 4.0, 3.0, 2.0, r_z45)
     got_oriented = los_clear_ellipsoid_oriented_mat_jit(observers, targets, 4.0, 3.0, 2.0, r_z45)
     np.testing.assert_array_equal(got_oriented, expected_oriented)
+
+    expected_oriented_pair = los_clear_ellipsoid_oriented_pairwise(
+        observers,
+        targets[:8],
+        4.0,
+        3.0,
+        2.0,
+        r_z45,
+    )
+    got_oriented_pair = los_clear_ellipsoid_oriented_pair_jit(
+        observers,
+        targets[:8],
+        4.0,
+        3.0,
+        2.0,
+        r_z45,
+    )
+    np.testing.assert_array_equal(got_oriented_pair, expected_oriented_pair)
