@@ -4,6 +4,8 @@ from pathlib import Path
 import warnings
 import zipfile
 
+import pytest
+
 try:
     import tomllib
 except ModuleNotFoundError:  # pragma: no cover - Python < 3.11
@@ -192,3 +194,45 @@ def test_pyproject_force_includes_all_prebuilt_java_bridges() -> None:
     )
     assert "nstk/propagation/_java_attitude_providers/NSTKAttitudeProviders.jar" in force_include
     assert "nstk/transforms/java_timed_rotations/TimedRotationBridge.jar" in force_include
+
+
+@pytest.mark.parametrize(
+    "bridge_module, tool_name",
+    [
+        (attitude_bridge, "javac"),
+        (orbit_bridge, "javac"),
+        (timed_bridge, "javac"),
+        (attitude_bridge, "jar"),
+        (orbit_bridge, "jar"),
+        (timed_bridge, "jar"),
+    ],
+)
+def test_java_bridge_prefers_usable_env_java_home_tools(
+    monkeypatch,
+    tmp_path,
+    bridge_module,
+    tool_name: str,
+) -> None:
+    exe = f"{tool_name}.exe" if bridge_module.os.name == "nt" else tool_name
+
+    env_home = tmp_path / "env_home"
+    env_tool = env_home / "bin" / exe
+    env_tool.parent.mkdir(parents=True, exist_ok=True)
+    env_tool.write_text("placeholder", encoding="utf-8")
+
+    jdk4py_home = tmp_path / "jdk4py_home"
+    jdk4py_tool = jdk4py_home / "bin" / exe
+    jdk4py_tool.parent.mkdir(parents=True, exist_ok=True)
+    jdk4py_tool.write_text("placeholder", encoding="utf-8")
+
+    monkeypatch.setenv("JAVA_HOME", str(env_home))
+    monkeypatch.setattr(bridge_module.jdk4py, "JAVA_HOME", str(jdk4py_home))
+    monkeypatch.setattr(
+        bridge_module,
+        "_command_is_usable",
+        lambda path: Path(path) == env_tool,
+    )
+    monkeypatch.setattr(bridge_module.shutil, "which", lambda name: None)
+
+    resolver = bridge_module._javac_path if tool_name == "javac" else bridge_module._jar_path
+    assert resolver() == env_tool

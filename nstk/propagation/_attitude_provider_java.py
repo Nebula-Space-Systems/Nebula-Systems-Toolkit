@@ -50,36 +50,68 @@ def _class_file(classes_dir: Path) -> Path:
 
 def _javac_path() -> Optional[Path]:
     exe = "javac.exe" if os.name == "nt" else "javac"
-    java_home = Path(str(jdk4py.JAVA_HOME))
-    candidate = java_home / "bin" / exe
-    if candidate.exists():
-        return candidate
-
+    candidates: list[Path] = []
     env_java_home = os.environ.get("JAVA_HOME", "").strip()
     if env_java_home:
-        candidate = Path(env_java_home) / "bin" / exe
+        candidates.append(Path(env_java_home) / "bin" / exe)
+
+    java_home = Path(str(jdk4py.JAVA_HOME))
+    candidates.append(java_home / "bin" / exe)
+
+    found = shutil.which("javac")
+    if found:
+        candidates.append(Path(found))
+
+    seen: set[Path] = set()
+    unique_candidates = []
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        unique_candidates.append(candidate)
+
+    for candidate in unique_candidates:
+        if candidate.exists() and _command_is_usable(candidate):
+            return candidate
+
+    for candidate in unique_candidates:
         if candidate.exists():
             return candidate
 
-    found = shutil.which("javac")
-    return Path(found) if found else None
+    return None
 
 
 def _jar_path() -> Optional[Path]:
     exe = "jar.exe" if os.name == "nt" else "jar"
-    java_home = Path(str(jdk4py.JAVA_HOME))
-    candidate = java_home / "bin" / exe
-    if candidate.exists():
-        return candidate
-
+    candidates: list[Path] = []
     env_java_home = os.environ.get("JAVA_HOME", "").strip()
     if env_java_home:
-        candidate = Path(env_java_home) / "bin" / exe
+        candidates.append(Path(env_java_home) / "bin" / exe)
+
+    java_home = Path(str(jdk4py.JAVA_HOME))
+    candidates.append(java_home / "bin" / exe)
+
+    found = shutil.which("jar")
+    if found:
+        candidates.append(Path(found))
+
+    seen: set[Path] = set()
+    unique_candidates = []
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        unique_candidates.append(candidate)
+
+    for candidate in unique_candidates:
+        if candidate.exists() and _command_is_usable(candidate):
+            return candidate
+
+    for candidate in unique_candidates:
         if candidate.exists():
             return candidate
 
-    found = shutil.which("jar")
-    return Path(found) if found else None
+    return None
 
 
 def _orekit_jars_glob() -> Optional[str]:
