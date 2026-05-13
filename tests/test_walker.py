@@ -28,6 +28,13 @@ def _wrap_pm_pi(x: float) -> float:
     return (float(x) + math.pi) % (2.0 * math.pi) - math.pi
 
 
+def _wrap_0_2pi(x: float) -> float:
+    wrapped = float(x) % (2.0 * math.pi)
+    if abs(wrapped - 2.0 * math.pi) < 1.0e-12:
+        return 0.0
+    return wrapped
+
+
 def _ang_diff(a: float, b: float) -> float:
     return abs(_wrap_pm_pi(float(a) - float(b)))
 
@@ -119,6 +126,143 @@ def test_two_body_walker_constellation_defaults_to_full_raan_span_and_phasing_on
         raan, mean = _initial_raan_anomaly(orb, anomaly_type="mean")
         assert _ang_diff(raan, exp_raan) < 1e-9
         assert _ang_diff(mean, exp_mean) < 1e-9
+
+
+def test_walker_three_plane_raan_canonicalized_to_0_120_240_degrees() -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+    walker = build_two_body_walker_constellation(
+        epoch=epoch,
+        a=7000e3,
+        e=0.001,
+        i=np.deg2rad(53.0),
+        raan=0.0,
+        argp=np.deg2rad(15.0),
+        anomaly=0.0,
+        anomaly_type="mean",
+        total_satellites=6,
+        num_planes=3,
+        phasing=1,
+        include_seed=True,
+    )
+
+    sats_per_plane = 2
+    plane_slot_zero_indices = [0, sats_per_plane, 2 * sats_per_plane]
+    plane_raans = [
+        _wrap_0_2pi(_initial_raan_anomaly(walker[idx], anomaly_type="mean")[0])
+        for idx in plane_slot_zero_indices
+    ]
+    expected_raans = [0.0, 2.0 * math.pi / 3.0, 4.0 * math.pi / 3.0]
+    for actual, expected in zip(plane_raans, expected_raans, strict=True):
+        assert _ang_diff(actual, expected) < 1e-9
+
+
+def test_walker_three_plane_mean_anomaly_pattern_is_consistent_modulo_2pi() -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+    total_satellites = 6
+    num_planes = 3
+    phasing = 1
+    sats_per_plane = total_satellites // num_planes
+
+    walker = build_two_body_walker_constellation(
+        epoch=epoch,
+        a=7000e3,
+        e=0.001,
+        i=np.deg2rad(53.0),
+        raan=0.0,
+        argp=np.deg2rad(15.0),
+        anomaly=0.0,
+        anomaly_type="mean",
+        total_satellites=total_satellites,
+        num_planes=num_planes,
+        phasing=phasing,
+        include_seed=True,
+    )
+
+    mean_matrix = np.zeros((num_planes, sats_per_plane), dtype=np.float64)
+    for plane_idx in range(num_planes):
+        for slot_idx in range(sats_per_plane):
+            orbit_idx = plane_idx * sats_per_plane + slot_idx
+            _, mean_anomaly = _initial_raan_anomaly(walker[orbit_idx], anomaly_type="mean")
+            mean_matrix[plane_idx, slot_idx] = _wrap_0_2pi(mean_anomaly)
+
+    for plane_idx in range(num_planes):
+        intra_plane_slot_step = _wrap_pm_pi(mean_matrix[plane_idx, 1] - mean_matrix[plane_idx, 0])
+        assert abs(abs(intra_plane_slot_step) - math.pi) < 1e-9
+
+    expected_inter_plane_phase = 2.0 * math.pi * phasing / total_satellites
+    for slot_idx in range(sats_per_plane):
+        step_01 = _wrap_pm_pi(mean_matrix[1, slot_idx] - mean_matrix[0, slot_idx])
+        step_12 = _wrap_pm_pi(mean_matrix[2, slot_idx] - mean_matrix[1, slot_idx])
+        assert abs(step_01 - expected_inter_plane_phase) < 1e-9
+        assert abs(step_12 - expected_inter_plane_phase) < 1e-9
+
+    expected_means_deg = np.array([[0.0, 180.0], [60.0, 240.0], [120.0, 300.0]])
+    np.testing.assert_allclose(np.rad2deg(mean_matrix), expected_means_deg, atol=1e-8)
+
+
+def test_walker_three_plane_output_order_is_plane_major_slot_major() -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+    walker = build_two_body_walker_constellation(
+        epoch=epoch,
+        a=7000e3,
+        e=0.001,
+        i=np.deg2rad(53.0),
+        raan=0.0,
+        argp=np.deg2rad(15.0),
+        anomaly=0.0,
+        anomaly_type="mean",
+        total_satellites=6,
+        num_planes=3,
+        phasing=1,
+        include_seed=True,
+    )
+
+    ordered_pairs_deg = []
+    for orbit in walker:
+        raan, mean_anomaly = _initial_raan_anomaly(orbit, anomaly_type="mean")
+        ordered_pairs_deg.append(
+            (
+                np.rad2deg(_wrap_0_2pi(raan)),
+                np.rad2deg(_wrap_0_2pi(mean_anomaly)),
+            )
+        )
+
+    expected_pairs_deg = [
+        (0.0, 0.0),
+        (0.0, 180.0),
+        (120.0, 60.0),
+        (120.0, 240.0),
+        (240.0, 120.0),
+        (240.0, 300.0),
+    ]
+    np.testing.assert_allclose(np.asarray(ordered_pairs_deg), np.asarray(expected_pairs_deg), atol=1e-8)
+
+
+def test_walker_keplerian_api_reports_raan_and_anomaly_in_positive_ranges() -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+    walker = build_two_body_walker_constellation(
+        epoch=epoch,
+        a=7000e3,
+        e=0.001,
+        i=np.deg2rad(53.0),
+        raan=0.0,
+        argp=np.deg2rad(15.0),
+        anomaly=0.0,
+        anomaly_type="mean",
+        total_satellites=6,
+        num_planes=3,
+        phasing=1,
+        include_seed=True,
+    )
+
+    for orbit in walker:
+        kep_deg = orbit.get_keplerian_classical(0.0, degrees=True)[0]
+        assert 0.0 <= float(kep_deg[3]) < 360.0
+        assert 0.0 <= float(kep_deg[5]) < 360.0
+
+        kep_rad = orbit.get_keplerian_classical(0.0, degrees=False)[0]
+        assert 0.0 <= float(kep_rad[3]) < (2.0 * math.pi)
+        assert 0.0 <= float(kep_rad[5]) < (2.0 * math.pi)
 
 
 def test_walker_custom_raan_span_offsets_and_true_anomaly() -> None:

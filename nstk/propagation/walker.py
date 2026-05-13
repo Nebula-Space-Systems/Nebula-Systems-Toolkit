@@ -61,8 +61,11 @@ def _coerce_exact_int(name: str, value: Any) -> int:
     return coerced
 
 
-def _wrap_pm_pi(x: float) -> float:
-    return (float(x) + math.pi) % (2.0 * math.pi) - math.pi
+def _wrap_0_2pi(x: float) -> float:
+    wrapped = float(x) % (2.0 * math.pi)
+    if abs(wrapped - 2.0 * math.pi) < 1.0e-12:
+        return 0.0
+    return wrapped
 
 
 def _coerce_raan_span(raan_span: float) -> float:
@@ -139,8 +142,8 @@ def _iter_walker_raan_anomaly(
                 + float(phasing * plane_idx) / float(total_satellites)
             )
             yield (
-                _wrap_pm_pi(base_raan + d_raan),
-                _wrap_pm_pi(base_anomaly + d_anomaly),
+                _wrap_0_2pi(base_raan + d_raan),
+                _wrap_0_2pi(base_anomaly + d_anomaly),
             )
 
 
@@ -344,8 +347,8 @@ def build_walker_initial_states(
         seed_state,
         anomaly_type=anomaly_label,
     )
-    base_raan = _wrap_pm_pi(seed_raan + float(initial_raan_offset))
-    base_anomaly = _wrap_pm_pi(seed_anomaly + float(initial_anomaly_offset))
+    base_raan = _wrap_0_2pi(seed_raan + float(initial_raan_offset))
+    base_anomaly = _wrap_0_2pi(seed_anomaly + float(initial_anomaly_offset))
 
     out: list[SupportsWalkerState] = []
     for raan_i, anomaly_i in _iter_walker_raan_anomaly(

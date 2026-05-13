@@ -11,6 +11,13 @@ import nstk.time_utils as time_utils
 from nstk.propagation import Orbit, build_two_body_propagator
 
 
+def _wrap_0_2pi(x: float) -> float:
+    wrapped = float(x) % (2.0 * np.pi)
+    if abs(wrapped - 2.0 * np.pi) < 1.0e-12:
+        return 0.0
+    return wrapped
+
+
 def _make_orbit(*, should_cache: bool = True, inertial_frame: str = "gcrf") -> Orbit:
     epoch = Time("2026-01-01T00:00:00", scale="utc")
     return Orbit(
@@ -188,9 +195,9 @@ def test_vectorized_sample_matches_direct_orekit_for_attitude_and_elements() -> 
             float(kep.getA()),
             float(kep.getE()),
             float(kep.getI()),
-            float(kep.getRightAscensionOfAscendingNode()),
+            _wrap_0_2pi(float(kep.getRightAscensionOfAscendingNode())),
             float(kep.getPerigeeArgument()),
-            float(kep.getMeanAnomaly()),
+            _wrap_0_2pi(float(kep.getMeanAnomaly())),
         ]
         expected_equinoctial[idx] = [
             float(equi.getA()),

@@ -403,6 +403,15 @@ def _reshape_vectorized_scalar(values: Any) -> np.ndarray:
     return np.asarray(values, dtype=np.float64).reshape(-1)
 
 
+def _wrap_angles_positive(values: np.ndarray, *, degrees: bool) -> np.ndarray:
+    """Normalize angle arrays to ``[0, 2*pi)`` or ``[0, 360)``."""
+
+    period = 360.0 if degrees else (2.0 * np.pi)
+    wrapped = np.mod(np.asarray(values, dtype=np.float64), period)
+    wrapped[np.isclose(wrapped, period, atol=1.0e-12, rtol=0.0)] = 0.0
+    return wrapped
+
+
 def _reshape_additional_payload(names: Any, values: Any, widths: Any) -> dict[str, np.ndarray]:
     """Convert Java additional-state payloads into numpy arrays."""
 
@@ -1074,6 +1083,19 @@ class Orbit:
             bool(strict),
         )
 
+        raan = _reshape_vectorized_scalar(bridge_result.raan) if keplerian else None
+        anomaly = _reshape_vectorized_scalar(bridge_result.anomaly) if keplerian else None
+        if keplerian and raan is not None:
+            raan = _wrap_angles_positive(
+                raan,
+                degrees=bool(elements_angles_degrees),
+            )
+        if keplerian and anomaly is not None:
+            anomaly = _wrap_angles_positive(
+                anomaly,
+                degrees=bool(elements_angles_degrees),
+            )
+
         return SampledStates(
             delta_times_sec=dt_s,
             epoch_orekit=self._epoch_orekit,
@@ -1144,9 +1166,9 @@ class Orbit:
             inclination=_reshape_vectorized_scalar(bridge_result.inclination)
             if keplerian
             else None,
-            raan=_reshape_vectorized_scalar(bridge_result.raan) if keplerian else None,
+            raan=raan if keplerian else None,
             argp=_reshape_vectorized_scalar(bridge_result.argp) if keplerian else None,
-            anomaly=_reshape_vectorized_scalar(bridge_result.anomaly) if keplerian else None,
+            anomaly=anomaly if keplerian else None,
             equinoctial_a_m=_reshape_vectorized_scalar(bridge_result.equinoctialAM)
             if equinoctial
             else None,
@@ -1763,6 +1785,11 @@ class Orbit:
         numpy.ndarray
             Array with shape ``(N, 6)`` ordered as
             ``a_m, e, i, raan, argp, anomaly``.
+
+        Notes
+        -----
+        The returned ``raan`` and ``anomaly`` columns are normalized to a
+        positive range: ``[0, 2*pi)`` in radians or ``[0, 360)`` in degrees.
         """
         sampled = self.sample(
             times,
