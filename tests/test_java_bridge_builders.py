@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import warnings
+import zipfile
 
 try:
     import tomllib
@@ -54,6 +55,7 @@ def test_attitude_provider_bridge_uses_prebuilt_jar_without_warning_when_javac_u
     monkeypatch.setattr(attitude_bridge, "_javac_path", lambda: Path("/usr/bin/javac"))
     monkeypatch.setattr(attitude_bridge, "_command_is_usable", lambda path: False)
     monkeypatch.setattr(attitude_bridge, "_needs_rebuild", lambda source, class_file, prebuilt: True)
+    monkeypatch.setattr(attitude_bridge, "_has_incompatible_artifact", lambda class_file, prebuilt: False)
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -122,6 +124,61 @@ def test_attitude_provider_bridge_loads_java_class(monkeypatch) -> None:
 
     assert result == f"class:{attitude_bridge.JAVA_RATE_LIMITED_YAW_PROVIDER_CLASS}"
     assert calls == [attitude_bridge.JAVA_RATE_LIMITED_YAW_PROVIDER_CLASS]
+
+
+def test_attitude_provider_bridge_rebuilds_when_prebuilt_jar_is_newer_java(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(attitude_bridge, "_BUILD_DONE", False)
+    monkeypatch.setattr(attitude_bridge, "_BUILD_CLASSPATH", None)
+
+    source = tmp_path / "RateLimitedYawSteeringProvider.java"
+    source.write_text("class X {}", encoding="utf-8")
+    classes_dir = tmp_path / "classes"
+    class_file = classes_dir / "com" / "nstk" / "attitudes" / "RateLimitedYawSteeringProvider.class"
+    class_file.parent.mkdir(parents=True, exist_ok=True)
+    class_file.write_bytes(b"\xca\xfe\xba\xbe\x00\x00\x00\x41")
+
+    prebuilt = tmp_path / "NSTKAttitudeProviders.jar"
+    with zipfile.ZipFile(prebuilt, mode="w") as zf:
+        zf.writestr(
+            "com/nstk/attitudes/RateLimitedYawSteeringProvider.class",
+            b"\xca\xfe\xba\xbe\x00\x00\x00\x41",
+        )
+
+    monkeypatch.setattr(attitude_bridge, "_source_file", lambda: source)
+    monkeypatch.setattr(attitude_bridge, "_classes_dir", lambda: classes_dir)
+    monkeypatch.setattr(attitude_bridge, "_class_file", lambda _: class_file)
+    monkeypatch.setattr(attitude_bridge, "_prebuilt_jar", lambda: prebuilt)
+    monkeypatch.setattr(attitude_bridge, "_javac_path", lambda: Path("/usr/bin/javac"))
+    monkeypatch.setattr(attitude_bridge, "_command_is_usable", lambda path: True)
+    monkeypatch.setattr(attitude_bridge, "_orekit_jars_glob", lambda: "/tmp/fake-jars/*")
+    monkeypatch.setattr(attitude_bridge, "_jar_path", lambda: None)
+
+    compile_calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        compile_calls.append(cmd)
+
+        class Completed:
+            returncode = 0
+            stdout = ""
+            stderr = ""
+
+        return Completed()
+
+    monkeypatch.setattr(attitude_bridge.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        attitude_bridge, "_create_jar_with_zipfile", lambda classes, jar: jar.write_bytes(b"jar")
+    )
+
+    classpath = attitude_bridge.prepare_attitude_providers_classpath()
+
+    assert classpath == str(prebuilt)
+    assert len(compile_calls) == 1
+    assert compile_calls[0][0] == "/usr/bin/javac"
+    assert "--release" in compile_calls[0]
+    assert "17" in compile_calls[0]
 
 
 def test_pyproject_force_includes_all_prebuilt_java_bridges() -> None:

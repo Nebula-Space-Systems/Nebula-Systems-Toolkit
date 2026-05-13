@@ -21,6 +21,8 @@ JAVA_RATE_LIMITED_YAW_PROVIDER_CLASS = "com.nstk.attitudes.RateLimitedYawSteerin
 _BUILD_LOCK = threading.Lock()
 _BUILD_DONE = False
 _BUILD_CLASSPATH: Optional[str] = None
+_JAVA_RELEASE = "17"
+_MAX_SUPPORTED_CLASS_MAJOR = 61
 
 
 def _source_file() -> Path:
@@ -115,6 +117,43 @@ def _needs_rebuild(source: Path, class_file: Path, prebuilt: Path) -> bool:
         return True
 
 
+def _read_class_major_from_bytes(data: bytes) -> Optional[int]:
+    if len(data) < 8:
+        return None
+    if data[0:4] != b"\xca\xfe\xba\xbe":
+        return None
+    return int.from_bytes(data[6:8], byteorder="big", signed=False)
+
+
+def _read_class_major_from_class_file(class_file: Path) -> Optional[int]:
+    try:
+        data = class_file.read_bytes()
+    except Exception:
+        return None
+    return _read_class_major_from_bytes(data)
+
+
+def _read_class_major_from_jar(jar_path: Path) -> Optional[int]:
+    if not jar_path.exists():
+        return None
+    try:
+        with zipfile.ZipFile(jar_path, mode="r") as zf:
+            with zf.open("com/nstk/attitudes/RateLimitedYawSteeringProvider.class") as member:
+                return _read_class_major_from_bytes(member.read(8))
+    except Exception:
+        return None
+
+
+def _has_incompatible_artifact(class_file: Path, prebuilt: Path) -> bool:
+    for major in (
+        _read_class_major_from_jar(prebuilt),
+        _read_class_major_from_class_file(class_file),
+    ):
+        if major is not None and major > _MAX_SUPPORTED_CLASS_MAJOR:
+            return True
+    return False
+
+
 def _create_jar_with_zipfile(classes_dir: Path, jar_path: Path) -> None:
     with zipfile.ZipFile(jar_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
         for file_path in classes_dir.rglob("*"):
@@ -150,6 +189,8 @@ def prepare_attitude_providers_classpath() -> Optional[str]:
         jar_cmd = _jar_path()
         jars_glob = _orekit_jars_glob()
         needs_rebuild = _needs_rebuild(source, class_file, prebuilt)
+        has_incompatible_artifact = _has_incompatible_artifact(class_file, prebuilt)
+        needs_rebuild = needs_rebuild or has_incompatible_artifact
         can_compile = _command_is_usable(javac)
 
         try:
@@ -160,11 +201,20 @@ def prepare_attitude_providers_classpath() -> Optional[str]:
                         "and no prebuilt attitude-provider artifact is available.",
                         RuntimeWarning,
                     )
+                elif has_incompatible_artifact:
+                    warnings.warn(
+                        "NSTK Java attitude provider artifact is compiled for a newer Java runtime "
+                        f"(class major > {_MAX_SUPPORTED_CLASS_MAJOR}). Install a Java 17-compatible "
+                        "build toolchain to rebuild it.",
+                        RuntimeWarning,
+                    )
             elif can_compile and jars_glob and needs_rebuild:
                 classes_dir.mkdir(parents=True, exist_ok=True)
                 subprocess.run(
                     [
                         str(javac),
+                        "--release",
+                        _JAVA_RELEASE,
                         "-encoding",
                         "UTF-8",
                         "-cp",
@@ -221,4 +271,3 @@ def get_rate_limited_yaw_provider_class():
 
     ensure_orekit_runtime()
     return jpype.JClass(JAVA_RATE_LIMITED_YAW_PROVIDER_CLASS)
-
