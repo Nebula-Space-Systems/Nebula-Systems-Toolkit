@@ -255,8 +255,16 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
         if (sunProvider == null) {
             throw new IllegalArgumentException("sunProvider must not be null");
         }
-        if (phasingAxis == null || phasingAxis.getNorm() <= EPS_AXIS_NORM) {
+        if (phasingAxis == null) {
             throw new IllegalArgumentException("phasingAxis must be non-zero");
+        }
+        if (phasingAxis.getNorm() <= EPS_AXIS_NORM) {
+            throw new IllegalArgumentException("phasingAxis must be non-zero");
+        }
+        final Vector3D normalizedPhasingAxis = phasingAxis.normalize();
+        if (FastMath.hypot(normalizedPhasingAxis.getX(), normalizedPhasingAxis.getY()) <= EPS_AXIS_NORM) {
+            throw new IllegalArgumentException(
+                    "phasingAxis must not be parallel to spacecraft +/-Z for YawSteering");
         }
         if (!Double.isFinite(maxYawRate) || maxYawRate < 0.0) {
             throw new IllegalArgumentException("maxYawRate must be finite and >= 0");
@@ -292,7 +300,7 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
         this.inertialFrame = inertialFrame;
         this.bodyShape = bodyShape;
         this.sunProvider = sunProvider;
-        this.phasingAxis = phasingAxis.normalize();
+        this.phasingAxis = normalizedPhasingAxis;
         this.maxYawRate = maxYawRate;
         this.maxYawAcceleration = maxYawAcceleration;
         this.kp = kp;

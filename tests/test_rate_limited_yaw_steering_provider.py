@@ -701,12 +701,44 @@ def test_rate_limited_yaw_wrapper_normalizes_phasing_axis_inputs() -> None:
         phasing_axis=[4.0, 0.0, 0.0],
         finite_difference_step_s=0.05,
     )
+    axis_y = RateLimitedYawSteeringProvider(
+        inertial_frame="gcrf",
+        reference_epoch=epoch,
+        phasing_axis="y",
+        finite_difference_step_s=0.05,
+    )
+    axis_y_vector = RateLimitedYawSteeringProvider(
+        inertial_frame="gcrf",
+        reference_epoch=epoch,
+        phasing_axis=[0.0, 5.0, 0.0],
+        finite_difference_step_s=0.05,
+    )
     np.testing.assert_allclose(
         axis_string.get_reference_yaw_state(raw_propagator, 60.0),
         axis_vector.get_reference_yaw_state(raw_propagator, 60.0),
         rtol=0.0,
         atol=1.0e-12,
     )
+    np.testing.assert_allclose(
+        axis_y.get_reference_yaw_state(raw_propagator, 60.0),
+        axis_y_vector.get_reference_yaw_state(raw_propagator, 60.0),
+        rtol=0.0,
+        atol=1.0e-12,
+    )
+
+
+@pytest.mark.parametrize("phasing_axis", ["z", "-z", [0.0, 0.0, 1.0], [0.0, 0.0, -2.0]])
+def test_rate_limited_yaw_wrapper_rejects_phasing_axis_parallel_to_body_z(
+    phasing_axis,
+) -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+    with pytest.raises(ValueError, match="must not be parallel to body"):
+        RateLimitedYawSteeringProvider(
+            inertial_frame="gcrf",
+            reference_epoch=epoch,
+            phasing_axis=phasing_axis,
+            finite_difference_step_s=0.05,
+        )
 
 
 def test_ideal_nadir_sun_constrained_helper_matches_compatibility_alias() -> None:

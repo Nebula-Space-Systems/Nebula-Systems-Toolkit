@@ -161,6 +161,18 @@ def _coerce_vector3d(axis: OrekitVector3D | Sequence[float] | str | None) -> Ore
     return Vector3D(float(arr[0]), float(arr[1]), float(arr[2]))
 
 
+def _validate_yaw_steering_phasing_axis(axis: OrekitVector3D) -> OrekitVector3D:
+    """Validate phasing axis constraints required by Orekit ``YawSteering``."""
+
+    xy_norm = float(np.hypot(float(axis.getX()), float(axis.getY())))
+    if xy_norm <= 1.0e-15:
+        raise ValueError(
+            "phasing_axis must not be parallel to body +/-Z for YawSteering; "
+            "use an axis with a non-zero X or Y component"
+        )
+    return axis
+
+
 def _coerce_attitude_provider(
     attitude_provider: Any | None,
     *,
@@ -323,7 +335,9 @@ class RateLimitedYawSteeringProvider:
         Accepts an Orekit ``Vector3D``, a length-3 sequence of floats, or one
         of ``"x"``, ``"y"``, ``"z"``, ``"-x"``, ``"-y"``, ``"-z"``.
         The wrapper normalizes any non-zero user-supplied vector before
-        building the Java provider. ``None`` selects body ``+X``.
+        building the Java provider. Because Orekit ``YawSteering`` keeps body
+        ``+Z`` fixed, this axis must not be parallel to body ``+Z``/``-Z``.
+        ``None`` selects body ``+X``.
     max_yaw_rate_rad_s : float
         Maximum allowed yaw-rate magnitude [rad/s].
     max_yaw_acceleration_rad_s2 : float
@@ -441,7 +455,9 @@ class RateLimitedYawSteeringProvider:
             simple_eop=bool(self.simple_eop),
         )
         self._reference_epoch = _coerce_absolute_date(self.reference_epoch)
-        self._phasing_axis = _coerce_vector3d(self.phasing_axis)
+        self._phasing_axis = _validate_yaw_steering_phasing_axis(
+            _coerce_vector3d(self.phasing_axis)
+        )
 
         resolved_earth_shape = self.earth_shape
         if resolved_earth_shape is None:
