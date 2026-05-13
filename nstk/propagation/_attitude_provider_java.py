@@ -284,6 +284,19 @@ def _create_jar_with_zipfile(classes_dir: Path, jar_path: Path) -> None:
                 zf.write(file_path, arcname)
 
 
+def _format_subprocess_failure(exc: Exception) -> str:
+    if isinstance(exc, subprocess.CalledProcessError):
+        stderr = (exc.stderr or "").strip()
+        stdout = (exc.stdout or "").strip()
+        details = [str(exc)]
+        if stderr:
+            details.append(f"stderr:\n{stderr}")
+        if stdout:
+            details.append(f"stdout:\n{stdout}")
+        return "\n".join(details)
+    return str(exc)
+
+
 def prepare_attitude_providers_classpath() -> Optional[str]:
     """Build, if needed, and return the classpath entry for NSTK attitude providers."""
 
@@ -380,7 +393,7 @@ def prepare_attitude_providers_classpath() -> Optional[str]:
                     _create_jar_with_zipfile(classes_dir, prebuilt)
         except Exception as exc:
             warnings.warn(
-                f"Failed to build NSTK Java attitude providers: {exc}",
+                f"Failed to build NSTK Java attitude providers: {_format_subprocess_failure(exc)}",
                 RuntimeWarning,
             )
             prebuilt_major = _read_class_major_from_jar(prebuilt)

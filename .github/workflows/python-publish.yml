@@ -37,11 +37,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Set up Java (JDK 17)
+      - name: Set up Java (JDK 21)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
 
       - name: Verify Java toolchain
         shell: bash
@@ -102,11 +102,11 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Set up Java (JDK 17)
+      - name: Set up Java (JDK 21)
         uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: "21"
 
       - name: Verify Java toolchain
         shell: bash
