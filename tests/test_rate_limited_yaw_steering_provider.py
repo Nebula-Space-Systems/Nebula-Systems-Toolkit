@@ -686,31 +686,62 @@ def test_rate_limited_yaw_provider_is_deterministic_with_numerical_pv_provider()
     np.testing.assert_allclose(forward, reverse, rtol=0.0, atol=1.0e-14)
 
 
-def test_rate_limited_yaw_wrapper_normalizes_phasing_axis_inputs() -> None:
+def test_rate_limited_yaw_wrapper_precompute_cache_preserves_yaw_solution() -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+    raw_propagator = _make_two_body_propagator(epoch)
+    provider = RateLimitedYawSteeringProvider(
+        inertial_frame="gcrf",
+        reference_epoch=epoch,
+        finite_difference_step_s=0.05,
+    )
+
+    baseline = provider.get_actual_yaw_state(raw_propagator, 300.0)
+    provider.precompute_cache(12.0 * 3600.0, pv_provider=raw_propagator)
+    after_precompute = provider.get_actual_yaw_state(raw_propagator, 300.0)
+    np.testing.assert_allclose(after_precompute, baseline, rtol=0.0, atol=1.0e-14)
+    provider.precompute_cache(12.0 * 3600.0)
+
+    # Ensure non-float date input paths also work for precompute.
+    provider.precompute_cache(
+        provider.reference_epoch_orekit.shiftedBy(18.0 * 3600.0),
+        pv_provider=raw_propagator,
+    )
+
+    # Precompute remains a safe no-op when caching is disabled.
+    no_cache_provider = RateLimitedYawSteeringProvider(
+        inertial_frame="gcrf",
+        reference_epoch=epoch,
+        finite_difference_step_s=0.05,
+        enable_cache=False,
+    )
+    no_cache_provider.precompute_cache(6.0 * 3600.0, pv_provider=raw_propagator)
+
+
+def test_rate_limited_yaw_wrapper_normalizes_sun_axis_inputs() -> None:
     epoch = Time("2026-01-01T00:00:00", scale="utc")
     raw_propagator = _make_two_body_propagator(epoch)
     axis_string = RateLimitedYawSteeringProvider(
         inertial_frame="gcrf",
         reference_epoch=epoch,
-        phasing_axis="x",
+        sun_axis="x",
         finite_difference_step_s=0.05,
     )
     axis_vector = RateLimitedYawSteeringProvider(
         inertial_frame="gcrf",
         reference_epoch=epoch,
-        phasing_axis=[4.0, 0.0, 0.0],
+        sun_axis=[4.0, 0.0, 0.0],
         finite_difference_step_s=0.05,
     )
     axis_y = RateLimitedYawSteeringProvider(
         inertial_frame="gcrf",
         reference_epoch=epoch,
-        phasing_axis="y",
+        sun_axis="y",
         finite_difference_step_s=0.05,
     )
     axis_y_vector = RateLimitedYawSteeringProvider(
         inertial_frame="gcrf",
         reference_epoch=epoch,
-        phasing_axis=[0.0, 5.0, 0.0],
+        sun_axis=[0.0, 5.0, 0.0],
         finite_difference_step_s=0.05,
     )
     np.testing.assert_allclose(
@@ -727,16 +758,186 @@ def test_rate_limited_yaw_wrapper_normalizes_phasing_axis_inputs() -> None:
     )
 
 
-@pytest.mark.parametrize("phasing_axis", ["z", "-z", [0.0, 0.0, 1.0], [0.0, 0.0, -2.0]])
-def test_rate_limited_yaw_wrapper_rejects_phasing_axis_parallel_to_body_z(
-    phasing_axis,
-) -> None:
+def test_rate_limited_yaw_wrapper_default_axes_match_explicit_defaults() -> None:
     epoch = Time("2026-01-01T00:00:00", scale="utc")
-    with pytest.raises(ValueError, match="must not be parallel to body"):
+    raw_propagator = _make_two_body_propagator(epoch)
+
+    implicit_defaults = RateLimitedYawSteeringProvider(
+        inertial_frame="gcrf",
+        reference_epoch=epoch,
+        finite_difference_step_s=0.05,
+    )
+    explicit_defaults = RateLimitedYawSteeringProvider(
+        inertial_frame="gcrf",
+        reference_epoch=epoch,
+        nadir_axis="z",
+        sun_axis="x",
+        finite_difference_step_s=0.05,
+    )
+
+    np.testing.assert_allclose(
+        implicit_defaults.get_reference_yaw_state(raw_propagator, 120.0),
+        explicit_defaults.get_reference_yaw_state(raw_propagator, 120.0),
+        rtol=0.0,
+        atol=1.0e-12,
+    )
+    np.testing.assert_allclose(
+        implicit_defaults.get_actual_yaw_state(raw_propagator, 120.0),
+        explicit_defaults.get_actual_yaw_state(raw_propagator, 120.0),
+        rtol=0.0,
+        atol=1.0e-12,
+    )
+
+
+def test_rate_limited_yaw_wrapper_normalizes_nadir_axis_inputs() -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+    raw_propagator = _make_two_body_propagator(epoch)
+
+    axis_string = RateLimitedYawSteeringProvider(
+        inertial_frame="gcrf",
+        reference_epoch=epoch,
+        nadir_axis="x",
+        sun_axis="z",
+        finite_difference_step_s=0.05,
+    )
+    axis_vector = RateLimitedYawSteeringProvider(
+        inertial_frame="gcrf",
+        reference_epoch=epoch,
+        nadir_axis=[7.0, 0.0, 0.0],
+        sun_axis=[0.0, 0.0, 3.0],
+        finite_difference_step_s=0.05,
+    )
+    frame = raw_propagator.getFrame()
+    date0 = raw_propagator.getInitialState().getDate()
+    for dt_s in (0.0, 60.0, 120.0):
+        date = date0.shiftedBy(float(dt_s))
+        att_string = axis_string.to_orekit(pv_provider=raw_propagator).getAttitude(
+            raw_propagator,
+            date,
+            frame,
+        )
+        att_vector = axis_vector.to_orekit(pv_provider=raw_propagator).getAttitude(
+            raw_propagator,
+            date,
+            frame,
+        )
+        assert _rotation_distance(att_string.getRotation(), att_vector.getRotation()) <= 1.0e-12
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"nadir_axis": [0.0, 0.0, 0.0], "sun_axis": "x"},
+        {"nadir_axis": "x", "sun_axis": [0.0, 0.0, 0.0]},
+    ],
+)
+def test_rate_limited_yaw_wrapper_rejects_zero_axes(kwargs) -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+    with pytest.raises(ValueError, match="axis must be finite and non-zero"):
         RateLimitedYawSteeringProvider(
             inertial_frame="gcrf",
             reference_epoch=epoch,
-            phasing_axis=phasing_axis,
+            finite_difference_step_s=0.05,
+            **kwargs,
+        )
+
+
+def test_rate_limited_yaw_wrapper_supports_custom_body_axis_convention() -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+    raw_propagator = _make_two_body_propagator(epoch)
+
+    default_provider = RateLimitedYawSteeringProvider(
+        inertial_frame="gcrf",
+        reference_epoch=epoch,
+        finite_difference_step_s=0.05,
+    )
+    custom_provider = RateLimitedYawSteeringProvider(
+        inertial_frame="gcrf",
+        reference_epoch=epoch,
+        nadir_axis="x",
+        sun_axis="z",
+        finite_difference_step_s=0.05,
+    )
+    custom_provider.precompute_cache(240.0, pv_provider=raw_propagator)
+
+    frame = raw_propagator.getFrame()
+    date0 = raw_propagator.getInitialState().getDate()
+    rel0 = None
+    for dt_s in (0.0, 60.0, 120.0, 240.0):
+        date = date0.shiftedBy(float(dt_s))
+        default_att = default_provider.to_orekit(pv_provider=raw_propagator).getAttitude(
+            raw_propagator,
+            date,
+            frame,
+        )
+        custom_att = custom_provider.to_orekit(pv_provider=raw_propagator).getAttitude(
+            raw_propagator,
+            date,
+            frame,
+        )
+        rel = custom_att.getRotation().applyTo(default_att.getRotation().revert())
+        if rel0 is None:
+            rel0 = rel
+        else:
+            assert _rotation_distance(rel0, rel) <= 1.0e-12
+
+
+@pytest.mark.parametrize(
+    ("nadir_axis", "sun_axis"),
+    [
+        ("x", "x"),
+        ("z", "-z"),
+        ([0.0, 1.0, 0.0], [0.0, -3.0, 0.0]),
+    ],
+)
+def test_rate_limited_yaw_wrapper_rejects_parallel_nadir_and_sun_axes(
+    nadir_axis,
+    sun_axis,
+) -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+    with pytest.raises(ValueError, match="must not be parallel to nadir_axis"):
+        RateLimitedYawSteeringProvider(
+            inertial_frame="gcrf",
+            reference_epoch=epoch,
+            nadir_axis=nadir_axis,
+            sun_axis=sun_axis,
+            finite_difference_step_s=0.05,
+        )
+
+
+@pytest.mark.parametrize(
+    ("nadir_axis", "sun_axis"),
+    [
+        ("z", [1.0, 0.0, 1.0]),
+        ("x", [2.0, 1.0, 0.0]),
+        ([0.0, 1.0, 0.0], [1.0, 1.0, 0.0]),
+    ],
+)
+def test_rate_limited_yaw_wrapper_rejects_non_orthogonal_nadir_and_sun_axes(
+    nadir_axis,
+    sun_axis,
+) -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+    with pytest.raises(ValueError, match="must be orthogonal to nadir_axis"):
+        RateLimitedYawSteeringProvider(
+            inertial_frame="gcrf",
+            reference_epoch=epoch,
+            nadir_axis=nadir_axis,
+            sun_axis=sun_axis,
+            finite_difference_step_s=0.05,
+        )
+
+
+@pytest.mark.parametrize("sun_axis", ["z", "-z", [0.0, 0.0, 1.0], [0.0, 0.0, -2.0]])
+def test_rate_limited_yaw_wrapper_rejects_sun_axis_parallel_to_body_z(
+    sun_axis,
+) -> None:
+    epoch = Time("2026-01-01T00:00:00", scale="utc")
+    with pytest.raises(ValueError, match="must not be parallel"):
+        RateLimitedYawSteeringProvider(
+            inertial_frame="gcrf",
+            reference_epoch=epoch,
+            sun_axis=sun_axis,
             finite_difference_step_s=0.05,
         )
 

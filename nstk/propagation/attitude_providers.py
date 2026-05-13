@@ -143,34 +143,95 @@ def _coerce_vector3d(axis: OrekitVector3D | Sequence[float] | str | None) -> Ore
         }
         if key in aliases:
             return aliases[key]
-        raise ValueError("phasing_axis string must identify one of +/-x, +/-y, or +/-z")
+        raise ValueError("axis string must identify one of +/-x, +/-y, or +/-z")
 
     if hasattr(axis, "getX") and hasattr(axis, "getY") and hasattr(axis, "getZ"):
         norm = float(axis.getNorm())
         if not np.isfinite(norm) or norm <= 0.0:
-            raise ValueError("phasing_axis must be finite and non-zero")
+            raise ValueError("axis must be finite and non-zero")
         return axis.normalize()
 
     arr = np.asarray(axis, dtype=np.float64)
     if arr.shape != (3,):
-        raise ValueError("phasing_axis must be a length-3 vector")
+        raise ValueError("axis must be a length-3 vector")
     norm = float(np.linalg.norm(arr))
     if not np.isfinite(norm) or norm <= 0.0:
-        raise ValueError("phasing_axis must be finite and non-zero")
+        raise ValueError("axis must be finite and non-zero")
     arr = arr / norm
     return Vector3D(float(arr[0]), float(arr[1]), float(arr[2]))
 
 
-def _validate_yaw_steering_phasing_axis(axis: OrekitVector3D) -> OrekitVector3D:
-    """Validate phasing axis constraints required by Orekit ``YawSteering``."""
+def _validate_yaw_steering_axis_pair(
+    *,
+    nadir_axis: OrekitVector3D,
+    sun_axis: OrekitVector3D,
+) -> tuple[OrekitVector3D, OrekitVector3D]:
+    """Validate user nadir/sun body axes for yaw-steering convention mapping."""
 
-    xy_norm = float(np.hypot(float(axis.getX()), float(axis.getY())))
-    if xy_norm <= 1.0e-15:
-        raise ValueError(
-            "phasing_axis must not be parallel to body +/-Z for YawSteering; "
-            "use an axis with a non-zero X or Y component"
-        )
-    return axis
+    nadir_norm = float(nadir_axis.getNorm())
+    sun_norm = float(sun_axis.getNorm())
+    if not np.isfinite(nadir_norm) or nadir_norm <= 0.0:
+        raise ValueError("nadir_axis must be finite and non-zero")
+    if not np.isfinite(sun_norm) or sun_norm <= 0.0:
+        raise ValueError("sun_axis must be finite and non-zero")
+
+    nadir_unit = nadir_axis.normalize()
+    sun_unit = sun_axis.normalize()
+    cross_norm = float(nadir_unit.crossProduct(sun_unit).getNorm())
+    if cross_norm <= 1.0e-15:
+        raise ValueError("sun_axis must not be parallel to nadir_axis")
+    if abs(float(nadir_unit.dotProduct(sun_unit))) > 1.0e-12:
+        raise ValueError("sun_axis must be orthogonal to nadir_axis")
+
+    return nadir_unit, sun_unit
+
+
+def _build_axis_mapped_attitude_provider_proxy(
+    base_provider: Any,
+    canonical_to_body_rotation: Any,
+) -> Any:
+    """Wrap an Orekit provider with a fixed canonical-to-body axis mapping."""
+
+    import jpype
+
+    orbit_module._bind_orbit_java()
+    from org.hipparchus.geometry.euclidean.threed import Vector3D as _Vector3D  # type: ignore
+    from org.orekit.attitudes import Attitude as _Attitude  # type: ignore
+    from org.orekit.utils import AngularCoordinates as _AngularCoordinates  # type: ignore
+
+    axis_offset = _AngularCoordinates(canonical_to_body_rotation, _Vector3D.ZERO, _Vector3D.ZERO)
+    attitude_provider_iface = jpype.JClass("org.orekit.attitudes.AttitudeProvider")
+
+    @jpype.JImplements(attitude_provider_iface)
+    class _AxisMappedAttitudeProviderProxy:
+        def __init__(self, delegate: Any, offset: Any):
+            self._delegate = delegate
+            self._offset = offset
+
+        @jpype.JOverride
+        def getAttitude(self, *args):
+            attitude = self._delegate.getAttitude(*args)
+            # Keep field-attitude path delegated as-is; runtime propagators in
+            # NSTK use the regular Attitude path.
+            class_name = str(attitude.getClass().getName())
+            if "FieldAttitude" in class_name:
+                return attitude
+            mapped_orientation = self._offset.addOffset(attitude.getOrientation())
+            return _Attitude(
+                attitude.getDate(),
+                attitude.getReferenceFrame(),
+                mapped_orientation,
+            )
+
+        @jpype.JOverride
+        def getEventDetectors(self):
+            return self._delegate.getEventDetectors()
+
+        @jpype.JOverride
+        def getFieldEventDetectors(self, field):
+            return self._delegate.getFieldEventDetectors(field)
+
+    return _AxisMappedAttitudeProviderProxy(base_provider, axis_offset)
 
 
 def _coerce_attitude_provider(
@@ -330,14 +391,15 @@ class RateLimitedYawSteeringProvider:
     sun_provider : org.orekit.utils.ExtendedPositionProvider, optional
         Sun ephemeris provider used by Orekit ``YawSteering``. When omitted,
         Orekit ``CelestialBodyFactory.getSun()`` is used.
-    phasing_axis : Vector3D | sequence[float] | str | None, optional
-        Spacecraft body-fixed phasing axis used by Orekit ``YawSteering``.
-        Accepts an Orekit ``Vector3D``, a length-3 sequence of floats, or one
-        of ``"x"``, ``"y"``, ``"z"``, ``"-x"``, ``"-y"``, ``"-z"``.
-        The wrapper normalizes any non-zero user-supplied vector before
-        building the Java provider. Because Orekit ``YawSteering`` keeps body
-        ``+Z`` fixed, this axis must not be parallel to body ``+Z``/``-Z``.
-        ``None`` selects body ``+X``.
+    nadir_axis : Vector3D | sequence[float] | str | None, optional
+        Spacecraft body-fixed axis that should point to nadir for this
+        provider's user-facing body-axis convention. ``None`` selects body
+        ``+Z``.
+    sun_axis : Vector3D | sequence[float] | str | None, optional
+        Spacecraft body-fixed axis that should be Sun-constrained by Orekit
+        ``YawSteering`` for this provider's user-facing body-axis convention.
+        ``None`` selects body ``+X``. This axis must not be parallel to
+        ``nadir_axis`` and must be orthogonal to it.
     max_yaw_rate_rad_s : float
         Maximum allowed yaw-rate magnitude [rad/s].
     max_yaw_acceleration_rad_s2 : float
@@ -366,7 +428,9 @@ class RateLimitedYawSteeringProvider:
         Whether to enable deterministic fixed-grid checkpoint caching inside
         the Java provider. When enabled and the provider is bound to a global
         PV source, yaw integration no longer restarts from ``reference_epoch``
-        on every query.
+        on every query. Disabling this can substantially increase runtime for
+        long spans; it is mainly useful for memory-constrained workflows and
+        low-level debugging.
     cache_step_s : float, default 1.0
         Fixed checkpoint spacing [s] used by the deterministic cache lattice
         when ``enable_cache=True``. Smaller values trade memory and upfront
@@ -390,12 +454,17 @@ class RateLimitedYawSteeringProvider:
     This class implements NSTK's deterministic rate-limited yaw controller.
     If you instead want the ideal unrestricted geometric nadir/Sun law, use
     :func:`build_ideal_nadir_sun_constrained_attitude_provider`.
+
+    The user-facing body-axis convention is treated as right-handed by
+    construction: with normalized ``nadir_axis`` and ``sun_axis``, the third
+    body axis is defined from ``nadir_axis × sun_axis``.
     """
 
     inertial_frame: orbit_module.FrameLike = None
     earth_shape: OrekitBodyShape | None = None
     sun_provider: Any | None = None
-    phasing_axis: OrekitVector3D | Sequence[float] | str | None = None
+    nadir_axis: OrekitVector3D | Sequence[float] | str | None = None
+    sun_axis: OrekitVector3D | Sequence[float] | str | None = None
     max_yaw_rate_rad_s: float = 0.05
     max_yaw_acceleration_rad_s2: float = 0.01
     kp: float = 0.05
@@ -410,11 +479,14 @@ class RateLimitedYawSteeringProvider:
     simple_eop: bool = True
     _inertial_frame: Any = field(init=False, repr=False)
     _reference_epoch: Any = field(init=False, repr=False)
-    _phasing_axis: Any = field(init=False, repr=False)
+    _sun_axis: Any = field(init=False, repr=False)
+    _nadir_axis: Any = field(init=False, repr=False)
     _earth_shape: Any = field(init=False, repr=False)
     _sun_provider: Any = field(init=False, repr=False)
+    _axis_map_rotation: Any = field(init=False, repr=False)
+    _use_axis_map_proxy: bool = field(init=False, repr=False)
     _java_provider: Any = field(init=False, repr=False)
-    _bound_provider_cache: dict[int, Any] = field(init=False, repr=False)
+    _bound_provider_cache: dict[int, tuple[Any, Any, Any]] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Validate inputs and build the underlying Java provider."""
@@ -455,8 +527,9 @@ class RateLimitedYawSteeringProvider:
             simple_eop=bool(self.simple_eop),
         )
         self._reference_epoch = _coerce_absolute_date(self.reference_epoch)
-        self._phasing_axis = _validate_yaw_steering_phasing_axis(
-            _coerce_vector3d(self.phasing_axis)
+        self._nadir_axis, self._sun_axis = _validate_yaw_steering_axis_pair(
+            nadir_axis=_coerce_vector3d("z" if self.nadir_axis is None else self.nadir_axis),
+            sun_axis=_coerce_vector3d("x" if self.sun_axis is None else self.sun_axis),
         )
 
         resolved_earth_shape = self.earth_shape
@@ -470,23 +543,79 @@ class RateLimitedYawSteeringProvider:
         if resolved_sun_provider is None:
             resolved_sun_provider = CelestialBodyFactory.getSun()
         self._sun_provider = resolved_sun_provider
+        self._axis_map_rotation = None
+        self._use_axis_map_proxy = False
 
-        self._java_provider = _JavaRateLimitedYawSteeringProvider(
-            self._inertial_frame,
-            self._earth_shape,
-            self._sun_provider,
-            self._phasing_axis,
-            float(self.max_yaw_rate_rad_s),
-            float(self.max_yaw_acceleration_rad_s2),
-            float(self.kp),
-            float(self.kd),
-            self._reference_epoch,
-            float(self.initial_yaw_rad),
-            float(self.initial_yaw_rate_rad_s),
-            float(self.finite_difference_step_s),
-            bool(self.enable_cache),
-            float(self.cache_step_s),
-        )
+        try:
+            self._java_provider = _JavaRateLimitedYawSteeringProvider(
+                self._inertial_frame,
+                self._earth_shape,
+                self._sun_provider,
+                self._sun_axis,
+                self._nadir_axis,
+                float(self.max_yaw_rate_rad_s),
+                float(self.max_yaw_acceleration_rad_s2),
+                float(self.kp),
+                float(self.kd),
+                self._reference_epoch,
+                float(self.initial_yaw_rad),
+                float(self.initial_yaw_rate_rad_s),
+                float(self.finite_difference_step_s),
+                bool(self.enable_cache),
+                float(self.cache_step_s),
+            )
+        except TypeError:
+            # Older prebuilt Java artifacts may not expose the nadir-axis
+            # constructor overload yet.
+            if (
+                abs(float(self._nadir_axis.getX())) <= 1.0e-15
+                and abs(float(self._nadir_axis.getY())) <= 1.0e-15
+                and float(self._nadir_axis.getZ()) > 0.0
+            ):
+                self._java_provider = _JavaRateLimitedYawSteeringProvider(
+                    self._inertial_frame,
+                    self._earth_shape,
+                    self._sun_provider,
+                    self._sun_axis,
+                    float(self.max_yaw_rate_rad_s),
+                    float(self.max_yaw_acceleration_rad_s2),
+                    float(self.kp),
+                    float(self.kd),
+                    self._reference_epoch,
+                    float(self.initial_yaw_rad),
+                    float(self.initial_yaw_rate_rad_s),
+                    float(self.finite_difference_step_s),
+                    bool(self.enable_cache),
+                    float(self.cache_step_s),
+                )
+            else:
+                from org.hipparchus.geometry.euclidean.threed import Rotation as _Rotation  # type: ignore
+
+                body_to_canonical = _Rotation(
+                    self._nadir_axis,
+                    self._sun_axis,
+                    Vector3D.PLUS_K,
+                    Vector3D.PLUS_I,
+                )
+                canonical_sun_axis = body_to_canonical.applyTo(self._sun_axis)
+                self._java_provider = _JavaRateLimitedYawSteeringProvider(
+                    self._inertial_frame,
+                    self._earth_shape,
+                    self._sun_provider,
+                    canonical_sun_axis,
+                    float(self.max_yaw_rate_rad_s),
+                    float(self.max_yaw_acceleration_rad_s2),
+                    float(self.kp),
+                    float(self.kd),
+                    self._reference_epoch,
+                    float(self.initial_yaw_rad),
+                    float(self.initial_yaw_rate_rad_s),
+                    float(self.finite_difference_step_s),
+                    bool(self.enable_cache),
+                    float(self.cache_step_s),
+                )
+                self._axis_map_rotation = body_to_canonical.revert()
+                self._use_axis_map_proxy = True
         self._bound_provider_cache = {}
 
     @property
@@ -520,13 +649,25 @@ class RateLimitedYawSteeringProvider:
         """
 
         if pv_provider is None:
-            return self._java_provider
+            if not self._use_axis_map_proxy:
+                return self._java_provider
+            return _build_axis_mapped_attitude_provider_proxy(
+                self._java_provider,
+                self._axis_map_rotation,
+            )
         key = id(pv_provider)
-        bound = self._bound_provider_cache.get(key)
-        if bound is None:
-            bound = self._java_provider.withPVProvider(pv_provider)
-            self._bound_provider_cache[key] = bound
-        return bound
+        cached = self._bound_provider_cache.get(key)
+        if cached is None:
+            bound_raw = self._java_provider.withPVProvider(pv_provider)
+            bound = bound_raw
+            if self._use_axis_map_proxy:
+                bound = _build_axis_mapped_attitude_provider_proxy(
+                    bound_raw,
+                    self._axis_map_rotation,
+                )
+            self._bound_provider_cache[key] = (pv_provider, bound, bound_raw)
+            return bound
+        return cached[1]
 
     def get_actual_yaw_state(
         self,
@@ -609,6 +750,64 @@ class RateLimitedYawSteeringProvider:
             bound_provider.getReferenceYawState(pv_provider, query_date, query_frame).toArray(),
             dtype=np.float64,
         )
+
+    def precompute_cache(
+        self,
+        end_date: float | Time | OrekitAbsoluteDate,
+        pv_provider: Any | None = None,
+        *,
+        frame: orbit_module.FrameLike = None,
+    ) -> None:
+        """Precompute yaw checkpoints up to ``end_date`` for faster long runs.
+
+        Parameters
+        ----------
+        end_date : float | astropy.time.Time | AbsoluteDate
+            End date to precompute up to. A ``float`` is interpreted as seconds
+            since :attr:`reference_epoch_orekit`; an Astropy time or Orekit
+            ``AbsoluteDate`` is interpreted as an absolute date.
+        pv_provider : org.orekit.utils.PVCoordinatesProvider | None, optional
+            Global PV provider to use for deterministic yaw integration.
+            Passing the same propagator/orbit provider that will later evaluate
+            this attitude law is recommended. ``None`` precomputes for all
+            currently bound providers known to this wrapper.
+        frame : Frame | str | None, optional
+            Reference frame used for yaw reference evaluation. ``None`` uses
+            the wrapper's inertial frame.
+
+        Notes
+        -----
+        This method is effective only when caching is enabled and the provider
+        is bound to a global PV source via :meth:`to_orekit`/factory wiring.
+        Otherwise it is a safe no-op.
+        """
+
+        query_date = _coerce_provider_query_date(end_date, reference_epoch=self._reference_epoch)
+        query_frame = self._inertial_frame if frame is None else _resolve_inertial_frame(
+            frame,
+            iers_convention=self.iers_convention,
+            simple_eop=bool(self.simple_eop),
+        )
+        bound_pairs: list[tuple[Any, Any]]
+        if pv_provider is None:
+            bound_pairs = [(entry[0], entry[2]) for entry in self._bound_provider_cache.values()]
+            if not bound_pairs:
+                return
+        else:
+            cached = self._bound_provider_cache.get(id(pv_provider))
+            if cached is not None:
+                bound_pairs = [(cached[0], cached[2])]
+            else:
+                bound_pairs = [(pv_provider, self._java_provider.withPVProvider(pv_provider))]
+
+        for provider_for_eval, bound_provider in bound_pairs:
+            precompute_to_date = getattr(bound_provider, "precomputeToDate", None)
+            if callable(precompute_to_date):
+                precompute_to_date(provider_for_eval, query_date, query_frame)
+                continue
+
+            # Backward-compatible fallback for older Java artifacts.
+            bound_provider.getTrackedYawState(provider_for_eval, query_date, query_frame)
 
     @staticmethod
     def extract_relative_yaw(base_reference_to_body: Any, target_reference_to_body: Any) -> float:

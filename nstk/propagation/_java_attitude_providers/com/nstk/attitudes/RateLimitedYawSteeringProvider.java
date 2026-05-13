@@ -64,13 +64,13 @@ import org.orekit.utils.TimeStampedPVCoordinates;
  * </pre>
  *
  * <p>Yaw is defined as the relative rotation from the base nadir-pointing attitude into the actual
- * body attitude about the spacecraft body +Z axis. All rotations handled here use Orekit's usual
+ * body attitude about the internally canonical spacecraft body +Z axis. All rotations handled here use Orekit's usual
  * convention of mapping the reference frame into the body frame. The output attitude is therefore
  * reconstructed by composing:
  *
  * <ol>
  *   <li>the base nadir attitude, expressed as a reference-to-body rotation, and</li>
- *   <li>a yaw-only body-fixed offset about +Z, applied on top of that base attitude.</li>
+ *   <li>a yaw-only body-fixed offset about canonical +Z, applied on top of that base attitude.</li>
  * </ol>
  *
  * <p>If the current yaw rate already lies on a configured limit and the commanded acceleration
@@ -92,7 +92,7 @@ import org.orekit.utils.TimeStampedPVCoordinates;
  * from the relative angular coordinates only when that relative motion is consistent with a pure
  * yaw offset about body +Z. Otherwise the provider falls back to centered finite differences of
  * the extracted scalar yaw angle. The output attitude is reconstructed by composing the base
- * attitude with a yaw-only angular offset about the spacecraft body +Z axis using Orekit
+ * attitude with a yaw-only angular offset about the canonical spacecraft body +Z axis using Orekit
  * {@link AngularCoordinates} composition.
  */
 public class RateLimitedYawSteeringProvider implements AttitudeProvider {
@@ -105,6 +105,7 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
     private static final double DEFAULT_CACHE_STEP = 1.0;
     private static final double EPS_RATE_LIMIT = 1.0e-12;
     private static final double EPS_AXIS_NORM = 1.0e-15;
+    private static final double EPS_AXIS_ORTHOGONALITY = 1.0e-12;
     private static final double EPS_TIME = 1.0e-14;
     private static final double EPS_PURE_YAW_ROTATION = 1.0e-10;
     private static final double EPS_PURE_YAW_COMPONENT = 1.0e-10;
@@ -112,7 +113,10 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
     private final Frame inertialFrame;
     private final BodyShape bodyShape;
     private final ExtendedPositionProvider sunProvider;
-    private final Vector3D phasingAxis;
+    private final Vector3D nadirAxis;
+    private final Vector3D sunAxis;
+    private final Rotation canonicalToBodyRotation;
+    private final AngularCoordinates canonicalToBodyOffset;
     private final double maxYawRate;
     private final double maxYawAcceleration;
     private final double kp;
@@ -135,7 +139,7 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
      * @param inertialFrame pseudo-inertial frame used by the nadir and yaw-steering laws
      * @param bodyShape central-body shape used by the nadir-pointing base law
      * @param sunProvider Sun ephemeris provider used by Orekit yaw steering
-     * @param phasingAxis spacecraft body-fixed phasing axis used by Orekit yaw steering
+     * @param sunAxis spacecraft body-fixed sun axis used by Orekit yaw steering
      * @param maxYawRate maximum allowed yaw-rate magnitude in radians per second
      * @param maxYawAcceleration maximum allowed yaw-acceleration magnitude in radians per second squared
      * @param kp proportional gain for yaw-angle tracking
@@ -149,7 +153,7 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
             final Frame inertialFrame,
             final BodyShape bodyShape,
             final ExtendedPositionProvider sunProvider,
-            final Vector3D phasingAxis,
+            final Vector3D sunAxis,
             final double maxYawRate,
             final double maxYawAcceleration,
             final double kp,
@@ -162,7 +166,56 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
                 inertialFrame,
                 bodyShape,
                 sunProvider,
-                phasingAxis,
+                sunAxis,
+                maxYawRate,
+                maxYawAcceleration,
+                kp,
+                kd,
+                referenceEpoch,
+                psi0,
+                omega0,
+                finiteDifferenceStep,
+                DEFAULT_CACHE_ENABLED,
+                DEFAULT_CACHE_STEP);
+    }
+
+    /**
+     * Create a deterministic rate-limited yaw-steering provider with custom body-axis convention.
+     *
+     * @param inertialFrame pseudo-inertial frame used by the nadir and yaw-steering laws
+     * @param bodyShape central-body shape used by the nadir-pointing base law
+     * @param sunProvider Sun ephemeris provider used by Orekit yaw steering
+     * @param sunAxis spacecraft body-fixed axis that should be Sun-constrained
+     * @param nadirAxis spacecraft body-fixed axis that should point to nadir
+     * @param maxYawRate maximum allowed yaw-rate magnitude in radians per second
+     * @param maxYawAcceleration maximum allowed yaw-acceleration magnitude in radians per second squared
+     * @param kp proportional gain for yaw-angle tracking
+     * @param kd derivative gain for yaw-rate tracking
+     * @param referenceEpoch fixed integration reference epoch
+     * @param psi0 actual yaw angle at {@code referenceEpoch} in radians
+     * @param omega0 actual yaw rate at {@code referenceEpoch} in radians per second
+     * @param finiteDifferenceStep centered finite-difference step in seconds for reference derivatives
+     */
+    public RateLimitedYawSteeringProvider(
+            final Frame inertialFrame,
+            final BodyShape bodyShape,
+            final ExtendedPositionProvider sunProvider,
+            final Vector3D sunAxis,
+            final Vector3D nadirAxis,
+            final double maxYawRate,
+            final double maxYawAcceleration,
+            final double kp,
+            final double kd,
+            final AbsoluteDate referenceEpoch,
+            final double psi0,
+            final double omega0,
+            final double finiteDifferenceStep) {
+        this(
+                inertialFrame,
+                bodyShape,
+                sunProvider,
+                sunAxis,
+                nadirAxis,
                 maxYawRate,
                 maxYawAcceleration,
                 kp,
@@ -181,7 +234,7 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
      * @param inertialFrame pseudo-inertial frame used by the nadir and yaw-steering laws
      * @param bodyShape central-body shape used by the nadir-pointing base law
      * @param sunProvider Sun ephemeris provider used by Orekit yaw steering
-     * @param phasingAxis spacecraft body-fixed phasing axis used by Orekit yaw steering
+     * @param sunAxis spacecraft body-fixed sun axis used by Orekit yaw steering
      * @param maxYawRate maximum allowed yaw-rate magnitude in radians per second
      * @param maxYawAcceleration maximum allowed yaw-acceleration magnitude in radians per second squared
      * @param kp proportional gain for yaw-angle tracking
@@ -197,7 +250,7 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
             final Frame inertialFrame,
             final BodyShape bodyShape,
             final ExtendedPositionProvider sunProvider,
-            final Vector3D phasingAxis,
+            final Vector3D sunAxis,
             final double maxYawRate,
             final double maxYawAcceleration,
             final double kp,
@@ -212,7 +265,7 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
                 inertialFrame,
                 bodyShape,
                 sunProvider,
-                phasingAxis,
+                sunAxis,
                 maxYawRate,
                 maxYawAcceleration,
                 kp,
@@ -223,6 +276,61 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
                 finiteDifferenceStep,
                 cacheEnabled,
                 cacheStep,
+                Vector3D.PLUS_K,
+                null);
+    }
+
+    /**
+     * Create a deterministic rate-limited yaw-steering provider with deterministic checkpoint caching.
+     *
+     * @param inertialFrame pseudo-inertial frame used by the nadir and yaw-steering laws
+     * @param bodyShape central-body shape used by the nadir-pointing base law
+     * @param sunProvider Sun ephemeris provider used by Orekit yaw steering
+     * @param sunAxis spacecraft body-fixed axis that should be Sun-constrained
+     * @param nadirAxis spacecraft body-fixed axis that should point to nadir
+     * @param maxYawRate maximum allowed yaw-rate magnitude in radians per second
+     * @param maxYawAcceleration maximum allowed yaw-acceleration magnitude in radians per second squared
+     * @param kp proportional gain for yaw-angle tracking
+     * @param kd derivative gain for yaw-rate tracking
+     * @param referenceEpoch fixed integration reference epoch
+     * @param psi0 actual yaw angle at {@code referenceEpoch} in radians
+     * @param omega0 actual yaw rate at {@code referenceEpoch} in radians per second
+     * @param finiteDifferenceStep centered finite-difference step in seconds for reference derivatives
+     * @param cacheEnabled whether deterministic fixed-grid checkpoint caching is enabled
+     * @param cacheStep checkpoint spacing in seconds when caching is enabled
+     */
+    public RateLimitedYawSteeringProvider(
+            final Frame inertialFrame,
+            final BodyShape bodyShape,
+            final ExtendedPositionProvider sunProvider,
+            final Vector3D sunAxis,
+            final Vector3D nadirAxis,
+            final double maxYawRate,
+            final double maxYawAcceleration,
+            final double kp,
+            final double kd,
+            final AbsoluteDate referenceEpoch,
+            final double psi0,
+            final double omega0,
+            final double finiteDifferenceStep,
+            final boolean cacheEnabled,
+            final double cacheStep) {
+        this(
+                inertialFrame,
+                bodyShape,
+                sunProvider,
+                sunAxis,
+                maxYawRate,
+                maxYawAcceleration,
+                kp,
+                kd,
+                referenceEpoch,
+                psi0,
+                omega0,
+                finiteDifferenceStep,
+                cacheEnabled,
+                cacheStep,
+                nadirAxis,
                 null);
     }
 
@@ -230,7 +338,7 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
             final Frame inertialFrame,
             final BodyShape bodyShape,
             final ExtendedPositionProvider sunProvider,
-            final Vector3D phasingAxis,
+            final Vector3D sunAxis,
             final double maxYawRate,
             final double maxYawAcceleration,
             final double kp,
@@ -241,6 +349,7 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
             final double finiteDifferenceStep,
             final boolean cacheEnabled,
             final double cacheStep,
+            final Vector3D nadirAxis,
             final PVCoordinatesProvider trajectoryProvider) {
 
         if (inertialFrame == null) {
@@ -255,16 +364,36 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
         if (sunProvider == null) {
             throw new IllegalArgumentException("sunProvider must not be null");
         }
-        if (phasingAxis == null) {
-            throw new IllegalArgumentException("phasingAxis must be non-zero");
+        if (nadirAxis == null) {
+            throw new IllegalArgumentException("nadirAxis must be non-zero");
         }
-        if (phasingAxis.getNorm() <= EPS_AXIS_NORM) {
-            throw new IllegalArgumentException("phasingAxis must be non-zero");
+        if (nadirAxis.getNorm() <= EPS_AXIS_NORM) {
+            throw new IllegalArgumentException("nadirAxis must be non-zero");
         }
-        final Vector3D normalizedPhasingAxis = phasingAxis.normalize();
-        if (FastMath.hypot(normalizedPhasingAxis.getX(), normalizedPhasingAxis.getY()) <= EPS_AXIS_NORM) {
+        if (sunAxis == null) {
+            throw new IllegalArgumentException("sunAxis must be non-zero");
+        }
+        if (sunAxis.getNorm() <= EPS_AXIS_NORM) {
+            throw new IllegalArgumentException("sunAxis must be non-zero");
+        }
+        final Vector3D normalizedNadirAxis = nadirAxis.normalize();
+        final Vector3D normalizedSunAxis = sunAxis.normalize();
+        if (normalizedNadirAxis.crossProduct(normalizedSunAxis).getNorm() <= EPS_AXIS_NORM) {
+            throw new IllegalArgumentException("sunAxis must not be parallel to nadirAxis");
+        }
+        if (FastMath.abs(normalizedNadirAxis.dotProduct(normalizedSunAxis)) > EPS_AXIS_ORTHOGONALITY) {
+            throw new IllegalArgumentException("sunAxis must be orthogonal to nadirAxis");
+        }
+        final Rotation bodyToCanonicalRotation = new Rotation(
+                normalizedNadirAxis,
+                normalizedSunAxis,
+                Vector3D.PLUS_K,
+                Vector3D.PLUS_I);
+        final Rotation canonicalToBodyRotation = bodyToCanonicalRotation.revert();
+        final Vector3D canonicalSunAxis = bodyToCanonicalRotation.applyTo(normalizedSunAxis);
+        if (FastMath.hypot(canonicalSunAxis.getX(), canonicalSunAxis.getY()) <= EPS_AXIS_NORM) {
             throw new IllegalArgumentException(
-                    "phasingAxis must not be parallel to spacecraft +/-Z for YawSteering");
+                    "sunAxis must not be parallel to nadirAxis for YawSteering");
         }
         if (!Double.isFinite(maxYawRate) || maxYawRate < 0.0) {
             throw new IllegalArgumentException("maxYawRate must be finite and >= 0");
@@ -300,7 +429,10 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
         this.inertialFrame = inertialFrame;
         this.bodyShape = bodyShape;
         this.sunProvider = sunProvider;
-        this.phasingAxis = normalizedPhasingAxis;
+        this.nadirAxis = normalizedNadirAxis;
+        this.sunAxis = normalizedSunAxis;
+        this.canonicalToBodyRotation = canonicalToBodyRotation;
+        this.canonicalToBodyOffset = new AngularCoordinates(canonicalToBodyRotation, Vector3D.ZERO, Vector3D.ZERO);
         this.maxYawRate = maxYawRate;
         this.maxYawAcceleration = maxYawAcceleration;
         this.kp = kp;
@@ -310,7 +442,7 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
         this.omega0 = omega0;
         this.finiteDifferenceStep = finiteDifferenceStep;
         this.baseLaw = new NadirPointing(inertialFrame, bodyShape);
-        this.idealLaw = new YawSteering(inertialFrame, baseLaw, sunProvider, this.phasingAxis);
+        this.idealLaw = new YawSteering(inertialFrame, baseLaw, sunProvider, canonicalSunAxis);
         this.trajectoryProvider = sanitizeTrajectoryProvider(trajectoryProvider);
         this.cacheEnabled = cacheEnabled;
         this.cacheStep = cacheStep;
@@ -336,7 +468,7 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
                 inertialFrame,
                 bodyShape,
                 sunProvider,
-                phasingAxis,
+                sunAxis,
                 maxYawRate,
                 maxYawAcceleration,
                 kp,
@@ -347,6 +479,7 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
                 finiteDifferenceStep,
                 cacheEnabled,
                 cacheStep,
+                nadirAxis,
                 pvProvider);
     }
 
@@ -396,6 +529,41 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
             final AbsoluteDate date,
             final Frame frame) {
         return computeReferenceYawState(pvProv, date, frame == null ? inertialFrame : frame);
+    }
+
+    /**
+     * Precompute deterministic yaw checkpoints up to a target date.
+     *
+     * <p>This method is useful before long forward propagations. It front-loads checkpoint
+     * generation so later attitude calls can reuse cached yaw states with minimal additional
+     * integration.
+     *
+     * <p>When deterministic checkpoint caching is unavailable (for example because this provider
+     * is not bound to a global trajectory provider via {@link #withPVProvider(PVCoordinatesProvider)}),
+     * this method is a no-op.
+     *
+     * @param pvProv orbit/PV provider used by the underlying Orekit attitude laws
+     * @param targetDate end date up to which checkpoints should be prepared
+     * @param frame reference frame used for evaluating the base and ideal attitudes
+     */
+    public void precomputeToDate(
+            final PVCoordinatesProvider pvProv,
+            final AbsoluteDate targetDate,
+            final Frame frame) {
+
+        if (targetDate == null) {
+            throw new IllegalArgumentException("targetDate must not be null");
+        }
+
+        final Frame evaluationFrame = frame == null ? inertialFrame : frame;
+        if (!canUseCheckpointCache(evaluationFrame)) {
+            return;
+        }
+
+        final PVCoordinatesProvider effectivePvProvider = selectPvProvider(pvProv);
+        final double targetTime = targetDate.durationFrom(referenceEpoch);
+        final long targetIndex = selectCheckpointIndex(targetTime);
+        getOrCreateCheckpoint(effectivePvProvider, evaluationFrame, targetIndex);
     }
 
     /**
@@ -949,9 +1117,10 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
             final Attitude baseAttitude,
             final YawStateSnapshot yawState) {
 
-        // baseAttitude and the returned orientation both map the same reference frame into the
-        // spacecraft body frame. The yaw offset is therefore a body-fixed rotation applied on top
-        // of the base attitude, with positive yaw defined about body +Z.
+        // baseAttitude is expressed in the internal canonical body convention (+Z nadir). The yaw
+        // offset is therefore a canonical-body-fixed rotation applied on top of the base attitude,
+        // with positive yaw defined about canonical +Z. The final orientation is then mapped into
+        // the user-facing body-axis convention by the fixed canonicalToBody offset.
         final Rotation yawRotation =
                 new Rotation(Vector3D.PLUS_K, yawState.psi, RotationConvention.FRAME_TRANSFORM);
         final TimeStampedAngularCoordinates yawOffset = new TimeStampedAngularCoordinates(
@@ -959,7 +1128,9 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
                 yawRotation,
                 new Vector3D(0.0, 0.0, yawState.omega),
                 new Vector3D(0.0, 0.0, yawState.alpha));
-        return yawOffset.addOffset(baseAttitude.getOrientation());
+        final TimeStampedAngularCoordinates canonicalOrientation =
+                yawOffset.addOffset(baseAttitude.getOrientation());
+        return canonicalToBodyOffset.addOffset(canonicalOrientation);
     }
 
     private static long[] sortIndicesByTime(final double[] times) {
@@ -999,8 +1170,8 @@ public class RateLimitedYawSteeringProvider implements AttitudeProvider {
 
     private static double extractYawFromRelativeRotation(final Rotation relativeRotation) {
         // relativeRotation maps the base-attitude frame into the target-attitude frame. For a
-        // pure positive body +Z yaw offset, the body +X axis rotates toward +Y in the base frame,
-        // so the azimuth of body +X in the base-frame XY plane is the signed yaw angle.
+        // pure positive canonical +Z yaw offset, the canonical +X axis rotates toward +Y in the
+        // base frame, so the azimuth of canonical +X in the base-frame XY plane is the signed yaw angle.
         final Vector3D bodyXInBase = relativeRotation.applyInverseTo(Vector3D.PLUS_I);
         return FastMath.atan2(bodyXInBase.getY(), bodyXInBase.getX());
     }
