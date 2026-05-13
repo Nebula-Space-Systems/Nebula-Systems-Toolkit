@@ -23,6 +23,7 @@ _BUILD_DONE = False
 _BUILD_CLASSPATH: Optional[str] = None
 _JAVA_RELEASE = "17"
 _MAX_SUPPORTED_CLASS_MAJOR = 61
+_RUNTIME_CLASS_MAJOR_CACHE: Optional[int] = None
 
 
 def _source_file() -> Path:
@@ -59,6 +60,39 @@ def _javac_path() -> Optional[Path]:
     candidates.append(java_home / "bin" / exe)
 
     found = shutil.which("javac")
+    if found:
+        candidates.append(Path(found))
+
+    seen: set[Path] = set()
+    unique_candidates = []
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        unique_candidates.append(candidate)
+
+    for candidate in unique_candidates:
+        if candidate.exists() and _command_is_usable(candidate):
+            return candidate
+
+    for candidate in unique_candidates:
+        if candidate.exists():
+            return candidate
+
+    return None
+
+
+def _java_path() -> Optional[Path]:
+    exe = "java.exe" if os.name == "nt" else "java"
+    candidates: list[Path] = []
+    env_java_home = os.environ.get("JAVA_HOME", "").strip()
+    if env_java_home:
+        candidates.append(Path(env_java_home) / "bin" / exe)
+
+    java_home = Path(str(jdk4py.JAVA_HOME))
+    candidates.append(java_home / "bin" / exe)
+
+    found = shutil.which("java")
     if found:
         candidates.append(Path(found))
 
@@ -149,6 +183,57 @@ def _needs_rebuild(source: Path, class_file: Path, prebuilt: Path) -> bool:
         return True
 
 
+def _parse_java_feature_version(version_output: str) -> Optional[int]:
+    text = str(version_output).strip()
+    if not text:
+        return None
+
+    # Typical output begins with: openjdk version "17.0.12" ...
+    quote_start = text.find('"')
+    if quote_start >= 0:
+        quote_end = text.find('"', quote_start + 1)
+        if quote_end > quote_start:
+            token = text[quote_start + 1 : quote_end]
+            parts = token.split(".")
+            try:
+                if parts and parts[0] == "1" and len(parts) > 1:
+                    return int(parts[1])
+                if parts:
+                    return int(parts[0])
+            except Exception:
+                return None
+    return None
+
+
+def _runtime_max_supported_class_major() -> int:
+    global _RUNTIME_CLASS_MAJOR_CACHE
+    if _RUNTIME_CLASS_MAJOR_CACHE is not None:
+        return _RUNTIME_CLASS_MAJOR_CACHE
+
+    java = _java_path()
+    if java is None:
+        _RUNTIME_CLASS_MAJOR_CACHE = _MAX_SUPPORTED_CLASS_MAJOR
+        return _RUNTIME_CLASS_MAJOR_CACHE
+
+    try:
+        probe = subprocess.run(
+            [str(java), "-version"],
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        feature = _parse_java_feature_version((probe.stdout or "") + "\n" + (probe.stderr or ""))
+        if feature is None:
+            _RUNTIME_CLASS_MAJOR_CACHE = _MAX_SUPPORTED_CLASS_MAJOR
+        else:
+            # Java class major version mapping is linear for modern releases: major = feature + 44.
+            _RUNTIME_CLASS_MAJOR_CACHE = int(feature) + 44
+    except Exception:
+        _RUNTIME_CLASS_MAJOR_CACHE = _MAX_SUPPORTED_CLASS_MAJOR
+    return _RUNTIME_CLASS_MAJOR_CACHE
+
+
 def _read_class_major_from_bytes(data: bytes) -> Optional[int]:
     if len(data) < 8:
         return None
@@ -177,13 +262,18 @@ def _read_class_major_from_jar(jar_path: Path) -> Optional[int]:
 
 
 def _has_incompatible_artifact(class_file: Path, prebuilt: Path) -> bool:
+    max_supported = _runtime_max_supported_class_major()
     for major in (
         _read_class_major_from_jar(prebuilt),
         _read_class_major_from_class_file(class_file),
     ):
-        if major is not None and major > _MAX_SUPPORTED_CLASS_MAJOR:
+        if major is not None and major > max_supported:
             return True
     return False
+
+
+def _is_class_major_compatible(major: Optional[int]) -> bool:
+    return major is not None and major <= _runtime_max_supported_class_major()
 
 
 def _create_jar_with_zipfile(classes_dir: Path, jar_path: Path) -> None:
@@ -234,10 +324,19 @@ def prepare_attitude_providers_classpath() -> Optional[str]:
                         RuntimeWarning,
                     )
                 elif has_incompatible_artifact:
+                    max_supported = _runtime_max_supported_class_major()
                     warnings.warn(
                         "NSTK Java attitude provider artifact is compiled for a newer Java runtime "
-                        f"(class major > {_MAX_SUPPORTED_CLASS_MAJOR}). Install a Java 17-compatible "
+                        f"(class major > {max_supported}). Install a Java-compatible "
                         "build toolchain to rebuild it.",
+                        RuntimeWarning,
+                    )
+                    prebuilt_major = _read_class_major_from_jar(prebuilt)
+                    class_major = _read_class_major_from_class_file(class_file)
+                    warnings.warn(
+                        "NSTK Java attitude providers cannot be rebuilt and the bundled artifact "
+                        f"is incompatible with this JVM. JAVA_HOME={os.environ.get('JAVA_HOME','')!r}, "
+                        f"javac={str(javac)!r}, prebuilt_major={prebuilt_major}, class_major={class_major}.",
                         RuntimeWarning,
                     )
             elif can_compile and jars_glob and needs_rebuild:
@@ -284,10 +383,22 @@ def prepare_attitude_providers_classpath() -> Optional[str]:
                 f"Failed to build NSTK Java attitude providers: {exc}",
                 RuntimeWarning,
             )
+            prebuilt_major = _read_class_major_from_jar(prebuilt)
+            class_major = _read_class_major_from_class_file(class_file)
+            warnings.warn(
+                "NSTK Java attitude providers fallback artifact status after build failure: "
+                f"prebuilt_major={prebuilt_major}, class_major={class_major}.",
+                RuntimeWarning,
+            )
 
-        if prebuilt.exists():
+        # Never expose an incompatible classpath entry. Prefer prebuilt JAR when
+        # it is compatible; otherwise fall back to compiled classes directory if
+        # those classes are compatible.
+        prebuilt_major = _read_class_major_from_jar(prebuilt)
+        class_major = _read_class_major_from_class_file(class_file)
+        if prebuilt.exists() and _is_class_major_compatible(prebuilt_major):
             _BUILD_CLASSPATH = str(prebuilt)
-        elif class_file.exists():
+        elif class_file.exists() and _is_class_major_compatible(class_major):
             _BUILD_CLASSPATH = str(classes_dir)
         else:
             _BUILD_CLASSPATH = None
@@ -302,4 +413,18 @@ def get_rate_limited_yaw_provider_class():
     from nstk._orekit_runtime import ensure_orekit_runtime
 
     ensure_orekit_runtime()
-    return jpype.JClass(JAVA_RATE_LIMITED_YAW_PROVIDER_CLASS)
+    try:
+        return jpype.JClass(JAVA_RATE_LIMITED_YAW_PROVIDER_CLASS)
+    except Exception as exc:
+        prebuilt = _prebuilt_jar()
+        classes_dir = _classes_dir()
+        class_file = _class_file(classes_dir)
+        prebuilt_major = _read_class_major_from_jar(prebuilt)
+        class_major = _read_class_major_from_class_file(class_file)
+        raise RuntimeError(
+            "Failed to load RateLimitedYawSteeringProvider Java class. "
+            f"Detected bytecode versions: prebuilt_major={prebuilt_major}, "
+            f"classes_major={class_major}, JAVA_HOME={os.environ.get('JAVA_HOME','')!r}. "
+            "This usually means the bundled JAR is too new for the active JVM and no "
+            "compatible rebuild artifact was produced."
+        ) from exc

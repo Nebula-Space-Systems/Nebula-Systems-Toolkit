@@ -58,6 +58,8 @@ def test_attitude_provider_bridge_uses_prebuilt_jar_without_warning_when_javac_u
     monkeypatch.setattr(attitude_bridge, "_command_is_usable", lambda path: False)
     monkeypatch.setattr(attitude_bridge, "_needs_rebuild", lambda source, class_file, prebuilt: True)
     monkeypatch.setattr(attitude_bridge, "_has_incompatible_artifact", lambda class_file, prebuilt: False)
+    monkeypatch.setattr(attitude_bridge, "_read_class_major_from_jar", lambda jar_path: 61)
+    monkeypatch.setattr(attitude_bridge, "_read_class_major_from_class_file", lambda class_file: 61)
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -133,6 +135,7 @@ def test_attitude_provider_bridge_rebuilds_when_prebuilt_jar_is_newer_java(
 ) -> None:
     monkeypatch.setattr(attitude_bridge, "_BUILD_DONE", False)
     monkeypatch.setattr(attitude_bridge, "_BUILD_CLASSPATH", None)
+    monkeypatch.setattr(attitude_bridge, "_runtime_max_supported_class_major", lambda: 61)
 
     source = tmp_path / "RateLimitedYawSteeringProvider.java"
     source.write_text("class X {}", encoding="utf-8")
@@ -161,6 +164,10 @@ def test_attitude_provider_bridge_rebuilds_when_prebuilt_jar_is_newer_java(
 
     def fake_run(cmd, **kwargs):
         compile_calls.append(cmd)
+        # Simulate a successful javac rewrite to Java 17 bytecode.
+        if str(cmd[0]).endswith("javac"):
+            class_file.parent.mkdir(parents=True, exist_ok=True)
+            class_file.write_bytes(b"\xca\xfe\xba\xbe\x00\x00\x00\x3d")
 
         class Completed:
             returncode = 0
@@ -170,9 +177,14 @@ def test_attitude_provider_bridge_rebuilds_when_prebuilt_jar_is_newer_java(
         return Completed()
 
     monkeypatch.setattr(attitude_bridge.subprocess, "run", fake_run)
-    monkeypatch.setattr(
-        attitude_bridge, "_create_jar_with_zipfile", lambda classes, jar: jar.write_bytes(b"jar")
-    )
+    def _fake_create_jar_with_zipfile(classes, jar):
+        with zipfile.ZipFile(jar, mode="w") as zf:
+            zf.writestr(
+                "com/nstk/attitudes/RateLimitedYawSteeringProvider.class",
+                b"\xca\xfe\xba\xbe\x00\x00\x00\x3d",
+            )
+
+    monkeypatch.setattr(attitude_bridge, "_create_jar_with_zipfile", _fake_create_jar_with_zipfile)
 
     classpath = attitude_bridge.prepare_attitude_providers_classpath()
 

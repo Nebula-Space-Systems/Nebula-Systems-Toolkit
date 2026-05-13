@@ -57,6 +57,34 @@ jobs:
       - name: Install package and test dependencies
         run: python -m pip install ".[test]"
 
+      - name: Verify NSTK Java attitude bridge is JVM-compatible
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os
+          import zipfile
+          from pathlib import Path
+
+          import nstk.propagation._attitude_provider_java as bridge
+
+          prebuilt = Path(bridge._prebuilt_jar())
+          with zipfile.ZipFile(prebuilt, mode="r") as zf:
+              major = int.from_bytes(
+                  zf.read("com/nstk/attitudes/RateLimitedYawSteeringProvider.class")[6:8],
+                  byteorder="big",
+                  signed=False,
+              )
+          print(f"prebuilt attitude class major={major}")
+          print(f"JAVA_HOME={os.environ.get('JAVA_HOME','')}")
+
+          cp = bridge.prepare_attitude_providers_classpath()
+          print(f"resolved classpath={cp}")
+          if not cp:
+              raise SystemExit(
+                  "NSTK attitude bridge classpath could not be resolved to a compatible artifact."
+              )
+          PY
+
       - name: Run test suite
         run: pytest
 
